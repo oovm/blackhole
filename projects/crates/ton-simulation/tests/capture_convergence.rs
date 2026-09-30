@@ -48,4 +48,13 @@ fn capture_boundary_radius_stable_across_step_halving() {
         r0,
         r2
     );
+    let analytic = samples[0].analytic_shadow_radius_ndc;
+    let analytic_drift = (r0 - analytic).abs() / analytic.max(1e-6);
+    assert!(
+        analytic_drift < 0.35,
+        "numerical boundary {:.4} vs analytic {:.4} drift {:.1}% (integrator still converging)",
+        r0,
+        analytic,
+        analytic_drift * 100.0
+    );
 }

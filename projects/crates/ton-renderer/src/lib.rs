@@ -7,6 +7,7 @@ mod framebuffer;
 mod kernel;
 mod post;
 mod renderer;
+mod shadow_overlay;
 mod sky;
 
 pub use blueprint::{build_frame_graph, build_frame_graph_with_post, trace_kernel_for};
@@ -18,6 +19,7 @@ pub use post::{
 pub use renderer::{
     default_camera, default_integrator, RenderConfig, RenderMode, RenderOutput, Renderer,
 };
+pub use shadow_overlay::{analytic_shadow_radius_ndc, draw_analytic_shadow_ring};
 pub use ton_geodesic::TerminationHistogram;
 pub use sky::sky_color;
 pub use ucf_ir::Graph;

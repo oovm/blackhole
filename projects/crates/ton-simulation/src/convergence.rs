@@ -1,6 +1,7 @@
 //! 捕获轮廓步长收敛验收（无盘、无星空、无后处理）。
 
 use ton_geodesic::{trace_ray_diagnostic, RayTermination, TraceConfig};
+use ton_renderer::analytic_shadow_radius_ndc;
 use ton_types::{BlackHole, Camera, IntegratorKind, Vec3};
 
 /// 单档步长的捕获统计。
@@ -13,6 +14,8 @@ pub struct CaptureStepSample {
     pub failure_fraction: f64,
     /// 捕获/逃逸边界像素到图像中心的平均归一化半径（0..1）。
     pub mean_boundary_radius: f64,
+    /// 解析阴影视角半径（NDC，与 `mean_boundary_radius` 同尺度）。
+    pub analytic_shadow_radius_ndc: f64,
 }
 
 /// 无盘捕获轮廓：在多个步长下统计终止分布与边界半径。
@@ -66,9 +69,7 @@ fn sample_capture_at_step(
         }
     }
 
-    let cx = width as f64 * 0.5;
-    let cy = height as f64 * 0.5;
-    let scale = (cx * cx + cy * cy).sqrt().max(1.0);
+    let aspect = width as f64 / height as f64;
     for y in 1..height - 1 {
         for x in 1..width - 1 {
             let idx = y as usize * width as usize + x as usize;
@@ -82,15 +83,16 @@ fn sample_capture_at_step(
                 terminations[idx + width as usize],
             ];
             if neighbors.iter().any(|t| *t == RayTermination::Escaped) {
-                let dx = x as f64 - cx;
-                let dy = y as f64 - cy;
-                boundary_r_sum += (dx * dx + dy * dy).sqrt() / scale;
+                let u = (x as f64 / width as f64 * 2.0 - 1.0) * aspect;
+                let v = 1.0 - y as f64 / height as f64 * 2.0;
+                boundary_r_sum += (u * u + v * v).sqrt();
                 boundary_n += 1;
             }
         }
     }
 
     let total = (width * height) as f64;
+    let observer_distance = camera.position.length();
     CaptureStepSample {
         step_size: trace.step_size,
         max_steps: trace.max_steps,
@@ -102,6 +104,11 @@ fn sample_capture_at_step(
         } else {
             0.0
         },
+        analytic_shadow_radius_ndc: analytic_shadow_radius_ndc(
+            bh,
+            observer_distance,
+            camera.fov_y,
+        ),
     }
 }
 

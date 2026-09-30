@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use image::{ImageBuffer, Rgba};
-use ton_simulation::{RenderMode, Scene};
+use ton_simulation::{capture_convergence_samples, RenderMode, Scene};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Vec3};
 
 fn main() -> ExitCode {
@@ -24,6 +24,9 @@ fn main() -> ExitCode {
     let ucf_tone = args.iter().any(|a| a == "--ucf-tone");
     let bloom = args.iter().any(|a| a == "--bloom");
     let strict = args.iter().any(|a| a == "--strict");
+    let convergence = args.iter().any(|a| a == "--convergence");
+    let overlay_shadow = args.iter().any(|a| a == "--overlay-shadow");
+    let hdr_linear = args.iter().any(|a| a == "--hdr-linear");
     let camera = parse_camera(&args, mass, spin);
     let render_mode = parse_render_mode(&args);
     let step_size = parse_f64_arg(&args, "--step-size", 0.08);
@@ -42,7 +45,8 @@ fn main() -> ExitCode {
         .with_resolution(width, height)
         .with_render_mode(render_mode)
         .with_step_size(step_size)
-        .with_post_bloom(bloom);
+        .with_post_bloom(bloom)
+        .with_overlay_analytic_shadow(overlay_shadow);
 
     if let Some(steps) = max_steps {
         builder = builder.with_max_steps(steps);
@@ -54,6 +58,11 @@ fn main() -> ExitCode {
 
     let scene = builder.build();
     let trace = scene.trace;
+
+    if convergence {
+        run_convergence_report(bh, camera, width, height, integrator);
+        return ExitCode::SUCCESS;
+    }
 
     eprintln!(
         "TON view: mode={}, integrator={}, disk={}, camera={}, {}x{} → {}",
@@ -126,7 +135,11 @@ fn main() -> ExitCode {
         }
     }
 
-    let rgba = fb.to_rgba8();
+    let rgba = if hdr_linear {
+        fb.to_rgba8_linear()
+    } else {
+        fb.to_rgba8()
+    };
     let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
         ImageBuffer::from_raw(width, height, rgba).expect("buffer size mismatch");
     img.save(&out).expect("failed to write PNG");
@@ -209,6 +222,7 @@ fn parse_disk_model(args: &[String]) -> DiskModelKind {
         .map(|s| s.as_str())
     {
         Some("fbm") => DiskModelKind::ProceduralFbm,
+        Some("solid") => DiskModelKind::SolidUniform,
         Some("none") => DiskModelKind::None,
         _ => DiskModelKind::NovikovThorneThin,
     }
@@ -228,6 +242,41 @@ fn disk_model_label(k: DiskModelKind) -> &'static str {
         DiskModelKind::None => "none",
         DiskModelKind::NovikovThorneThin => "novikov",
         DiskModelKind::ProceduralFbm => "fbm",
+        DiskModelKind::SolidUniform => "solid",
+    }
+}
+
+fn run_convergence_report(
+    bh: BlackHole,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    integrator: IntegratorKind,
+) {
+    eprintln!("capture convergence (no disk, no post):");
+    let samples = capture_convergence_samples(
+        bh,
+        camera,
+        width,
+        height,
+        integrator,
+        &[0.08, 0.04, 0.02, 0.01],
+    );
+    eprintln!(
+        "  {:>8} {:>8} {:>8} {:>8} {:>8} {:>10}",
+        "step", "max_steps", "captured", "escaped", "failed", "boundary_r", "analytic_r"
+    );
+    for s in samples {
+        eprintln!(
+            "  {:8.4} {:8} {:7.2}% {:7.2}% {:7.2}% {:10.5} {:10.5}",
+            s.step_size,
+            s.max_steps,
+            s.captured_fraction * 100.0,
+            s.escaped_fraction * 100.0,
+            s.failure_fraction * 100.0,
+            s.mean_boundary_radius,
+            s.analytic_shadow_radius_ndc
+        );
     }
 }
 
