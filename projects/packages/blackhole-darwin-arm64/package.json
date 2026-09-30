@@ -10,13 +10,18 @@
     "cpu": [
         "arm64"
     ],
-    "main": "ton.darwin-arm64.node",
+    "main": "lib/ton.darwin-arm64.node",
+    "exports": {
+        ".": "./lib/ton.darwin-arm64.node",
+        "./ton.darwin-arm64.node": "./lib/ton.darwin-arm64.node"
+    },
     "files": [
-        "ton.darwin-arm64.node",
+        "lib/ton.darwin-arm64.node",
         "readme.md"
     ],
     "scripts": {
-        "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release --target aarch64-apple-darwin && node ./scripts/copy-from-cargo.mjs"
+        "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release --target aarch64-apple-darwin && node ./scripts/copy-from-cargo.mjs",
+        "copy:napi": "node ./scripts/copy-from-cargo.mjs"
     },
     "publish": false
 }

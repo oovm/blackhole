@@ -10,13 +10,18 @@
     "cpu": [
         "arm64"
     ],
-    "main": "ton.linux-arm64-gnu.node",
+    "main": "lib/ton.linux-arm64-gnu.node",
+    "exports": {
+        ".": "./lib/ton.linux-arm64-gnu.node",
+        "./ton.linux-arm64-gnu.node": "./lib/ton.linux-arm64-gnu.node"
+    },
     "files": [
-        "ton.linux-arm64-gnu.node",
+        "lib/ton.linux-arm64-gnu.node",
         "readme.md"
     ],
     "scripts": {
-        "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release --target aarch64-unknown-linux-gnu && node ./scripts/copy-from-cargo.mjs"
+        "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release --target aarch64-unknown-linux-gnu && node ./scripts/copy-from-cargo.mjs",
+        "copy:napi": "node ./scripts/copy-from-cargo.mjs"
     },
     "publish": false
 }
