@@ -36,10 +36,24 @@ ton-view           ← CLI 二进制
 ```text
 blackhole/
   projects/
-    crates/      # ton-* Rust 算法
-    examples/    # 可运行示例
-    packages/    # 前端 / CLI（可选，后续接 WebGPU）
+    bindings/ton-wasm/   # Wasm cdylib（ton-sim + UCF 探针）
+    crates/              # ton-* Rust 算法
+    examples/            # 可运行示例
+    packages/
+      blackhole/         # @ton/blackhole → lib/（TS 加载 + WebGPU 呈现）
+      homepage/          # Vite 黑洞可视化演示
 ```
+
+## Web 演示
+
+```bash
+pnpm install
+pnpm run build:wasm
+pnpm run build:ts
+pnpm run dev:homepage
+```
+
+浏览器打开后点击「渲染一帧」。物理在 `ton-sim` CPU 测地线；UCF 应用契约探针链入同模块 wasm；上屏经 WebGPU（失败则 canvas 2D）。
 
 设计文档与路线图见工作区 `规划设计/` 与 `决策和进度表/`（不进本仓 README 外链）。
 

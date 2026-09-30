@@ -25,5 +25,6 @@ dist/
 *.txt
 *.log
 
-# Database schemas (contains connection info and passwords)
-schemas.yaml
+
+# Renderer
+*.png
