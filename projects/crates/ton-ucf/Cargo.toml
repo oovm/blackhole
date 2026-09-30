@@ -1,0 +1,18 @@
+[package]
+name = "ton-ucf"
+description = "TON 黑洞单帧 UCF 任务图蓝图（IntegratorKind × DiskModelKind）"
+readme = "readme.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+keywords = ["blackhole", "ucf", "ton"]
+categories = ["science", "simulation"]
+
+[dependencies]
+ton-types = { workspace = true }
+ucf-ir = { path = "../../../../ucf.rs/projects/crates/ucf-ir" }
+ucf-types = { path = "../../../../ucf.rs/projects/crates/ucf-types" }
+
+[dev-dependencies]

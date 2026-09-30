@@ -7,6 +7,7 @@ members = [
     "projects/crates/ton-disk",
     "projects/crates/ton-render",
     "projects/crates/ton-simlate",
+    "projects/crates/ton-ucf",
     "projects/crates/ton-view",
     "projects/crates/ton-wasm",
     "projects/crates/ton-napi",
@@ -47,6 +48,7 @@ ton-geodesic = { path = "projects/crates/ton-geodesic", version = "0.1.0" }
 ton-disk = { path = "projects/crates/ton-disk", version = "0.1.0" }
 ton-render = { path = "projects/crates/ton-render", version = "0.1.0" }
 ton-sim = { path = "projects/crates/ton-simlate", version = "0.1.0" }
+ton-ucf = { path = "projects/crates/ton-ucf", version = "0.1.0" }
 napi = { version = "3.12.1", default-features = true, features = ["napi4"] }
 napi-derive = "3.6.3"
 
