@@ -348,7 +348,7 @@ where
             radiance = radiance.add(sample.radiance.scale(transmittance));
             transmittance *= (1.0 - sample.absorption).clamp(0.0, 1.0);
             disk_hits += 1;
-            sample.absorption >= 0.999
+            sample.stops_integration()
         },
     );
 

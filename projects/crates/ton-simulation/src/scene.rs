@@ -21,6 +21,7 @@ pub struct Scene {
     /// UCF 帧图是否插入 `ton_bloom` 任务。
     pub post_bloom: bool,
     pub render_mode: RenderMode,
+    pub overlay_analytic_shadow: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,7 @@ pub struct SceneBuilder {
     disk_model: DiskModelKind,
     post_bloom: bool,
     render_mode: RenderMode,
+    overlay_analytic_shadow: bool,
 }
 
 impl SceneBuilder {
@@ -50,7 +52,13 @@ impl SceneBuilder {
             disk_model: DiskModelKind::NovikovThorneThin,
             post_bloom: false,
             render_mode: RenderMode::Beauty,
+            overlay_analytic_shadow: false,
         }
+    }
+
+    pub fn with_overlay_analytic_shadow(mut self, enabled: bool) -> Self {
+        self.overlay_analytic_shadow = enabled;
+        self
     }
 
     pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
@@ -74,11 +82,17 @@ impl SceneBuilder {
     }
 
     pub fn with_default_disk(mut self) -> Self {
-        self.disk = Some(AccretionDisk::new(
-            self.black_hole,
-            DiskConfig::schwarzschild_default(self.black_hole),
-        ));
+        self.disk = Some(self.default_disk_for_model());
         self
+    }
+
+    fn default_disk_for_model(&self) -> AccretionDisk {
+        let config = if self.disk_model == DiskModelKind::SolidUniform {
+            DiskConfig::solid_lensing_test(self.black_hole)
+        } else {
+            DiskConfig::schwarzschild_default(self.black_hole)
+        };
+        AccretionDisk::new(self.black_hole, config)
     }
 
     pub fn with_camera(mut self, camera: Camera) -> Self {
@@ -113,10 +127,7 @@ impl SceneBuilder {
 
     pub fn build(self) -> Scene {
         let disk = if self.disk_model != DiskModelKind::None && self.disk.is_none() {
-            Some(AccretionDisk::new(
-                self.black_hole,
-                DiskConfig::schwarzschild_default(self.black_hole),
-            ))
+            Some(self.default_disk_for_model())
         } else {
             self.disk
         };
@@ -131,6 +142,7 @@ impl SceneBuilder {
             disk_model: self.disk_model,
             post_bloom: self.post_bloom,
             render_mode: self.render_mode,
+            overlay_analytic_shadow: self.overlay_analytic_shadow,
         }
     }
 }
@@ -167,6 +179,7 @@ impl Scene {
             disk_model: self.disk_model,
             mode: self.render_mode,
             exposure: DEFAULT_EXPOSURE,
+            overlay_analytic_shadow: self.overlay_analytic_shadow,
         })
         .render_with_histogram()
     }

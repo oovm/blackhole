@@ -54,6 +54,8 @@ pub enum DiskModelKind {
     NovikovThorneThin = 1,
     /// 程序化 FBM 流动盘。
     ProceduralFbm = 2,
+    /// 纯色不透明薄盘（透镜验收：无纹理、无透明累积）。
+    SolidUniform = 3,
 }
 
 impl DiskModelKind {
@@ -68,6 +70,7 @@ impl DiskModelKind {
             0 => Some(Self::None),
             1 => Some(Self::NovikovThorneThin),
             2 => Some(Self::ProceduralFbm),
+            3 => Some(Self::SolidUniform),
             _ => None,
         }
     }

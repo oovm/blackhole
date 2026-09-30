@@ -61,6 +61,29 @@ fn ucf_cpu_path_runs_full_chain() {
 }
 
 #[test]
+fn solid_uniform_disk_renders_opaque_band() {
+    let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+        .with_default_disk()
+        .with_integrator(IntegratorKind::Geodesic3d)
+        .with_disk_model(DiskModelKind::SolidUniform)
+        .with_resolution(96, 54)
+        .build();
+    let output = scene.render_frame_with_histogram();
+    let hdr_disk = output
+        .framebuffer
+        .pixels
+        .iter()
+        .filter(|p| p.r > 1.5 && p.g > 0.8 && p.b < 1.2)
+        .count();
+    let rgba = output.framebuffer.to_rgba8();
+    let warm = count_pixels(&rgba, |r, g, b| r > g && g > b && r > 80);
+    let dark = count_pixels(&rgba, |r, g, b| (r as u16 + g as u16 + b as u16) < 15);
+    assert!(hdr_disk > 150, "expected linear HDR disk hits, got {hdr_disk}");
+    assert!(warm > 100, "expected warm disk after tone map, got {warm}");
+    assert!(dark > 50, "expected shadow pixels, got {dark}");
+}
+
+#[test]
 fn sem_classical_fbm_has_variation() {
     let scene = Scene::builder(BlackHole::schwarzschild(1.0))
         .with_default_disk()

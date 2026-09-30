@@ -7,6 +7,7 @@ use ton_types::{BlackHole, Camera, DiskFrame, DiskModelKind, IntegratorKind, Rgb
 
 use crate::framebuffer::{Framebuffer, FramebufferEncoding};
 use crate::post::DEFAULT_EXPOSURE;
+use crate::shadow_overlay::draw_analytic_shadow_ring;
 use crate::sky::sky_color;
 
 /// 渲染输出模式。
@@ -35,6 +36,8 @@ pub struct RenderConfig {
     pub disk_model: DiskModelKind,
     pub mode: RenderMode,
     pub exposure: f64,
+    /// 在捕获/失败诊断图上叠加解析阴影参考环。
+    pub overlay_analytic_shadow: bool,
 }
 
 impl RenderConfig {
@@ -57,6 +60,7 @@ impl Default for RenderConfig {
             disk_model: DiskModelKind::NovikovThorneThin,
             mode: RenderMode::Beauty,
             exposure: DEFAULT_EXPOSURE,
+            overlay_analytic_shadow: false,
         }
     }
 }
@@ -100,8 +104,11 @@ impl Renderer {
                 }
             }
             RenderMode::CaptureSilhouette => {
-                let (fb, hist) =
+                let (mut fb, hist) =
                     self.render_diagnostic(DiagnosticColorMode::CaptureSilhouette);
+                if self.config.overlay_analytic_shadow {
+                    draw_analytic_shadow_ring(&mut fb, self.config.black_hole, self.config.camera);
+                }
                 RenderOutput {
                     framebuffer: fb,
                     termination_histogram: Some(hist),
@@ -234,6 +241,15 @@ impl Renderer {
                     DiskEmission::with_absorption(color, (peak * 0.1).clamp(0.05, 0.4))
                 })
                 .unwrap_or(DiskEmission::with_absorption(Rgb::new(1.0, 0.45, 0.1), 0.15)),
+            DiskModelKind::SolidUniform => disk
+                .map(|d| {
+                    if radius < d.config.inner_radius || radius > d.config.outer_radius {
+                        DiskEmission::with_absorption(Rgb::BLACK, 0.0)
+                    } else {
+                        DiskEmission::opaque_sheet(Rgb::new(1.0, 0.72, 0.28))
+                    }
+                })
+                .unwrap_or_else(|| DiskEmission::opaque_sheet(Rgb::new(1.0, 0.72, 0.28))),
         }
     }
 }

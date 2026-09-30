@@ -16,6 +16,16 @@ impl DiskConfig {
             accretion_rate: 1.0,
         }
     }
+
+    /// 纯色盘透镜验收：放宽内缘，使倾角相机下平面穿越落入盘面环带。
+    pub fn solid_lensing_test(bh: BlackHole) -> Self {
+        let m = bh.mass;
+        Self {
+            inner_radius: 3.0 * m,
+            outer_radius: 40.0 * m,
+            accretion_rate: 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

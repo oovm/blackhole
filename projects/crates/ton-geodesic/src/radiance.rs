@@ -24,6 +24,29 @@ impl DiskEmission {
             absorption: absorption.clamp(0.0, 0.95),
         }
     }
+
+    /// 完全不透明薄盘：命中后终止积分，不再透射背景。
+    pub fn opaque_sheet(radiance: Rgb) -> Self {
+        Self {
+            radiance,
+            absorption: 1.0,
+        }
+    }
+
+    pub fn stops_integration(self) -> bool {
+        self.absorption >= 1.0 - 1e-6
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_sheet_stops_integration() {
+        assert!(DiskEmission::opaque_sheet(Rgb::WHITE).stops_integration());
+        assert!(!DiskEmission::with_absorption(Rgb::WHITE, 0.95).stops_integration());
+    }
 }
 
 /// 单条光线的 HDR 辐射结果。

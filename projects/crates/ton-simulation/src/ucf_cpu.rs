@@ -31,6 +31,7 @@ fn expected_disk_op(disk: DiskModelKind) -> &'static str {
         DiskModelKind::None => "ton_shade_sky_only",
         DiskModelKind::NovikovThorneThin => "ton_shade_novikov_thorne",
         DiskModelKind::ProceduralFbm => "ton_shade_procedural_fbm",
+        DiskModelKind::SolidUniform => "ton_shade_solid_uniform",
     }
 }
 
