@@ -1,7 +1,8 @@
 use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
 use ton_renderer::{
-    build_frame_graph_with_post, default_camera, Framebuffer, Graph, RenderConfig, Renderer,
+    build_frame_graph_with_post, default_camera, default_integrator, Framebuffer, Graph,
+    RenderConfig, Renderer,
 };
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
 
@@ -43,8 +44,8 @@ impl SceneBuilder {
             width: 640,
             height: 360,
             trace: TraceConfig::default(),
-            integrator: IntegratorKind::default(),
-            disk_model: DiskModelKind::default(),
+            integrator: default_integrator(black_hole),
+            disk_model: DiskModelKind::NovikovThorneThin,
             post_bloom: false,
         }
     }
@@ -84,9 +85,17 @@ impl SceneBuilder {
     }
 
     pub fn build(self) -> Scene {
+        let disk = if self.disk_model != DiskModelKind::None && self.disk.is_none() {
+            Some(AccretionDisk::new(
+                self.black_hole,
+                DiskConfig::schwarzschild_default(self.black_hole),
+            ))
+        } else {
+            self.disk
+        };
         Scene {
             black_hole: self.black_hole,
-            disk: self.disk,
+            disk,
             camera: self.camera.unwrap_or_else(|| default_camera(self.black_hole)),
             width: self.width,
             height: self.height,

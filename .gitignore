@@ -27,5 +27,6 @@ dist/
 
 
 # Renderer
+_tmp_render/
 *.png
 *.zip
