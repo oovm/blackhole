@@ -1,5 +1,5 @@
 use ton_metric::SphericalCoords;
-use ton_types::{BlackHole, TonError, TonResult, Vec3};
+use ton_types::{BlackHole, DiskFrame, TonError, TonResult, Vec3};
 
 use crate::orbit::{rk4_step, OrbitState};
 use crate::ray::RayHit;
@@ -15,6 +15,8 @@ pub struct TraceConfig {
     /// 薄盘外缘。
     pub disk_outer: Option<f64>,
     pub escape_radius: f64,
+    /// 薄盘参考系（法线 + 切向基）；默认赤道 XY 盘面。
+    pub disk_frame: DiskFrame,
 }
 
 impl TraceConfig {
@@ -32,6 +34,7 @@ impl TraceConfig {
             disk_inner: None,
             disk_outer: None,
             escape_radius,
+            disk_frame: DiskFrame::equatorial_xy(),
         }
     }
 }

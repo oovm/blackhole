@@ -4,7 +4,7 @@ use ton_metric::{
     schwarzschild_geodesic_accel, schwarzschild_null_four_velocity,
     spherical_velocity_to_cartesian, SphericalCoords,
 };
-use ton_types::{BlackHole, Rgb, TonError, TonResult, Vec3};
+use ton_types::{BlackHole, DiskFrame, Rgb, TonError, TonResult, Vec3};
 
 use crate::radiance::{DiskEmission, RadianceTraceOutcome, RayRadiance};
 use crate::ray::RayHit;
@@ -92,21 +92,25 @@ fn rk4_geodesic_step(mass: f64, state: GeodesicState, dlambda: f64) -> GeodesicS
     state_add(state, (coord, accel), dlambda)
 }
 
-/// 盘面交点：默认盘面为 XY 平面（`z = 0`），与 [`ton_types::DiskFrame::equatorial_xy`] 一致。
+/// 盘面交点：使用 [`DiskFrame`] 法线判定穿越，与相机/发射约定一致。
 fn disk_crossing(
     prev: &GeodesicState,
     next: &GeodesicState,
+    frame: DiskFrame,
     inner: f64,
     outer: f64,
     rs: f64,
 ) -> Option<(f64, Vec3)> {
-    let z0 = prev.cartesian().z;
-    let z1 = next.cartesian().z;
-    if z0.signum() == z1.signum() {
+    let n = frame.normal.normalize();
+    let p0 = prev.cartesian();
+    let p1 = next.cartesian();
+    let d0 = p0.dot(n);
+    let d1 = p1.dot(n);
+    if d0.signum() == d1.signum() {
         return None;
     }
-    let t = z0.abs() / (z0.abs() + z1.abs());
-    let hit = prev.cartesian().add(next.cartesian().sub(prev.cartesian()).scale(t));
+    let t = d0.abs() / (d0.abs() + d1.abs());
+    let hit = p0.add(p1.sub(p0).scale(t));
     let r = hit.length();
     if r > rs && r >= inner && r <= outer {
         Some((r, hit))
@@ -233,7 +237,9 @@ where
         state = rk4_geodesic_step(mass, prev, dlambda);
         if step > 0 && disk_enabled {
             if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
-                if let Some((radius, hit_pos)) = disk_crossing(&prev, &state, inner, outer, rs) {
+                if let Some((radius, hit_pos)) =
+                    disk_crossing(&prev, &state, config.disk_frame, inner, outer, rs)
+                {
                     disk_crossings += 1;
                     let stop = on_disk(radius, hit_pos);
                     if single_disk_hit || stop {
@@ -340,9 +346,9 @@ where
             }
             let sample = emit_disk(radius, hit_pos);
             radiance = radiance.add(sample.radiance.scale(transmittance));
-            transmittance *= (1.0 - sample.absorption).clamp(0.05, 1.0);
+            transmittance *= (1.0 - sample.absorption).clamp(0.0, 1.0);
             disk_hits += 1;
-            false
+            sample.absorption >= 0.999
         },
     );
 
