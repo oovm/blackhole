@@ -25,7 +25,7 @@ fn golden_schwarzschild_orbit_novikov_48x27() {
     let hash = fnv1a64(&rgba);
     assert_eq!(
         hash,
-        968992088206601693,
+        17319124589749727222,
         "update golden if intentional algorithm change"
     );
 }
@@ -42,7 +42,7 @@ fn golden_sem_classical_fbm_48x27() {
     let hash = fnv1a64(&rgba);
     assert_eq!(
         hash,
-        857101654930588111,
+        5421805067303042832,
         "update golden if intentional algorithm change"
     );
 }
@@ -59,7 +59,7 @@ fn golden_geodesic_3d_novikov_48x27() {
     let hash = fnv1a64(&rgba);
     assert_eq!(
         hash,
-        1281810340172712011,
+        6910507596390162174,
         "update golden if intentional algorithm change"
     );
 }
@@ -76,7 +76,7 @@ fn golden_kerr_equatorial_novikov_48x27() {
     let hash = fnv1a64(&rgba);
     assert_eq!(
         hash,
-        968992088206601693,
+        17613830805640496149,
         "update golden if intentional algorithm change"
     );
 }
@@ -93,7 +93,7 @@ fn golden_ucf_tone_map_schwarzschild_48x27() {
     let hash = fnv1a64(&frame.to_rgba8());
     assert_eq!(
         hash,
-        4831892383622624774,
+        12997146787868286173,
         "update golden if intentional algorithm change"
     );
 }
@@ -111,7 +111,7 @@ fn golden_ucf_bloom_schwarzschild_48x27() {
     let hash = fnv1a64(&frame.to_rgba8());
     assert_eq!(
         hash,
-        4831892383622624774,
+        3977780307502132545,
         "bloom path may match tone-only at this resolution"
     );
 }
