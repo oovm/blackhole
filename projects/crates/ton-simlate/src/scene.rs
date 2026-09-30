@@ -1,8 +1,10 @@
 use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
 use ton_render::{default_camera, Framebuffer, RenderConfig, Renderer};
-use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind};
+use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
 use ton_ucf::{build_frame_graph, Graph};
+
+use crate::ucf_cpu::{execute_frame_graph_cpu, CpuGraphExecution};
 
 #[derive(Debug, Clone)]
 pub struct Scene {
@@ -92,6 +94,12 @@ impl Scene {
 
     pub fn build_ucf_graph(&self) -> Graph {
         build_frame_graph(self.integrator, self.disk_model)
+    }
+
+    /// UCF 帧图 CPU 参考路径：校验蓝图 `op` 后渲染一帧。
+    pub fn render_frame_ucf_cpu(&self) -> TonResult<(Framebuffer, CpuGraphExecution)> {
+        let graph = self.build_ucf_graph();
+        execute_frame_graph_cpu(self, &graph)
     }
 
     pub fn render_frame(&self) -> Framebuffer {

@@ -135,13 +135,13 @@ fn ton_render_frame_sem_classical_fbm() {
     let height = 12u32;
     let out_ptr = 8192u32;
     let render = instance
-        .get_typed_func::<(u32, u32, f64, i32, i32, u32), i32>(
+        .get_typed_func::<(u32, u32, f64, f64, i32, i32, u32), i32>(
             &mut store,
             "ton_render_frame_rgba8",
         )
         .expect("ton_render_frame_rgba8 export");
     let status = render
-        .call(&mut store, (width, height, 1.0_f64, 1, 2, out_ptr))
+        .call(&mut store, (width, height, 1.0_f64, 0.0_f64, 1, 2, out_ptr))
         .expect("render call");
     assert_eq!(status, 0);
 
@@ -156,17 +156,21 @@ fn ton_render_frame_rejects_invalid_discriminants() {
     let module = load_module(&engine).expect("ton_wasm.wasm");
     let (mut store, instance) = instantiate(&engine, &module);
     let render = instance
-        .get_typed_func::<(u32, u32, f64, i32, i32, u32), i32>(
+        .get_typed_func::<(u32, u32, f64, f64, i32, i32, u32), i32>(
             &mut store,
             "ton_render_frame_rgba8",
         )
         .expect("ton_render_frame_rgba8 export");
     let bad_integrator = render
-        .call(&mut store, (8u32, 8u32, 1.0_f64, 99, 1, 4096u32))
+        .call(&mut store, (8u32, 8u32, 1.0_f64, 0.0_f64, 99, 1, 4096u32))
         .expect("call");
     assert_eq!(bad_integrator, -3);
     let bad_disk = render
-        .call(&mut store, (8u32, 8u32, 1.0_f64, 0, 99, 4096u32))
+        .call(&mut store, (8u32, 8u32, 1.0_f64, 0.0_f64, 0, 99, 4096u32))
         .expect("call");
     assert_eq!(bad_disk, -4);
+    let bad_spin = render
+        .call(&mut store, (8u32, 8u32, 1.0_f64, 1.0_f64, 3, 1, 4096u32))
+        .expect("call");
+    assert_eq!(bad_spin, -5);
 }

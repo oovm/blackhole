@@ -1,33 +1,43 @@
-//! 场景一帧 RGBA8 渲染（积分器 × 盘模型可切换）。
+//! 场景一帧 RGBA8 渲染（积分器 × 盘模型 × 自旋可切换）。
 
-use ton_sim::Scene;
-use ton_types::{BlackHole, DiskModelKind, IntegratorKind};
+use ton_sim::{black_hole_for_render, Scene};
+use ton_types::{DiskModelKind, IntegratorKind, TonError};
 
 /// 负错误码：未知 `integrator` 判别值。
 pub const ERR_INVALID_INTEGRATOR: i32 = -3;
 /// 负错误码：未知 `disk_model` 判别值。
 pub const ERR_INVALID_DISK_MODEL: i32 = -4;
+/// 负错误码：自旋参数非法（非有限或 `|a| >= M` 于 Kerr 路径）。
+pub const ERR_INVALID_SPIN: i32 = -5;
+
+fn ton_error_to_code(err: TonError) -> i32 {
+    match err {
+        TonError::Domain(_) => ERR_INVALID_SPIN,
+        TonError::Captured => -6,
+        TonError::Escaped => -7,
+    }
+}
 
 pub fn render_frame_rgba8(
     width: u32,
     height: u32,
     mass: f64,
+    spin: f64,
     integrator: IntegratorKind,
     disk_model: DiskModelKind,
 ) -> Result<Vec<u8>, i32> {
     if width == 0 || height == 0 {
         return Ok(Vec::new());
     }
-    let mass = mass.max(0.1);
-    let mut builder = Scene::builder(BlackHole::schwarzschild(mass))
+    let black_hole = black_hole_for_render(mass, spin, integrator).map_err(ton_error_to_code)?;
+    let mut builder = Scene::builder(black_hole)
         .with_integrator(integrator)
         .with_disk_model(disk_model)
         .with_resolution(width, height);
     if disk_model != DiskModelKind::None {
         builder = builder.with_default_disk();
     }
-    let scene = builder.build();
-    Ok(scene.render_frame().to_rgba8())
+    Ok(builder.build().render_frame().to_rgba8())
 }
 
 pub fn render_schwarzschild_rgba8(
@@ -39,6 +49,7 @@ pub fn render_schwarzschild_rgba8(
         width,
         height,
         mass,
+        0.0,
         IntegratorKind::SchwarzschildOrbit,
         DiskModelKind::NovikovThorneThin,
     )
@@ -53,6 +64,7 @@ pub unsafe fn write_frame_rgba8(
     width: u32,
     height: u32,
     mass: f64,
+    spin: f64,
     integrator: u8,
     disk_model: u8,
     out: *mut u8,
@@ -72,7 +84,7 @@ pub unsafe fn write_frame_rgba8(
     if need == 0 {
         return 0;
     }
-    match render_frame_rgba8(width, height, mass, integrator, disk_model) {
+    match render_frame_rgba8(width, height, mass, spin, integrator, disk_model) {
         Ok(bytes) if bytes.len() == need => {
             unsafe {
                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, need);
@@ -93,5 +105,5 @@ pub unsafe fn write_schwarzschild_rgba8(
     mass: f64,
     out: *mut u8,
 ) -> i32 {
-    unsafe { write_frame_rgba8(width, height, mass, 0, 1, out) }
+    unsafe { write_frame_rgba8(width, height, mass, 0.0, 0, 1, out) }
 }

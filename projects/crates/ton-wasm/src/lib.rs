@@ -13,6 +13,7 @@ pub use host::present_rgba8_webgpu_via_host;
 pub use render::{
     render_frame_rgba8, render_schwarzschild_rgba8, write_frame_rgba8,
     write_schwarzschild_rgba8, ERR_INVALID_DISK_MODEL, ERR_INVALID_INTEGRATOR,
+    ERR_INVALID_SPIN,
 };
 pub use ucf_probe::{error_code_to_i32, run_diag_mask};
 
@@ -31,17 +32,18 @@ pub extern "C" fn ton_target_triple() -> *const u8 {
     TARGET_TRIPLE_CSTR.as_ptr()
 }
 
-/// 积分器 × 盘模型一帧 → RGBA8 写入 `out`（`integrator` / `disk_model` 为 `u8` 判别值）。
+/// 积分器 × 盘模型 × 自旋一帧 → RGBA8 写入 `out`。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ton_render_frame_rgba8(
     width: u32,
     height: u32,
     mass: f64,
+    spin: f64,
     integrator: u8,
     disk_model: u8,
     out: *mut u8,
 ) -> i32 {
-    unsafe { write_frame_rgba8(width, height, mass, integrator, disk_model, out) }
+    unsafe { write_frame_rgba8(width, height, mass, spin, integrator, disk_model, out) }
 }
 
 /// 史瓦西轨道 + Novikov 薄盘（兼容旧导出）。

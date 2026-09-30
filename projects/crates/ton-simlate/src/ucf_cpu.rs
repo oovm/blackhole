@@ -73,7 +73,6 @@ pub fn execute_frame_graph_cpu(
 mod tests {
     use super::*;
     use ton_types::BlackHole;
-    use ton_ucf::build_frame_graph;
 
     #[test]
     fn cpu_executor_runs_full_chain_for_sem_classical() {
@@ -83,8 +82,7 @@ mod tests {
             .with_disk_model(DiskModelKind::ProceduralFbm)
             .with_resolution(32, 24)
             .build();
-        let graph = build_frame_graph(scene.integrator, scene.disk_model);
-        let (frame, report) = execute_frame_graph_cpu(&scene, &graph).expect("execute");
+        let (frame, report) = scene.render_frame_ucf_cpu().expect("execute");
         assert_eq!(report.executed_ops.len(), 6);
         assert_eq!(report.executed_ops[2], "ton_trace_sem_classical");
         assert_eq!(report.executed_ops[3], "ton_shade_procedural_fbm");
