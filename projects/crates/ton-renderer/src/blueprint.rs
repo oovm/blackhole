@@ -47,7 +47,7 @@ pub fn build_frame_graph_with_post(
         b.chain(&[10, 11, 12, 13, 14, 15]);
     }
     let mut graph = b.build();
-    annotate_frame_programs(&mut graph, integrator, disk);
+    annotate_frame_programs(&mut graph, integrator, disk, bloom);
     graph
 }
 
@@ -166,6 +166,42 @@ mod tests {
         assert!(matches!(
             g.tasks.nodes[2].params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_trace_kerr_equatorial"
+        ));
+    }
+
+    #[test]
+    fn tone_map_task_carries_program_hash() {
+        let g = build_frame_graph(
+            IntegratorKind::Geodesic3d,
+            DiskModelKind::NovikovThorneThin,
+        );
+        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 14).expect("tone_map");
+        assert!(matches!(
+            node.params.get("program_name"),
+            Some(ParamValue::Str(name)) if name == "tone_map_aces"
+        ));
+        assert!(matches!(
+            node.params.get("program_hash"),
+            Some(ParamValue::I64(h)) if *h != 0
+        ));
+    }
+
+    #[test]
+    fn bloom_graph_binds_post_bloom_extract() {
+        let g = build_frame_graph_with_post(
+            IntegratorKind::SchwarzschildOrbit,
+            DiskModelKind::NovikovThorneThin,
+            true,
+        );
+        let bloom = g.tasks.nodes.iter().find(|n| n.id.0 == 14).expect("bloom");
+        assert!(matches!(
+            bloom.params.get("program_name"),
+            Some(ParamValue::Str(name)) if name == "post_bloom_extract"
+        ));
+        let tone = g.tasks.nodes.iter().find(|n| n.id.0 == 15).expect("tone_map");
+        assert!(matches!(
+            tone.params.get("program_name"),
+            Some(ParamValue::Str(name)) if name == "tone_map_aces"
         ));
     }
 

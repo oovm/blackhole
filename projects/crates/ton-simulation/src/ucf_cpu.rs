@@ -95,6 +95,32 @@ pub fn execute_frame_graph_cpu(
         ));
     }
 
+    let tone_task_id = if scene.post_bloom { 15 } else { 14 };
+    let tone_node = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|n| n.id.0 == tone_task_id)
+        .ok_or_else(|| TonError::Domain(format!("missing tone_map task {tone_task_id}")))?;
+    if !tone_node.params.contains_key("program_hash") {
+        return Err(TonError::Domain(
+            "tone_map task missing program_hash (KernelBinding)".into(),
+        ));
+    }
+    if scene.post_bloom {
+        let bloom_node = graph
+            .tasks
+            .nodes
+            .iter()
+            .find(|n| n.id.0 == 14)
+            .ok_or_else(|| TonError::Domain("missing bloom task 14".into()))?;
+        if !bloom_node.params.contains_key("program_hash") {
+            return Err(TonError::Domain(
+                "bloom task missing program_hash (KernelBinding)".into(),
+            ));
+        }
+    }
+
     let mut frame = scene.render_frame();
     apply_post_ops(&mut frame, &executed_ops);
     Ok((frame, CpuGraphExecution { executed_ops }))

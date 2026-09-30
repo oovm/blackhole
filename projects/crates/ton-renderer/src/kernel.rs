@@ -2,8 +2,8 @@
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ucf_program::{
-    disk_shade_novikov, geodesic_radial_infall_steps, orbit_step_once, program_hash,
-    vector_math_normalize,
+    disk_shade_novikov, geodesic_radial_infall_steps, orbit_step_once, post_bloom_extract,
+    program_hash, tone_map_aces, vector_math_normalize,
 };
 use ucf_types::ParamValue;
 
@@ -64,6 +64,18 @@ pub fn shade_kernel(disk: DiskModelKind) -> KernelBinding {
     }
 }
 
+/// 色调映射任务程序绑定（ACES 拟合）。
+pub fn tone_map_kernel() -> KernelBinding {
+    let p = tone_map_aces();
+    KernelBinding::from_program_name_hash("tone_map_aces", program_hash(&p))
+}
+
+/// 泛光亮部提取任务程序绑定（多尺度模糊仍由宿主完成）。
+pub fn bloom_kernel() -> KernelBinding {
+    let p = post_bloom_extract();
+    KernelBinding::from_program_name_hash("post_bloom_extract", program_hash(&p))
+}
+
 /// 将 `program_hash` / `program_name` 写入指定任务节点 `params`。
 pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) {
     if let Some(node) = graph.tasks.nodes.iter_mut().find(|n| n.id.0 == task_id) {
@@ -78,10 +90,21 @@ pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) 
     }
 }
 
-/// 帧图构建后标注 trace / shade 的程序绑定。
-pub fn annotate_frame_programs(graph: &mut Graph, integrator: IntegratorKind, disk: DiskModelKind) {
+/// 帧图构建后标注 trace / shade / 后处理的程序绑定。
+pub fn annotate_frame_programs(
+    graph: &mut Graph,
+    integrator: IntegratorKind,
+    disk: DiskModelKind,
+    bloom: bool,
+) {
     let trace = trace_kernel(integrator);
     attach_binding(graph, 12, &trace.binding);
     let shade = shade_kernel(disk);
     attach_binding(graph, 13, &shade);
+    if bloom {
+        attach_binding(graph, 14, &bloom_kernel());
+        attach_binding(graph, 15, &tone_map_kernel());
+    } else {
+        attach_binding(graph, 14, &tone_map_kernel());
+    }
 }

@@ -14,7 +14,7 @@ pub use blueprint::{build_frame_graph, build_frame_graph_with_post, trace_kernel
 pub use kernel::{attach_binding, KernelBinding, KernelInstance};
 pub use framebuffer::{Framebuffer, FramebufferEncoding};
 pub use post::{
-    apply_post_process, apply_tone_map, bloom_pass, tone_map_rgb, DEFAULT_EXPOSURE,
+    aces_filmic, apply_post_process, apply_tone_map, bloom_pass, tone_map_rgb, DEFAULT_EXPOSURE,
 };
 pub use renderer::{
     default_camera, default_integrator, RenderConfig, RenderMode, RenderOutput, Renderer,
