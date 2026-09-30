@@ -121,3 +121,52 @@ fn ton_render_schwarzschild_small_frame() {
     let slice = &memory.data(&store)[out_ptr as usize..out_ptr as usize + need];
     assert!(slice.iter().any(|&b| b > 0), "frame should not be all zero");
 }
+
+#[test]
+fn ton_render_frame_sem_classical_fbm() {
+    let engine = Engine::default();
+    let module = load_module(&engine).expect("ton_wasm.wasm");
+    let (mut store, instance) = instantiate(&engine, &module);
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("memory export");
+
+    let width = 16u32;
+    let height = 12u32;
+    let out_ptr = 8192u32;
+    let render = instance
+        .get_typed_func::<(u32, u32, f64, i32, i32, u32), i32>(
+            &mut store,
+            "ton_render_frame_rgba8",
+        )
+        .expect("ton_render_frame_rgba8 export");
+    let status = render
+        .call(&mut store, (width, height, 1.0_f64, 1, 2, out_ptr))
+        .expect("render call");
+    assert_eq!(status, 0);
+
+    let need = (width * height * 4) as usize;
+    let slice = &memory.data(&store)[out_ptr as usize..out_ptr as usize + need];
+    assert!(slice.iter().any(|&b| b > 0));
+}
+
+#[test]
+fn ton_render_frame_rejects_invalid_discriminants() {
+    let engine = Engine::default();
+    let module = load_module(&engine).expect("ton_wasm.wasm");
+    let (mut store, instance) = instantiate(&engine, &module);
+    let render = instance
+        .get_typed_func::<(u32, u32, f64, i32, i32, u32), i32>(
+            &mut store,
+            "ton_render_frame_rgba8",
+        )
+        .expect("ton_render_frame_rgba8 export");
+    let bad_integrator = render
+        .call(&mut store, (8u32, 8u32, 1.0_f64, 99, 1, 4096u32))
+        .expect("call");
+    assert_eq!(bad_integrator, -3);
+    let bad_disk = render
+        .call(&mut store, (8u32, 8u32, 1.0_f64, 0, 99, 4096u32))
+        .expect("call");
+    assert_eq!(bad_disk, -4);
+}

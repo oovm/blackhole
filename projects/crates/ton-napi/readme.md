@@ -1,6 +1,6 @@
 # ton-napi
 
-Node **N-API** cdylib：native 宿主直接调用 `ton-sim`（与 `ton-wasm` 并列，目标平台为 `projects/packages/blackhole-*` npm 袋）。
+Node **N-API** cdylib：由 `@doki-land/blackhole/node` 加载，平台袋为 `projects/packages/blackhole-<triple>/`。
 
 ## 构建
 

@@ -10,7 +10,10 @@ mod render;
 mod ucf_probe;
 
 pub use host::present_rgba8_webgpu_via_host;
-pub use render::{render_schwarzschild_rgba8, write_schwarzschild_rgba8};
+pub use render::{
+    render_frame_rgba8, render_schwarzschild_rgba8, write_frame_rgba8,
+    write_schwarzschild_rgba8, ERR_INVALID_DISK_MODEL, ERR_INVALID_INTEGRATOR,
+};
 pub use ucf_probe::{error_code_to_i32, run_diag_mask};
 
 pub const TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
@@ -28,7 +31,20 @@ pub extern "C" fn ton_target_triple() -> *const u8 {
     TARGET_TRIPLE_CSTR.as_ptr()
 }
 
-/// 史瓦西 + 薄盘一帧 → RGBA8 写入 `out`。
+/// 积分器 × 盘模型一帧 → RGBA8 写入 `out`（`integrator` / `disk_model` 为 `u8` 判别值）。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ton_render_frame_rgba8(
+    width: u32,
+    height: u32,
+    mass: f64,
+    integrator: u8,
+    disk_model: u8,
+    out: *mut u8,
+) -> i32 {
+    unsafe { write_frame_rgba8(width, height, mass, integrator, disk_model, out) }
+}
+
+/// 史瓦西轨道 + Novikov 薄盘（兼容旧导出）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ton_render_schwarzschild_rgba8(
     width: u32,

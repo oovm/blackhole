@@ -21,7 +21,8 @@ cargo build -p ton-wasm --target wasm32-unknown-unknown --release
 |------|------|
 | `ton_version_code` | `major * 1_000_000 + minor * 1_000 + patch` |
 | `ton_target_triple` | 只读 C 字符串 |
-| `ton_render_schwarzschild_rgba8` | 渲染一帧 RGBA8 到线性内存 |
+| `ton_render_frame_rgba8` | 积分器 × 盘模型渲染一帧 RGBA8（`integrator` / `disk_model` 为 `u8`） |
+| `ton_render_schwarzschild_rgba8` | 兼容导出：史瓦西轨道 + Novikov 薄盘 |
 | `ton_ucf_application_contract_diag_mask` | UCF 诊断 kind 位掩码 |
 | `ton_l2_present_rgba8_webgpu` | 经 `ton_host` 提交 WebGPU 纹理上屏 |
 
