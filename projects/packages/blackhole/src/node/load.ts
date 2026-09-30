@@ -10,6 +10,7 @@ export interface TonNapiBindings {
         width: number,
         height: number,
         mass: number,
+        spin: number,
         integrator: IntegratorKind,
         diskModel: DiskModelKind,
     ): Uint8Array;
@@ -50,6 +51,7 @@ export async function loadTonNapi(options: LoadTonNapiOptions = {}): Promise<Ton
             width: number,
             height: number,
             mass: number,
+            spin: number,
             integrator: number,
             diskModel: number,
         ) => Uint8Array;
@@ -57,9 +59,9 @@ export async function loadTonNapi(options: LoadTonNapiOptions = {}): Promise<Ton
     };
     return {
         tonVersionCode: () => native.tonVersionCode(),
-        renderFrameRgba8: (width, height, mass, integrator, diskModel) => {
+        renderFrameRgba8: (width, height, mass, spin, integrator, diskModel) => {
             if (native.renderFrameRgba8) {
-                return native.renderFrameRgba8(width, height, mass, integrator, diskModel);
+                return native.renderFrameRgba8(width, height, mass, spin, integrator, diskModel);
             }
             return native.renderSchwarzschildRgba8(width, height, mass);
         },

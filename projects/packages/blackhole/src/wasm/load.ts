@@ -21,6 +21,7 @@ export interface TonWasmBindings {
         width: number,
         height: number,
         mass: number,
+        spin: number,
         integrator: IntegratorKind,
         diskModel: DiskModelKind,
         outPtr: number,
@@ -52,6 +53,7 @@ type WasmExports = {
         width: number,
         height: number,
         mass: number,
+        spin: number,
         integrator: number,
         diskModel: number,
         outPtr: number,
@@ -137,12 +139,13 @@ export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<Ton
                 ucfDiagMask,
             };
         },
-        renderFrameRgba8: (width, height, mass, integrator, diskModel, outPtr) => {
+        renderFrameRgba8: (width, height, mass, spin, integrator, diskModel, outPtr) => {
             if (exports.ton_render_frame_rgba8) {
                 return exports.ton_render_frame_rgba8(
                     width,
                     height,
                     mass,
+                    spin,
                     integrator,
                     diskModel,
                     outPtr,

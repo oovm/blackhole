@@ -25,6 +25,19 @@
                     <option :value="2">程序化 FBM</option>
                 </select>
             </label>
+            <label :class="{ dimmed: integrator !== 3 }">
+                自旋 a（克尔）
+                <input
+                    type="range"
+                    min="0"
+                    max="0.95"
+                    step="0.05"
+                    :value="spinRatio"
+                    :disabled="integrator !== 3"
+                    @input="((e) => (spinRatio = Number(e.target.value)))"
+                />
+                <span>{{ spinLabel }}</span>
+            </label>
             <label>
                 质量 M
                 <input
@@ -132,6 +145,15 @@ canvas {
     width: 160px;
 }
 
+.controls label.dimmed {
+    opacity: 0.55;
+}
+
+.controls input[type="range"]:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .controls select {
     min-width: 168px;
     padding: 0.35rem 0.5rem;
@@ -176,6 +198,7 @@ import { renderTonFrame } from "../lib/blackhole-frame";
 
 export default class BlackholeView {
     mass = 1.0;
+    spinRatio = 0.5;
     integrator = 0;
     diskModel = 1;
     width = 640;
@@ -185,6 +208,15 @@ export default class BlackholeView {
 
     get massLabel() {
         return this.mass.toFixed(1);
+    }
+
+    get spinLabel() {
+        const a = this.mass * this.spinRatio;
+        return `a=${a.toFixed(2)} (${(this.spinRatio * 100).toFixed(0)}% M)`;
+    }
+
+    get spin() {
+        return this.mass * this.spinRatio;
     }
 
     async runRender() {
@@ -201,6 +233,7 @@ export default class BlackholeView {
         try {
             const { statusLine } = await renderTonFrame(canvas, {
                 mass: this.mass,
+                spin: this.spin,
                 integrator: this.integrator,
                 diskModel: this.diskModel,
             });

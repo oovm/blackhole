@@ -5,6 +5,7 @@ export interface RenderBlackholeRgba8Options extends LoadTonNapiOptions {
     width: number;
     height: number;
     mass?: number;
+    spin?: number;
     integrator?: IntegratorKind;
     diskModel?: DiskModelKind;
 }
@@ -19,10 +20,11 @@ export async function renderBlackholeRgba8(
 ): Promise<RenderBlackholeRgba8Result> {
     const { width, height } = options;
     const mass = options.mass ?? 1.0;
+    const spin = options.spin ?? 0.0;
     const integrator = options.integrator ?? IntegratorKind.SchwarzschildOrbit;
     const diskModel = options.diskModel ?? DiskModelKind.NovikovThorneThin;
     const ton = await loadTonNapi(options);
-    const rgba = ton.renderFrameRgba8(width, height, mass, integrator, diskModel);
+    const rgba = ton.renderFrameRgba8(width, height, mass, spin, integrator, diskModel);
     return { ton, rgba };
 }
 

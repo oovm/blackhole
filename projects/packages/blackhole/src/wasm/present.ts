@@ -7,6 +7,8 @@ export type PresentTier = "L2" | "L0";
 
 export interface RenderBlackholeOptions extends LoadTonWasmOptions {
     mass?: number;
+    /** 克尔自旋参数 `a`（几何单位）；仅 `KerrEquatorial` 生效。 */
+    spin?: number;
     integrator?: IntegratorKind;
     diskModel?: DiskModelKind;
     /** RGBA8 写入 wasm 线性内存偏移；默认 65536。 */
@@ -82,13 +84,14 @@ export async function renderBlackholeFrame(
     const width = canvas.width;
     const height = canvas.height;
     const mass = options.mass ?? 1.0;
+    const spin = options.spin ?? 0.0;
     const integrator = options.integrator ?? IntegratorKind.SchwarzschildOrbit;
     const diskModel = options.diskModel ?? DiskModelKind.NovikovThorneThin;
     const outPtr = options.outPtr ?? DEFAULT_OUT_PTR;
     const byteLen = width * height * 4;
 
     const ton = await loadTonWasm(options);
-    const status = ton.renderFrameRgba8(width, height, mass, integrator, diskModel, outPtr);
+    const status = ton.renderFrameRgba8(width, height, mass, spin, integrator, diskModel, outPtr);
     if (status !== 0) {
         throw new Error(`ton_render_frame_rgba8 failed: ${status}`);
     }
