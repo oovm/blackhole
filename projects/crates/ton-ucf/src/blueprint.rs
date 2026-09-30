@@ -11,8 +11,17 @@ fn disk_shade_op(disk: DiskModelKind) -> &'static str {
     }
 }
 
-/// 构建一帧黑洞渲染的 UCF 任务链（CPU 参考 / GPU 后端共用同一 IR）。
+/// 构建一帧黑洞渲染的 UCF 任务链（默认无泛光）。
 pub fn build_frame_graph(integrator: IntegratorKind, disk: DiskModelKind) -> Graph {
+    build_frame_graph_with_post(integrator, disk, false)
+}
+
+/// 构建一帧黑洞渲染的 UCF 任务链；`bloom` 为真时插入 `ton_bloom` 任务。
+pub fn build_frame_graph_with_post(
+    integrator: IntegratorKind,
+    disk: DiskModelKind,
+    bloom: bool,
+) -> Graph {
     let mut b = GraphBuilder::new();
     b.buffer(1, Domain::Host);
     b.buffer(2, Domain::Host);
@@ -24,9 +33,16 @@ pub fn build_frame_graph(integrator: IntegratorKind, disk: DiskModelKind) -> Gra
     b.gpu(11, "ton_generate_rays");
     b.gpu(12, integrator.ucf_op_name());
     b.gpu(13, disk_shade_op(disk));
-    b.gpu(14, "ton_tone_map");
-    b.gpu(15, "ton_present_or_readback");
-    b.chain(&[10, 11, 12, 13, 14, 15]);
+    if bloom {
+        b.gpu(14, "ton_bloom");
+        b.gpu(15, "ton_tone_map");
+        b.gpu(16, "ton_present_or_readback");
+        b.chain(&[10, 11, 12, 13, 14, 15, 16]);
+    } else {
+        b.gpu(14, "ton_tone_map");
+        b.gpu(15, "ton_present_or_readback");
+        b.chain(&[10, 11, 12, 13, 14, 15]);
+    }
     b.build()
 }
 
@@ -99,6 +115,25 @@ mod tests {
         assert!(matches!(
             g.tasks.nodes[2].params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_trace_kerr_equatorial"
+        ));
+    }
+
+    #[test]
+    fn bloom_graph_inserts_ton_bloom_task() {
+        let g = build_frame_graph_with_post(
+            IntegratorKind::SchwarzschildOrbit,
+            DiskModelKind::NovikovThorneThin,
+            true,
+        );
+        g.validate().expect("graph must validate");
+        assert_eq!(g.tasks.nodes.len(), 7);
+        assert!(matches!(
+            g.tasks.nodes[4].params.get("op"),
+            Some(ParamValue::Str(op)) if op == "ton_bloom"
+        ));
+        assert!(matches!(
+            g.tasks.nodes[5].params.get("op"),
+            Some(ParamValue::Str(op)) if op == "ton_tone_map"
         ));
     }
 }

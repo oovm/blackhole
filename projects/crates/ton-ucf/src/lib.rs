@@ -4,5 +4,5 @@
 
 mod blueprint;
 
-pub use blueprint::build_frame_graph;
+pub use blueprint::{build_frame_graph, build_frame_graph_with_post};
 pub use ucf_ir::Graph;
