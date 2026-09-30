@@ -12,4 +12,4 @@ pnpm --filter @doki-land/blackhole run build
 pnpm --filter @doki-land/blackhole-homepage run dev
 ```
 
-浏览器打开后点击「渲染一帧」。WebGPU 可用时走 **UCF L2**（`ton_l2_present_rgba8_webgpu`），否则 L0 readback。
+浏览器打开后自动渲染；调整参数会实时重新计算。WebGPU 可用时走 **UCF L2**（`ton_l2_present_rgba8_webgpu`），否则 L0 readback。

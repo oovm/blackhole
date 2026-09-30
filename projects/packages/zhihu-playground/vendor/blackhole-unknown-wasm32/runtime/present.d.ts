@@ -15,7 +15,7 @@ export interface RenderBlackholeResult {
 export declare function presentRgba8ToCanvas2d(ctx: CanvasRenderingContext2D, memory: WebAssembly.Memory, outPtr: number, width: number, height: number): void;
 /**
  * 渲染史瓦西黑洞一帧并上屏。
- * CPU 测地线在 `ton-sim`；上屏优先 UCF L2 WebGPU（`ton_l2_present_rgba8_webgpu` + `ucf_host`），降级 L0 readback。
+ * CPU 测地线在 `ton-simulation` / `ton-renderer`；上屏优先 UCF L2 WebGPU（`ton_l2_present_rgba8_webgpu` + `ucf_host`），降级 L0 readback。
  */
 export declare function renderBlackholeFrame(canvas: HTMLCanvasElement, options?: RenderBlackholeOptions): Promise<RenderBlackholeResult>;
 export { loadTonWasm, type LoadTonWasmOptions, type TonWasmBindings, type TonWasmInfo } from "./load.js";

@@ -1,104 +1,130 @@
 <template>
     <main class="layout">
-        <header>
-            <h1>TON 黑洞模拟</h1>
-            <p class="subtitle">多积分器 × 多盘模型 · CPU 参考实现 · UCF 运行时 · L2/L0 呈现</p>
+        <header class="hero">
+            <div>
+                <h1>TON 黑洞模拟</h1>
+                <p class="subtitle">渐进多分辨率 · WebGPU L2 上屏 · 测地线 CPU（UCF GPU trace 待接入）</p>
+            </div>
+            <span class="live-badge" :class="{ busy: refining }">{{ qualityBadge }}</span>
         </header>
-        <section class="stage">
-            <canvas id="ton-view" :width="width" :height="height"></canvas>
-        </section>
-        <section class="controls">
-            <label>
-                积分器
-                <select :value="integrator" @change="((e) => (integrator = Number(e.target.value)))">
-                    <option :value="0">史瓦西轨道</option>
-                    <option :value="1">半经典 Ray March</option>
-                    <option :value="2">3D 零测地线</option>
-                    <option :value="3">克尔赤道</option>
-                </select>
-            </label>
-            <label>
-                盘模型
-                <select :value="diskModel" @change="((e) => (diskModel = Number(e.target.value)))">
-                    <option :value="0">无盘</option>
-                    <option :value="1">Novikov-Thorne 薄盘</option>
-                    <option :value="2">程序化 FBM</option>
-                </select>
-            </label>
-            <label :class="{ dimmed: integrator !== 3 }">
-                自旋 a（克尔）
-                <input
-                    type="range"
-                    min="0"
-                    max="0.95"
-                    step="0.05"
-                    :value="spinRatio"
-                    :disabled="integrator !== 3"
-                    @input="((e) => (spinRatio = Number(e.target.value)))"
-                />
-                <span>{{ spinLabel }}</span>
-            </label>
-            <label>
-                <input
-                    type="checkbox"
-                    :checked="ucfToneMap"
-                    @change="((e) => (ucfToneMap = e.target.checked))"
-                />
-                UCF 色调映射
-            </label>
-            <label :class="{ dimmed: !ucfToneMap }">
-                <input
-                    type="checkbox"
-                    :checked="bloom"
-                    :disabled="!ucfToneMap"
-                    @change="((e) => (bloom = e.target.checked))"
-                />
-                泛光 Bloom
-            </label>
-            <label>
-                质量 M
-                <input
-                    type="range"
-                    min="0.5"
-                    max="3"
-                    step="0.1"
-                    :value="mass"
-                    @input="((e) => (mass = Number(e.target.value)))"
-                />
-                <span>{{ massLabel }}</span>
-            </label>
-            <label>
-                宽度
-                <input
-                    type="number"
-                    min="320"
-                    max="960"
-                    step="80"
-                    :value="width"
-                    @change="((e) => (width = Number(e.target.value)))"
-                />
-            </label>
-            <label>
-                高度
-                <input
-                    type="number"
-                    min="180"
-                    max="540"
-                    step="45"
-                    :value="height"
-                    @change="((e) => (height = Number(e.target.value)))"
-                />
-            </label>
-            <button type="button" :disabled="rendering" @click="(() => runRender())">渲染一帧</button>
-        </section>
-        <footer class="status">{{ status }}</footer>
+
+        <div class="workspace">
+            <section class="stage">
+                <canvas id="ton-view" :width="width" :height="height"></canvas>
+                <div class="stage-overlay" :class="{ active: booting, subtle: refining }">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span>{{ overlayText }}</span>
+                </div>
+                <footer class="stage-meta">{{ status }}</footer>
+            </section>
+
+            <aside class="panel">
+                <section class="panel-block">
+                    <h2>物理</h2>
+                    <label>
+                        积分器
+                        <select :value="integrator" @change="((e) => onIntegratorChange(e))">
+                            <option :value="0">史瓦西轨道</option>
+                            <option :value="1">半经典 Ray March</option>
+                            <option :value="2">3D 零测地线</option>
+                            <option :value="3">克尔赤道</option>
+                        </select>
+                    </label>
+                    <label>
+                        盘模型
+                        <select :value="diskModel" @change="((e) => onDiskModelChange(e))">
+                            <option :value="0">无盘</option>
+                            <option :value="1">Novikov-Thorne 薄盘</option>
+                            <option :value="2">程序化 FBM</option>
+                        </select>
+                    </label>
+                    <label>
+                        质量 M
+                        <div class="range-row">
+                            <input
+                                type="range"
+                                min="0.5"
+                                max="3"
+                                step="0.1"
+                                :value="mass"
+                                @input="((e) => onMassInput(e))"
+                            />
+                            <span class="value">{{ massLabel }}</span>
+                        </div>
+                    </label>
+                    <label :class="{ dimmed: integrator !== 3 }">
+                        自旋 a（克尔）
+                        <div class="range-row">
+                            <input
+                                type="range"
+                                min="0"
+                                max="0.95"
+                                step="0.05"
+                                :value="spinRatio"
+                                :disabled="integrator !== 3"
+                                @input="((e) => onSpinInput(e))"
+                            />
+                            <span class="value">{{ spinLabel }}</span>
+                        </div>
+                    </label>
+                </section>
+
+                <section class="panel-block">
+                    <h2>呈现</h2>
+                    <label class="toggle">
+                        <input
+                            type="checkbox"
+                            :checked="ucfToneMap"
+                            @change="((e) => onToneMapChange(e))"
+                        />
+                        UCF 色调映射
+                    </label>
+                    <label class="toggle" :class="{ dimmed: !ucfToneMap }">
+                        <input
+                            type="checkbox"
+                            :checked="bloom"
+                            :disabled="!ucfToneMap"
+                            @change="((e) => onBloomChange(e))"
+                        />
+                        泛光 Bloom
+                    </label>
+                </section>
+
+                <section class="panel-block">
+                    <h2>分辨率</h2>
+                    <div class="preset-row">
+                        <button
+                            type="button"
+                            :class="{ active: width === 640 && height === 360 }"
+                            @click="(() => setResolution(640, 360))"
+                        >
+                            640×360
+                        </button>
+                        <button
+                            type="button"
+                            :class="{ active: width === 800 && height === 450 }"
+                            @click="(() => setResolution(800, 450))"
+                        >
+                            800×450
+                        </button>
+                        <button
+                            type="button"
+                            :class="{ active: width === 960 && height === 540 }"
+                            @click="(() => setResolution(960, 540))"
+                        >
+                            960×540
+                        </button>
+                    </div>
+                </section>
+            </aside>
+        </div>
     </main>
 </template>
 <style>
 :root {
     color-scheme: dark;
     font-family: "Segoe UI", system-ui, sans-serif;
-    background: #05060a;
+    background: radial-gradient(ellipse 120% 80% at 50% -20%, #1a1f2e 0%, #05060a 55%);
     color: #e8ecf4;
 }
 
@@ -112,12 +138,20 @@ body {
 }
 
 .layout {
-    max-width: 920px;
+    max-width: 1120px;
     margin: 0 auto;
-    padding: 2rem 1.25rem 3rem;
+    padding: 1.75rem 1.25rem 2.5rem;
 }
 
-header h1 {
+.hero {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+}
+
+.hero h1 {
     margin: 0 0 0.35rem;
     font-size: 1.75rem;
     letter-spacing: 0.04em;
@@ -126,96 +160,239 @@ header h1 {
 .subtitle {
     margin: 0;
     color: #9aa3b5;
-    font-size: 0.95rem;
+    font-size: 0.92rem;
+    line-height: 1.45;
+    max-width: 36rem;
+}
+
+.live-badge {
+    flex-shrink: 0;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: #142018;
+    color: #6ee7a8;
+    border: 1px solid #1f4a35;
+}
+
+.live-badge.busy {
+    color: #f0c674;
+    background: #2a2210;
+    border-color: #5a4520;
+}
+
+.workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 1.25rem;
+    align-items: start;
+}
+
+@media (max-width: 880px) {
+    .workspace {
+        grid-template-columns: 1fr;
+    }
+
+    .hero {
+        flex-direction: column;
+    }
 }
 
 .stage {
-    margin: 1.5rem 0;
+    position: relative;
     border: 1px solid #1e2433;
-    border-radius: 12px;
+    border-radius: 14px;
     overflow: hidden;
     background: #000;
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
 }
 
 canvas {
     display: block;
     width: 100%;
     height: auto;
+    vertical-align: top;
 }
 
-.controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1rem 1.5rem;
-    align-items: flex-end;
-}
-
-.controls label {
+.stage-overlay {
+    position: absolute;
+    inset: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
-    font-size: 0.85rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    background: rgba(5, 6, 10, 0.72);
+    color: #c8d0e0;
+    font-size: 0.9rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+
+.stage-overlay.active {
+    opacity: 1;
+}
+
+.stage-overlay.subtle {
+    opacity: 0.35;
+    align-items: flex-end;
+    justify-content: flex-end;
+    padding: 0.75rem;
+    background: linear-gradient(transparent 40%, rgba(5, 6, 10, 0.55));
+}
+
+.stage-overlay.subtle .spinner {
+    width: 18px;
+    height: 18px;
+    border-width: 2px;
+}
+
+.spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid #2a3144;
+    border-top-color: #e8b84a;
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.stage-meta {
+    padding: 0.65rem 0.9rem;
+    font-size: 0.78rem;
+    color: #7d8799;
+    background: #0a0c12;
+    border-top: 1px solid #1a2030;
+    font-variant-numeric: tabular-nums;
+}
+
+.panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.panel-block {
+    padding: 0.9rem 1rem;
+    border-radius: 12px;
+    border: 1px solid #1e2433;
+    background: rgba(13, 16, 24, 0.85);
+}
+
+.panel-block h2 {
+    margin: 0 0 0.75rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #6b7588;
+}
+
+.panel-block label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-bottom: 0.85rem;
+    font-size: 0.84rem;
     color: #b8c0d0;
 }
 
-.controls input[type="range"] {
-    width: 160px;
+.panel-block label:last-child {
+    margin-bottom: 0;
 }
 
-.controls label input[type="checkbox"] {
-    margin-right: 0.35rem;
+.panel-block label.toggle {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.55rem;
 }
 
-.controls label.dimmed {
+.panel-block label.dimmed {
     opacity: 0.55;
 }
 
-.controls input[type="range"]:disabled {
+.range-row {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.range-row input[type="range"] {
+    flex: 1;
+    min-width: 0;
+}
+
+.range-row .value {
+    min-width: 5.5rem;
+    font-size: 0.8rem;
+    color: #e8ecf4;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.panel-block select {
+    width: 100%;
+    padding: 0.45rem 0.55rem;
+    border-radius: 8px;
+    border: 1px solid #2a3144;
+    background: #0d1018;
+    color: inherit;
+}
+
+.panel-block input[type="range"] {
+    accent-color: #e8b84a;
+}
+
+.panel-block input[type="range"]:disabled {
     opacity: 0.45;
     cursor: not-allowed;
 }
 
-.controls select {
-    min-width: 168px;
-    padding: 0.35rem 0.5rem;
-    border-radius: 6px;
-    border: 1px solid #2a3144;
-    background: #0d1018;
-    color: inherit;
+.preset-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
 }
 
-.controls input[type="number"] {
-    width: 88px;
-    padding: 0.35rem 0.5rem;
-    border-radius: 6px;
-    border: 1px solid #2a3144;
-    background: #0d1018;
-    color: inherit;
-}
-
-.controls button {
-    padding: 0.55rem 1.1rem;
-    border: none;
+.preset-row button {
+    flex: 1 1 calc(33% - 0.5rem);
+    min-width: 5.5rem;
+    padding: 0.45rem 0.35rem;
     border-radius: 8px;
-    background: #e8b84a;
-    color: #1a1200;
-    font-weight: 600;
+    border: 1px solid #2a3144;
+    background: #0d1018;
+    color: #b8c0d0;
+    font-size: 0.78rem;
     cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 
-.controls button:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
+.preset-row button:hover {
+    border-color: #3d4a66;
+    color: #e8ecf4;
 }
 
-.status {
-    margin-top: 1.25rem;
-    font-size: 0.82rem;
-    color: #7d8799;
+.preset-row button.active {
+    border-color: #e8b84a;
+    background: #1f1a0d;
+    color: #f0d078;
 }
 </style>
 <script client>
 import { renderTonFrame } from "../lib/blackhole-frame";
+
+const SLIDER_DEBOUNCE_MS = 200;
+const RESOLUTION_DEBOUNCE_MS = 80;
 
 export default class BlackholeView {
     mass = 1.0;
@@ -226,8 +403,19 @@ export default class BlackholeView {
     bloom = false;
     width = 640;
     height = 360;
-    status = "点击「渲染一帧」开始";
-    rendering = false;
+    status = "准备渲染…";
+    booting = false;
+    refining = false;
+    qualityBadge = "就绪";
+
+    _renderTimer = null;
+    _renderBusy = false;
+    _pendingRender = false;
+    _renderGeneration = 0;
+
+    get overlayText() {
+        return this.booting ? "首帧预览…" : "细化中…";
+    }
 
     get massLabel() {
         return this.mass.toFixed(1);
@@ -235,39 +423,138 @@ export default class BlackholeView {
 
     get spinLabel() {
         const a = this.mass * this.spinRatio;
-        return `a=${a.toFixed(2)} (${(this.spinRatio * 100).toFixed(0)}% M)`;
+        return `a=${a.toFixed(2)}`;
     }
 
     get spin() {
         return this.mass * this.spinRatio;
     }
 
+    async onMount() {
+        await this.runRender();
+    }
+
+    scheduleRender(delayMs = SLIDER_DEBOUNCE_MS) {
+        if (this._renderTimer !== null) {
+            clearTimeout(this._renderTimer);
+        }
+        this._renderTimer = setTimeout(() => {
+            this._renderTimer = null;
+            void this.runRender();
+        }, delayMs);
+    }
+
+    onIntegratorChange(e) {
+        this.integrator = Number(e.target.value);
+        this.scheduleRender(0);
+    }
+
+    onDiskModelChange(e) {
+        this.diskModel = Number(e.target.value);
+        this.scheduleRender(0);
+    }
+
+    onMassInput(e) {
+        this.mass = Number(e.target.value);
+        this.scheduleRender(SLIDER_DEBOUNCE_MS);
+    }
+
+    onSpinInput(e) {
+        this.spinRatio = Number(e.target.value);
+        this.scheduleRender(SLIDER_DEBOUNCE_MS);
+    }
+
+    onToneMapChange(e) {
+        this.ucfToneMap = e.target.checked;
+        if (!this.ucfToneMap) {
+            this.bloom = false;
+        }
+        this.scheduleRender(0);
+    }
+
+    onBloomChange(e) {
+        this.bloom = e.target.checked;
+        this.scheduleRender(0);
+    }
+
+    setResolution(width, height) {
+        this.width = width;
+        this.height = height;
+        this.scheduleRender(RESOLUTION_DEBOUNCE_MS);
+    }
+
     async runRender() {
+        if (this._renderBusy) {
+            this._renderGeneration += 1;
+            this._pendingRender = true;
+            return;
+        }
+
         const canvas = document.getElementById("ton-view");
         if (!(canvas instanceof HTMLCanvasElement)) {
             this.status = "失败: canvas 未找到";
             return;
         }
+
+        const generation = ++this._renderGeneration;
         canvas.width = this.width;
         canvas.height = this.height;
-        this.rendering = true;
-        this.status = "渲染中…（CPU 测地线，可能需数秒）";
+        this._renderBusy = true;
+        this.booting = true;
+        this.refining = false;
+        this.qualityBadge = "启动";
+        this.status = `渐进渲染 · 目标 ${this.width}×${this.height}`;
         const t0 = performance.now();
+
         try {
-            const { statusLine } = await renderTonFrame(canvas, {
-                mass: this.mass,
-                spin: this.spin,
-                integrator: this.integrator,
-                diskModel: this.diskModel,
-                ucfToneMap: this.ucfToneMap,
-                bloom: this.bloom,
-            });
+            const { statusLine } = await renderTonFrame(
+                canvas,
+                {
+                    mass: this.mass,
+                    spin: this.spin,
+                    integrator: this.integrator,
+                    diskModel: this.diskModel,
+                    ucfToneMap: this.ucfToneMap,
+                    bloom: this.bloom,
+                },
+                {
+                    shouldContinue: () => generation === this._renderGeneration,
+                    onPass: (info) => {
+                        if (generation !== this._renderGeneration) {
+                            return;
+                        }
+                        const pct = Math.round(info.scale * 100);
+                        this.qualityBadge = info.final
+                            ? `${info.tier} · ${pct}%`
+                            : `预览 ${pct}%`;
+                        this.status = `${info.tier} · ${info.width}×${info.height} · pass ${info.pass + 1}/${info.passes}`;
+                        if (!info.final) {
+                            this.booting = false;
+                            this.refining = true;
+                        }
+                    },
+                },
+            );
+            if (generation !== this._renderGeneration) {
+                return;
+            }
             const dt = ((performance.now() - t0) / 1000).toFixed(2);
             this.status = `${statusLine} · ${dt}s`;
+            this.qualityBadge = "就绪";
         } catch (err) {
-            this.status = `失败: ${err instanceof Error ? err.message : String(err)}`;
+            if (generation === this._renderGeneration) {
+                this.status = `失败: ${err instanceof Error ? err.message : String(err)}`;
+                this.qualityBadge = "错误";
+            }
         } finally {
-            this.rendering = false;
+            this._renderBusy = false;
+            if (this._pendingRender) {
+                this._pendingRender = false;
+                void this.runRender();
+            } else if (generation === this._renderGeneration) {
+                this.booting = false;
+                this.refining = false;
+            }
         }
     }
 }

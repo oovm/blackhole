@@ -30,7 +30,7 @@ async function presentL0Blit(target, memory, outPtr, width, height) {
 }
 /**
  * 渲染史瓦西黑洞一帧并上屏。
- * CPU 测地线在 `ton-sim`；上屏优先 UCF L2 WebGPU（`ton_l2_present_rgba8_webgpu` + `ucf_host`），降级 L0 readback。
+ * CPU 测地线在 `ton-simulation` / `ton-renderer`；上屏优先 UCF L2 WebGPU（`ton_l2_present_rgba8_webgpu` + `ucf_host`），降级 L0 readback。
  */
 export async function renderBlackholeFrame(canvas, options = {}) {
     const width = canvas.width;

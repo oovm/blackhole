@@ -6,6 +6,7 @@ export { tonWasmRustTarget } from "./load.js";
 export {
     loadTonWasm,
     renderBlackholeFrame,
+    renderBlackholeFrameProgressive,
     presentRgba8ToCanvas2d,
     initWebGpuHost,
     UcfHostHandleRegistry,
@@ -16,7 +17,9 @@ export type {
     TonWasmBindings,
     TonWasmInfo,
     RenderBlackholeOptions,
+    RenderBlackholeProgressiveOptions,
     RenderBlackholeResult,
+    ProgressivePassInfo,
     PresentTier,
 } from "./present.js";
 
