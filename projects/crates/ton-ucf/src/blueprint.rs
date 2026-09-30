@@ -62,4 +62,17 @@ mod tests {
             Some(ParamValue::Str(op)) if op == "ton_trace_sem_classical"
         ));
     }
+
+    #[test]
+    fn procedural_fbm_graph_uses_fbm_shade_op() {
+        let g = build_frame_graph(
+            IntegratorKind::SchwarzschildOrbit,
+            DiskModelKind::ProceduralFbm,
+        );
+        g.validate().expect("graph must validate");
+        assert!(matches!(
+            g.tasks.nodes[3].params.get("op"),
+            Some(ParamValue::Str(op)) if op == "ton_shade_procedural_fbm"
+        ));
+    }
 }

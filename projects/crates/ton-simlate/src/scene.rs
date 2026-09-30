@@ -103,6 +103,7 @@ impl Scene {
             disk: self.disk,
             trace: self.trace,
             integrator: self.integrator,
+            disk_model: self.disk_model,
         })
         .render()
     }
