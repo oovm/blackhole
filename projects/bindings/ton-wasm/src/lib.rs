@@ -64,3 +64,9 @@ pub extern "C" fn ton_l2_present_rgba8_webgpu(
 ) -> i32 {
     present_rgba8_webgpu_via_host(width, height, ptr, byte_len)
 }
+
+/// UCF L2：`Raster` 三角薄门 → WebGPU（CPU 图校验 + `ucf_host` 提交）。
+#[unsafe(no_mangle)]
+pub extern "C" fn ton_ucf_l2_raster_tri_webgpu(width: u32, height: u32) -> i32 {
+    ucf_wasm::l2_raster_tri_webgpu_status(width, height)
+}

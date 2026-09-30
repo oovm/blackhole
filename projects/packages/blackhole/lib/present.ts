@@ -1,12 +1,15 @@
+import { initWebGpuHost } from "./ucf/index.js";
 import { loadTonWasm, type LoadTonWasmOptions, type TonWasmBindings } from "./load.js";
 
-/** UCF Web 对齐：L0 = CPU readback → canvas 2D（不经手写 WGSL / `wgpu` crate）。 */
-export type PresentTier = "L0";
+/** UCF Web 呈现档位：L2 = WebGPU 宿主提交，L0 = CPU readback。 */
+export type PresentTier = "L2" | "L0";
 
 export interface RenderBlackholeOptions extends LoadTonWasmOptions {
     mass?: number;
     /** RGBA8 写入 wasm 线性内存偏移；默认 65536。 */
     outPtr?: number;
+    /** 强制 L0（调试）；默认 WebGPU 可用时走 L2。 */
+    forceL0?: boolean;
 }
 
 export interface RenderBlackholeResult {
@@ -24,15 +27,50 @@ export function presentRgba8ToCanvas2d(
     height: number,
 ): void {
     const byteLen = width * height * 4;
-    // 必须从 wasm 线性内存拷贝：memory.grow 会使旧 buffer 失效，且部分引擎不接受外部视图。
     const bytes = new Uint8ClampedArray(byteLen);
     bytes.set(new Uint8Array(memory.buffer, outPtr, byteLen));
     ctx.putImageData(new ImageData(bytes, width, height), 0, 0);
 }
 
+function probeWebGpu(): boolean {
+    return typeof navigator !== "undefined" && !!navigator.gpu;
+}
+
+async function presentL0Readback(
+    canvas: HTMLCanvasElement,
+    memory: WebAssembly.Memory,
+    outPtr: number,
+    width: number,
+    height: number,
+): Promise<void> {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+        throw new Error("canvas 2d context unavailable");
+    }
+    presentRgba8ToCanvas2d(ctx, memory, outPtr, width, height);
+}
+
+async function presentL0Blit(
+    target: HTMLCanvasElement,
+    memory: WebAssembly.Memory,
+    outPtr: number,
+    width: number,
+    height: number,
+): Promise<void> {
+    const scratch = document.createElement("canvas");
+    scratch.width = width;
+    scratch.height = height;
+    await presentL0Readback(scratch, memory, outPtr, width, height);
+    const ctx = target.getContext("2d");
+    if (!ctx) {
+        throw new Error("target canvas 2d unavailable for L0 blit");
+    }
+    ctx.drawImage(scratch, 0, 0);
+}
+
 /**
- * 渲染史瓦西黑洞一帧并上屏（UCF L0：wasm RGBA8 readback → `ImageData`）。
- * GPU 测地线积分后置为 UCF compute 图，不在此手写 WebGPU pipeline。
+ * 渲染史瓦西黑洞一帧并上屏。
+ * CPU 测地线在 `ton-sim`；上屏优先 UCF L2 WebGPU（`ton_l2_present_rgba8_webgpu` + `ucf_host`），降级 L0 readback。
  */
 export async function renderBlackholeFrame(
     canvas: HTMLCanvasElement,
@@ -53,12 +91,26 @@ export async function renderBlackholeFrame(
         throw new Error("ton wasm memory too small for frame readback");
     }
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-        throw new Error("canvas 2d context unavailable (do not bind WebGPU on same canvas)");
+    if (!options.forceL0 && probeWebGpu()) {
+        try {
+            await initWebGpuHost(canvas);
+            const l2 = ton.l2PresentRgba8Webgpu(width, height, outPtr, byteLen);
+            if (l2 === 0) {
+                return { ton, tier: "L2" };
+            }
+            throw new Error(`ton_l2_present_rgba8_webgpu failed: ${l2}`);
+        } catch {
+            // WebGPU canvas 可能已占用；降级 L0 blit
+        }
     }
-    presentRgba8ToCanvas2d(ctx, ton.memory, outPtr, width, height);
+
+    try {
+        await presentL0Readback(canvas, ton.memory, outPtr, width, height);
+    } catch {
+        await presentL0Blit(canvas, ton.memory, outPtr, width, height);
+    }
     return { ton, tier: "L0" };
 }
 
 export { loadTonWasm, type LoadTonWasmOptions, type TonWasmBindings, type TonWasmInfo } from "./load.js";
+export { initWebGpuHost, UcfHostHandleRegistry } from "./ucf/index.js";

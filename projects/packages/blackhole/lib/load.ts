@@ -1,3 +1,9 @@
+import {
+    buildTonHostImports,
+    buildUcfHostImports,
+    UcfHostHandleRegistry,
+} from "./ucf/index.js";
+
 export const tonWasmRustTarget = "wasm32-unknown-unknown" as const;
 
 export interface TonWasmInfo {
@@ -16,12 +22,15 @@ export interface TonWasmBindings {
         mass: number,
         outPtr: number,
     ): number;
+    l2PresentRgba8Webgpu(width: number, height: number, ptr: number, byteLen: number): number;
+    ucfL2RasterTriWebgpu(width: number, height: number): number;
     memory: WebAssembly.Memory;
 }
 
 export interface LoadTonWasmOptions {
     wasmUrl?: string | URL;
     module?: WebAssembly.Module;
+    registry?: UcfHostHandleRegistry;
 }
 
 type WasmExports = {
@@ -35,6 +44,13 @@ type WasmExports = {
         mass: number,
         outPtr: number,
     ) => number;
+    ton_l2_present_rgba8_webgpu: (
+        width: number,
+        height: number,
+        ptr: number,
+        byteLen: number,
+    ) => number;
+    ton_ucf_l2_raster_tri_webgpu: (width: number, height: number) => number;
 };
 
 function decodeVersion(code: number): string {
@@ -53,24 +69,14 @@ function readCString(memory: WebAssembly.Memory, ptr: number): string {
     return new TextDecoder().decode(view.subarray(ptr, end));
 }
 
-/** wasm 仍链入 `ucf-wasm` / `ton_host` import；宿主侧仅 no-op stub，呈现走 L0 readback。 */
-function buildImports(): WebAssembly.Imports {
-    return {
-        ton_host: {
-            ton_host_present_rgba8_webgpu: (): number => -30,
-        },
-        ucf_host: {
-            ucf_host_bind_external_buffer: (): number => 0,
-            ucf_host_l2_color_fill_webgpu: (): number => 0,
-            ucf_host_l2_raster_clear_webgpu: (): number => 0,
-            ucf_host_l2_raster_tri_webgpu: (): number => 0,
-        },
-    };
-}
-
 export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<TonWasmBindings> {
     const url = options.wasmUrl ?? new URL("../lib/ton_wasm_bg.wasm", import.meta.url);
-    const imports = buildImports();
+    const memoryRef: { current?: WebAssembly.Memory } = {};
+    const registry = options.registry ?? new UcfHostHandleRegistry();
+    const imports: WebAssembly.Imports = {
+        ton_host: buildTonHostImports(memoryRef),
+        ucf_host: buildUcfHostImports(registry),
+    };
 
     let exports: WasmExports;
     if (options.module) {
@@ -87,6 +93,7 @@ export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<Ton
         throw new Error("ton_wasm_bg.wasm unavailable: run build:wasm first");
     }
 
+    memoryRef.current = exports.memory;
     const memory = exports.memory;
 
     return {
@@ -108,5 +115,17 @@ export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<Ton
         },
         renderSchwarzschildRgba8: (width, height, mass, outPtr) =>
             exports.ton_render_schwarzschild_rgba8(width, height, mass, outPtr),
+        l2PresentRgba8Webgpu: (width, height, ptr, byteLen) => {
+            if (!exports.ton_l2_present_rgba8_webgpu) {
+                return -50;
+            }
+            return exports.ton_l2_present_rgba8_webgpu(width, height, ptr, byteLen);
+        },
+        ucfL2RasterTriWebgpu: (width, height) => {
+            if (!exports.ton_ucf_l2_raster_tri_webgpu) {
+                return -50;
+            }
+            return exports.ton_ucf_l2_raster_tri_webgpu(width, height);
+        },
     };
 }
