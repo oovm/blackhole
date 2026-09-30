@@ -7,4 +7,5 @@ mod ucf_cpu;
 
 pub use params::black_hole_for_render;
 pub use scene::{Scene, SceneBuilder};
+pub use ton_renderer::RenderMode;
 pub use ucf_cpu::{execute_frame_graph_cpu, CpuGraphExecution};

@@ -3,6 +3,7 @@
 
 mod black_hole;
 mod camera;
+mod disk_frame;
 mod color;
 mod error;
 mod kind;
@@ -12,6 +13,7 @@ mod vec3;
 
 pub use black_hole::BlackHole;
 pub use camera::Camera;
+pub use disk_frame::DiskFrame;
 pub use color::Rgb;
 pub use error::{TonError, TonResult};
 pub use kind::{DiskModelKind, IntegratorKind};

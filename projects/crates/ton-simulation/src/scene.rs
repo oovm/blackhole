@@ -2,7 +2,7 @@ use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
 use ton_renderer::{
     build_frame_graph_with_post, default_camera, default_integrator, Framebuffer, Graph,
-    RenderConfig, Renderer,
+    RenderConfig, RenderMode, RenderOutput, Renderer,
 };
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
 
@@ -20,6 +20,7 @@ pub struct Scene {
     pub disk_model: DiskModelKind,
     /// UCF 帧图是否插入 `ton_bloom` 任务。
     pub post_bloom: bool,
+    pub render_mode: RenderMode,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +34,7 @@ pub struct SceneBuilder {
     integrator: IntegratorKind,
     disk_model: DiskModelKind,
     post_bloom: bool,
+    render_mode: RenderMode,
 }
 
 impl SceneBuilder {
@@ -47,7 +49,13 @@ impl SceneBuilder {
             integrator: default_integrator(black_hole),
             disk_model: DiskModelKind::NovikovThorneThin,
             post_bloom: false,
+            render_mode: RenderMode::Beauty,
         }
+    }
+
+    pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
+        self.render_mode = mode;
+        self
     }
 
     pub fn with_post_bloom(mut self, enabled: bool) -> Self {
@@ -84,6 +92,16 @@ impl SceneBuilder {
         self
     }
 
+    pub fn with_step_size(mut self, step_size: f64) -> Self {
+        self.trace.step_size = step_size;
+        self
+    }
+
+    pub fn with_trace(mut self, trace: TraceConfig) -> Self {
+        self.trace = trace;
+        self
+    }
+
     pub fn build(self) -> Scene {
         let disk = if self.disk_model != DiskModelKind::None && self.disk.is_none() {
             Some(AccretionDisk::new(
@@ -103,6 +121,7 @@ impl SceneBuilder {
             integrator: self.integrator,
             disk_model: self.disk_model,
             post_bloom: self.post_bloom,
+            render_mode: self.render_mode,
         }
     }
 }
@@ -123,6 +142,11 @@ impl Scene {
     }
 
     pub fn render_frame(&self) -> Framebuffer {
+        self.render_frame_with_histogram().framebuffer
+    }
+
+    /// 渲染一帧；`termination` / `capture` 模式下附带终止直方图。
+    pub fn render_frame_with_histogram(&self) -> RenderOutput {
         Renderer::new(RenderConfig {
             width: self.width,
             height: self.height,
@@ -132,7 +156,8 @@ impl Scene {
             trace: self.trace,
             integrator: self.integrator,
             disk_model: self.disk_model,
+            mode: self.render_mode,
         })
-        .render()
+        .render_with_histogram()
     }
 }

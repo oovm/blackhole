@@ -4,7 +4,7 @@ use std::env;
 use std::path::PathBuf;
 
 use image::{ImageBuffer, Rgba};
-use ton_simulation::Scene;
+use ton_simulation::{RenderMode, Scene};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Vec3};
 
 fn main() {
@@ -23,6 +23,8 @@ fn main() {
     let ucf_tone = args.iter().any(|a| a == "--ucf-tone");
     let bloom = args.iter().any(|a| a == "--bloom");
     let camera = parse_camera(&args, mass, spin);
+    let render_mode = parse_render_mode(&args);
+    let step_size = parse_f64_arg(&args, "--step-size", 0.08);
 
     let bh = if spin.abs() > f64::EPSILON {
         BlackHole::kerr(mass, spin)
@@ -35,6 +37,8 @@ fn main() {
         .with_disk_model(disk_model)
         .with_camera(camera)
         .with_resolution(width, height)
+        .with_render_mode(render_mode)
+        .with_step_size(step_size)
         .with_post_bloom(bloom);
 
     if disk_model != DiskModelKind::None {
@@ -44,7 +48,8 @@ fn main() {
     let scene = builder.build();
 
     eprintln!(
-        "TON view: integrator={}, disk={}, camera={}, {}x{} → {}",
+        "TON view: mode={}, integrator={}, disk={}, camera={}, {}x{} → {}",
+        render_mode_label(render_mode),
         integrator_label(integrator),
         disk_model_label(disk_model),
         camera_label(&args),
@@ -53,14 +58,21 @@ fn main() {
         out.display()
     );
     eprintln!(
-        "  M={:.3} r_s={:.3} b_c={:.3} shadowθ@10M={:.4} rad",
+        "  M={:.3} r_s={:.3} b_c={:.3} shadowθ@10M={:.4} rad step={:.4}",
         bh.mass,
         bh.event_horizon_radius(),
         bh.critical_impact_parameter(),
-        bh.shadow_angular_radius(10.0 * bh.mass)
+        bh.shadow_angular_radius(10.0 * bh.mass),
+        step_size
     );
 
-    let fb = if ucf_tone || bloom {
+    let fb = if render_mode != RenderMode::Beauty {
+        let output = scene.render_frame_with_histogram();
+        if let Some(hist) = output.termination_histogram {
+            eprintln!("{}", hist);
+        }
+        output.framebuffer
+    } else if ucf_tone || bloom {
         let (frame, report) = scene
             .render_frame_ucf_cpu()
             .expect("UCF CPU render failed");
@@ -124,6 +136,27 @@ fn parse_integrator(args: &[String]) -> IntegratorKind {
         Some("geodesic3d") => IntegratorKind::Geodesic3d,
         Some("kerr") => IntegratorKind::KerrEquatorial,
         _ => IntegratorKind::Geodesic3d,
+    }
+}
+
+fn parse_render_mode(args: &[String]) -> RenderMode {
+    match args
+        .iter()
+        .position(|a| a == "--mode")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+    {
+        Some("termination") => RenderMode::TerminationMap,
+        Some("capture") => RenderMode::CaptureSilhouette,
+        _ => RenderMode::Beauty,
+    }
+}
+
+fn render_mode_label(mode: RenderMode) -> &'static str {
+    match mode {
+        RenderMode::Beauty => "beauty",
+        RenderMode::TerminationMap => "termination",
+        RenderMode::CaptureSilhouette => "capture",
     }
 }
 

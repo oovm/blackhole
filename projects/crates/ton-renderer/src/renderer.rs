@@ -1,10 +1,25 @@
 use ton_disk::{procedural_fbm_color, sample_disk_radiance, AccretionDisk};
-use ton_geodesic::{trace_ray_radiance, DiskEmission, TraceConfig};
-use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Rgb, Vec3};
+use ton_geodesic::{
+    trace_ray_diagnostic, trace_ray_radiance_result, DiagnosticColorMode, DiskEmission,
+    TerminationHistogram, TraceConfig, TraceDiagnostic,
+};
+use ton_types::{BlackHole, Camera, DiskFrame, DiskModelKind, IntegratorKind, Rgb, Vec3};
 
 use crate::framebuffer::Framebuffer;
 use crate::post::tone_map_rgb;
 use crate::sky::sky_color;
+
+/// 渲染输出模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// 常规 HDR 辐射 + 色调映射。
+    #[default]
+    Beauty,
+    /// 按终止原因着色（捕获 / 逃逸 / 预算耗尽 / 数值失败等）。
+    TerminationMap,
+    /// 关闭盘与星空，仅显示黑洞阴影轮廓与失败像素。
+    CaptureSilhouette,
+}
 
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
@@ -16,10 +31,18 @@ pub struct RenderConfig {
     pub trace: TraceConfig,
     pub integrator: IntegratorKind,
     pub disk_model: DiskModelKind,
+    pub mode: RenderMode,
 }
 
 pub struct Renderer {
     config: RenderConfig,
+}
+
+/// 单帧渲染结果（含可选诊断直方图）。
+#[derive(Debug, Clone)]
+pub struct RenderOutput {
+    pub framebuffer: Framebuffer,
+    pub termination_histogram: Option<TerminationHistogram>,
 }
 
 impl Renderer {
@@ -28,27 +51,46 @@ impl Renderer {
     }
 
     pub fn render(&self) -> Framebuffer {
+        self.render_with_histogram().framebuffer
+    }
+
+    /// 渲染一帧；诊断模式下同时返回终止分类直方图。
+    pub fn render_with_histogram(&self) -> RenderOutput {
+        match self.config.mode {
+            RenderMode::Beauty => RenderOutput {
+                framebuffer: self.render_beauty(),
+                termination_histogram: None,
+            },
+            RenderMode::TerminationMap => {
+                let (fb, hist) =
+                    self.render_diagnostic(DiagnosticColorMode::TerminationMap);
+                RenderOutput {
+                    framebuffer: fb,
+                    termination_histogram: Some(hist),
+                }
+            }
+            RenderMode::CaptureSilhouette => {
+                let (fb, hist) =
+                    self.render_diagnostic(DiagnosticColorMode::CaptureSilhouette);
+                RenderOutput {
+                    framebuffer: fb,
+                    termination_histogram: Some(hist),
+                }
+            }
+        }
+    }
+
+    fn render_beauty(&self) -> Framebuffer {
         let w = self.config.width;
         let h = self.config.height;
         let mut fb = Framebuffer::new(w, h);
         let cam = self.config.camera;
         let bh = self.config.black_hole;
-        let disk_trace = self
-            .config
-            .disk
-            .filter(|_| self.config.disk_model != DiskModelKind::None);
-        let trace_cfg = TraceConfig {
-            disk_inner: disk_trace.map(|d| d.config.inner_radius),
-            disk_outer: disk_trace.map(|d| d.config.outer_radius),
-            ..self.config.trace
-        };
+        let trace_cfg = self.trace_config_with_disk();
         for y in 0..h {
             for x in 0..w {
-                let u = (x as f64 / w as f64) * 2.0 - 1.0;
-                let v = 1.0 - (y as f64 / h as f64) * 2.0;
-                let aspect = w as f64 / h as f64;
-                let dir = cam.ray_direction(u * aspect, v);
-                let hdr = trace_ray_radiance(
+                let dir = self.pixel_ray_dir(x, y, w, h, cam);
+                let pixel = match trace_ray_radiance_result(
                     self.config.integrator,
                     bh,
                     cam.position,
@@ -56,14 +98,68 @@ impl Renderer {
                     trace_cfg,
                     |radius, position| self.emit_disk(radius, position),
                     sky_color,
-                )
-                .map(|r| r.radiance)
-                .unwrap_or_else(|_| sky_color(dir));
-                let color = display_map(hdr);
-                fb.set(x, y, color);
+                ) {
+                    Ok(r) => display_map(r.radiance),
+                    Err(diag) => diagnostic_to_display_rgb(diag, DiagnosticColorMode::TerminationMap),
+                };
+                fb.set(x, y, pixel);
             }
         }
         fb
+    }
+
+    fn render_diagnostic(
+        &self,
+        color_mode: DiagnosticColorMode,
+    ) -> (Framebuffer, TerminationHistogram) {
+        let w = self.config.width;
+        let h = self.config.height;
+        let mut fb = Framebuffer::new(w, h);
+        let mut histogram = TerminationHistogram::default();
+        let cam = self.config.camera;
+        let bh = self.config.black_hole;
+        let trace_cfg = match color_mode {
+            DiagnosticColorMode::CaptureSilhouette => TraceConfig {
+                disk_inner: None,
+                disk_outer: None,
+                ..self.config.trace
+            },
+            DiagnosticColorMode::TerminationMap => self.trace_config_with_disk(),
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let dir = self.pixel_ray_dir(x, y, w, h, cam);
+                let diag = trace_ray_diagnostic(
+                    self.config.integrator,
+                    bh,
+                    cam.position,
+                    dir,
+                    trace_cfg,
+                );
+                histogram.record(diag.termination);
+                fb.set(x, y, diagnostic_to_display_rgb(diag, color_mode));
+            }
+        }
+        (fb, histogram)
+    }
+
+    fn trace_config_with_disk(&self) -> TraceConfig {
+        let disk_trace = self
+            .config
+            .disk
+            .filter(|_| self.config.disk_model != DiskModelKind::None);
+        TraceConfig {
+            disk_inner: disk_trace.map(|d| d.config.inner_radius),
+            disk_outer: disk_trace.map(|d| d.config.outer_radius),
+            ..self.config.trace
+        }
+    }
+
+    fn pixel_ray_dir(&self, x: u32, y: u32, w: u32, h: u32, cam: Camera) -> Vec3 {
+        let u = (x as f64 / w as f64) * 2.0 - 1.0;
+        let v = 1.0 - (y as f64 / h as f64) * 2.0;
+        let aspect = w as f64 / h as f64;
+        cam.ray_direction(u * aspect, v)
     }
 
     fn emit_disk(&self, radius: f64, position: Vec3) -> DiskEmission {
@@ -74,14 +170,14 @@ impl Renderer {
             DiskModelKind::None => DiskEmission::opaque(Rgb::BLACK),
             DiskModelKind::NovikovThorneThin => disk
                 .map(|d| {
-                    let doppler = simplified_doppler(position, cam, radius, bh);
+                    let doppler = disk_frame_doppler(position, cam, radius, bh);
                     let sample = sample_disk_radiance(d, radius, doppler);
                     DiskEmission::with_absorption(sample.emissive_radiance, sample.absorption)
                 })
                 .unwrap_or(DiskEmission::with_absorption(Rgb::new(1.0, 0.6, 0.2), 0.15)),
             DiskModelKind::ProceduralFbm => disk
                 .map(|d| {
-                    let phi = position.y.atan2(position.x);
+                    let phi = disk_azimuth(position);
                     let color = procedural_fbm_color(
                         radius,
                         phi,
@@ -110,11 +206,17 @@ fn display_map(hdr: Rgb) -> Rgb {
     tone_map_rgb(hdr.scale(2.8))
 }
 
-/// 工程化 Doppler 近似：盘面切向速度 × 视线夹角。
-fn simplified_doppler(position: Vec3, camera: Camera, radius: f64, bh: BlackHole) -> f64 {
+fn diagnostic_to_display_rgb(diag: TraceDiagnostic, mode: DiagnosticColorMode) -> Rgb {
+    let (r, g, b) = diag.to_rgb8(mode);
+    Rgb::new(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
+}
+
+/// 盘面切向 Doppler：使用 [`DiskFrame::equatorial_xy`] 切向基，与盘面法线约定一致。
+fn disk_frame_doppler(position: Vec3, camera: Camera, radius: f64, bh: BlackHole) -> f64 {
+    let (_, _, n) = DiskFrame::equatorial_xy().tangent_basis();
     let m = bh.mass.max(1e-12);
     let speed = (m / radius.max(2.0 * m)).sqrt();
-    let tangent = Vec3::new(-position.y, position.x, 0.0);
+    let tangent = n.cross(position);
     let vel = if tangent.length() > 1e-12 {
         tangent.normalize().scale(speed)
     } else {
@@ -123,4 +225,11 @@ fn simplified_doppler(position: Vec3, camera: Camera, radius: f64, bh: BlackHole
     let view = camera.position.sub(position).normalize();
     let cos_theta = vel.dot(view) / speed.max(1e-12);
     (1.0 / (1.0 - cos_theta * 0.35).max(0.05)).clamp(0.25, 4.0)
+}
+
+fn disk_azimuth(position: Vec3) -> f64 {
+    let (t1, t2, _) = DiskFrame::equatorial_xy().tangent_basis();
+    let u = position.dot(t1);
+    let v = position.dot(t2);
+    v.atan2(u)
 }

@@ -7,8 +7,8 @@ use ton_metric::{
 use ton_types::{BlackHole, Rgb, TonError, TonResult, Vec3};
 
 use crate::radiance::{DiskEmission, RayRadiance};
-
 use crate::ray::RayHit;
+use crate::termination::{RayTermination, TraceDiagnostic};
 use crate::trace::TraceConfig;
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +33,25 @@ impl GeodesicState {
     fn tangent_cartesian(&self) -> Vec3 {
         spherical_velocity_to_cartesian(self.r, self.theta, self.phi, self.u[1], self.u[2], self.u[3])
     }
+}
+
+fn null_residual(mass: f64, state: &GeodesicState) -> f64 {
+    let r = state.r;
+    let theta = state.theta;
+    let f = 1.0 - 2.0 * mass / r.max(mass * 2.0 + 1e-9);
+    let sin_t = theta.sin();
+    let g = [
+        -f,
+        1.0 / f,
+        r * r,
+        r * r * sin_t * sin_t,
+    ];
+    let u = state.u;
+    (g[0] * u[0] * u[0]
+        + g[1] * u[1] * u[1]
+        + g[2] * u[2] * u[2]
+        + g[3] * u[3] * u[3])
+        .abs()
 }
 
 fn state_deriv(mass: f64, state: GeodesicState) -> ([f64; 4], [f64; 4]) {
@@ -73,6 +92,7 @@ fn rk4_geodesic_step(mass: f64, state: GeodesicState, dlambda: f64) -> GeodesicS
     state_add(state, (coord, accel), dlambda)
 }
 
+/// 盘面交点：默认盘面为 XY 平面（`z = 0`），与 [`ton_types::DiskFrame::equatorial_xy`] 一致。
 fn disk_crossing(
     prev: &GeodesicState,
     next: &GeodesicState,
@@ -95,6 +115,169 @@ fn disk_crossing(
     }
 }
 
+struct IntegrateOutcome {
+    diagnostic: TraceDiagnostic,
+    hit: Option<RayHit>,
+    escape_direction: Option<Vec3>,
+}
+
+fn integrate_geodesic<F>(
+    bh: BlackHole,
+    origin: Vec3,
+    direction: Vec3,
+    config: TraceConfig,
+    disk_enabled: bool,
+    single_disk_hit: bool,
+    mut on_disk: F,
+) -> IntegrateOutcome
+where
+    F: FnMut(f64, Vec3) -> bool,
+{
+    let mass = bh.mass;
+    if !mass.is_finite() || mass <= 0.0 {
+        return IntegrateOutcome {
+            diagnostic: TraceDiagnostic {
+                termination: RayTermination::DomainError,
+                steps: 0,
+                null_residual: 0.0,
+                disk_crossings: 0,
+            },
+            hit: None,
+            escape_direction: None,
+        };
+    }
+    let rs = bh.event_horizon_radius();
+    if origin.length() <= rs {
+        return IntegrateOutcome {
+            diagnostic: TraceDiagnostic {
+                termination: RayTermination::OriginInsideHorizon,
+                steps: 0,
+                null_residual: 0.0,
+                disk_crossings: 0,
+            },
+            hit: None,
+            escape_direction: None,
+        };
+    }
+    let u0 = match schwarzschild_null_four_velocity(mass, origin, direction) {
+        Some(u) => u,
+        None => {
+            return IntegrateOutcome {
+                diagnostic: TraceDiagnostic {
+                    termination: RayTermination::InitFailed,
+                    steps: 0,
+                    null_residual: 0.0,
+                    disk_crossings: 0,
+                },
+                hit: None,
+                escape_direction: None,
+            };
+        }
+    };
+    let sph = SphericalCoords::from_cartesian(origin);
+    let mut state = GeodesicState {
+        t: 0.0,
+        r: sph.r,
+        theta: sph.theta,
+        phi: sph.phi,
+        u: u0,
+    };
+    let dlambda = config.step_size;
+    let mut disk_crossings = 0u32;
+    let mut steps = 0u32;
+    let mut residual = null_residual(mass, &state);
+
+    for step in 0..config.max_steps {
+        steps = step + 1;
+        if state.r <= rs {
+            return IntegrateOutcome {
+                diagnostic: TraceDiagnostic {
+                    termination: RayTermination::Captured,
+                    steps,
+                    null_residual: residual,
+                    disk_crossings,
+                },
+                hit: Some(RayHit::Captured {
+                    position: state.cartesian(),
+                }),
+                escape_direction: None,
+            };
+        }
+        if state.r >= config.escape_radius {
+            let dir = state.tangent_cartesian().normalize();
+            return IntegrateOutcome {
+                diagnostic: TraceDiagnostic {
+                    termination: RayTermination::Escaped,
+                    steps,
+                    null_residual: residual,
+                    disk_crossings,
+                },
+                hit: Some(RayHit::Escaped { direction: dir }),
+                escape_direction: Some(dir),
+            };
+        }
+        if !state.r.is_finite() || state.u.iter().any(|v| !v.is_finite()) {
+            return IntegrateOutcome {
+                diagnostic: TraceDiagnostic {
+                    termination: RayTermination::NonFiniteState,
+                    steps,
+                    null_residual: residual,
+                    disk_crossings,
+                },
+                hit: None,
+                escape_direction: None,
+            };
+        }
+        residual = null_residual(mass, &state);
+        let prev = state;
+        state = rk4_geodesic_step(mass, prev, dlambda);
+        if step > 0 && disk_enabled {
+            if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
+                if let Some((radius, hit_pos)) = disk_crossing(&prev, &state, inner, outer, rs) {
+                    disk_crossings += 1;
+                    let stop = on_disk(radius, hit_pos);
+                    if single_disk_hit || stop {
+                        return IntegrateOutcome {
+                            diagnostic: TraceDiagnostic {
+                                termination: RayTermination::DiskCrossing,
+                                steps,
+                                null_residual: residual,
+                                disk_crossings,
+                            },
+                            hit: Some(RayHit::Disk {
+                                position: hit_pos,
+                                radius,
+                            }),
+                            escape_direction: None,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    IntegrateOutcome {
+        diagnostic: TraceDiagnostic {
+            termination: RayTermination::StepBudgetExceeded,
+            steps,
+            null_residual: residual,
+            disk_crossings,
+        },
+        hit: None,
+        escape_direction: None,
+    }
+}
+
+/// 诊断追迹：返回终止分类、步数、零测地线残差与盘面穿越次数。
+pub fn trace_geodesic_3d_diagnostic(
+    bh: BlackHole,
+    origin: Vec3,
+    direction: Vec3,
+    config: TraceConfig,
+) -> TraceDiagnostic {
+    let disk_on = config.disk_inner.is_some() && config.disk_outer.is_some();
+    integrate_geodesic(bh, origin, direction, config, disk_on, true, |_r, _p| true).diagnostic
+}
+
 /// 完整 3D 零测地线：Christoffel RK4，与 `SchwarzschildOrbit` 独立 golden。
 pub fn trace_geodesic_3d(
     bh: BlackHole,
@@ -102,53 +285,30 @@ pub fn trace_geodesic_3d(
     direction: Vec3,
     config: TraceConfig,
 ) -> TonResult<RayHit> {
-    let mass = bh.mass;
-    if !mass.is_finite() || mass <= 0.0 {
-        return Err(TonError::Domain("mass must be finite and positive".into()));
-    }
-    let rs = bh.event_horizon_radius();
-    if origin.length() <= rs {
-        return Err(TonError::Captured);
-    }
-    let u0 = schwarzschild_null_four_velocity(mass, origin, direction)
-        .ok_or_else(|| TonError::Domain("failed to initialize null four-velocity".into()))?;
-    let sph = SphericalCoords::from_cartesian(origin);
-    let mut state = GeodesicState {
-        t: 0.0,
-        r: sph.r,
-        theta: sph.theta,
-        phi: sph.phi,
-        u: u0,
-    };
-    let dlambda = config.step_size;
-    for step in 0..config.max_steps {
-        if state.r <= rs {
-            return Ok(RayHit::Captured {
-                position: state.cartesian(),
-            });
-        }
-        if state.r >= config.escape_radius {
-            return Ok(RayHit::Escaped {
-                direction: state.tangent_cartesian().normalize(),
-            });
-        }
-        if !state.r.is_finite() || state.u.iter().any(|v| !v.is_finite()) {
-            return Err(TonError::Domain("non-finite geodesic state".into()));
-        }
-        let prev = state;
-        state = rk4_geodesic_step(mass, prev, dlambda);
-        if step > 0 {
-            if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
-                if let Some((radius, position)) = disk_crossing(&prev, &state, inner, outer, rs) {
-                    return Ok(RayHit::Disk { position, radius });
-                }
+    let disk_on = config.disk_inner.is_some() && config.disk_outer.is_some();
+    let out = integrate_geodesic(bh, origin, direction, config, disk_on, true, |_r, _p| true);
+    match out.hit {
+        Some(hit) => Ok(hit),
+        None => match out.diagnostic.termination {
+            RayTermination::StepBudgetExceeded => {
+                Err(TonError::Domain("max steps exceeded".into()))
             }
-        }
+            RayTermination::NonFiniteState => {
+                Err(TonError::Domain("non-finite geodesic state".into()))
+            }
+            RayTermination::InitFailed => {
+                Err(TonError::Domain("failed to initialize null four-velocity".into()))
+            }
+            RayTermination::OriginInsideHorizon => Err(TonError::Captured),
+            RayTermination::DomainError => {
+                Err(TonError::Domain("mass must be finite and positive".into()))
+            }
+            _ => Err(TonError::Domain("geodesic integration failed".into())),
+        },
     }
-    Err(TonError::Domain("max steps exceeded".into()))
 }
 
-/// 3D 测地线 + 薄盘多次穿越 HDR 累积；`emit_disk` 返回局部发射，`sky` 在逃逸时乘透射率叠加。
+/// 3D 测地线 + 薄盘多次穿越 HDR 累积。
 pub fn trace_geodesic_3d_radiance<F, S>(
     bh: BlackHole,
     origin: Vec3,
@@ -156,64 +316,52 @@ pub fn trace_geodesic_3d_radiance<F, S>(
     config: TraceConfig,
     mut emit_disk: F,
     sky: S,
-) -> TonResult<RayRadiance>
+) -> Result<RayRadiance, TraceDiagnostic>
 where
     F: FnMut(f64, Vec3) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     const MAX_DISK_HITS: u32 = 8;
-    let mass = bh.mass;
-    if !mass.is_finite() || mass <= 0.0 {
-        return Err(TonError::Domain("mass must be finite and positive".into()));
-    }
-    let rs = bh.event_horizon_radius();
-    if origin.length() <= rs {
-        return Ok(RayRadiance::BLACK);
-    }
-    let u0 = schwarzschild_null_four_velocity(mass, origin, direction)
-        .ok_or_else(|| TonError::Domain("failed to initialize null four-velocity".into()))?;
-    let sph = SphericalCoords::from_cartesian(origin);
-    let mut state = GeodesicState {
-        t: 0.0,
-        r: sph.r,
-        theta: sph.theta,
-        phi: sph.phi,
-        u: u0,
-    };
-    let dlambda = config.step_size;
+    let disk_on = config.disk_inner.is_some() && config.disk_outer.is_some();
     let mut radiance = Rgb::BLACK;
     let mut transmittance = 1.0;
     let mut disk_hits = 0u32;
 
-    for step in 0..config.max_steps {
-        if state.r <= rs {
-            return Ok(RayRadiance::new(radiance));
-        }
-        if state.r >= config.escape_radius {
-            let sky_dir = state.tangent_cartesian().normalize();
-            return Ok(RayRadiance::new(
-                radiance.add(sky(sky_dir).scale(transmittance)),
-            ));
-        }
-        if !state.r.is_finite() || state.u.iter().any(|v| !v.is_finite()) {
-            return Err(TonError::Domain("non-finite geodesic state".into()));
-        }
-        let prev = state;
-        state = rk4_geodesic_step(mass, prev, dlambda);
-        if step > 0 {
-            if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
-                if disk_hits < MAX_DISK_HITS {
-                    if let Some((radius, hit_pos)) = disk_crossing(&prev, &state, inner, outer, rs) {
-                        let sample = emit_disk(radius, hit_pos);
-                        radiance = radiance.add(sample.radiance.scale(transmittance));
-                        transmittance *= (1.0 - sample.absorption).clamp(0.05, 1.0);
-                        disk_hits += 1;
-                    }
-                }
+    let out = integrate_geodesic(
+        bh,
+        origin,
+        direction,
+        config,
+        disk_on,
+        false,
+        |radius, hit_pos| {
+            if disk_hits >= MAX_DISK_HITS {
+                return false;
             }
+            let sample = emit_disk(radius, hit_pos);
+            radiance = radiance.add(sample.radiance.scale(transmittance));
+            transmittance *= (1.0 - sample.absorption).clamp(0.05, 1.0);
+            disk_hits += 1;
+            false
+        },
+    );
+
+    match out.diagnostic.termination {
+        RayTermination::Captured | RayTermination::OriginInsideHorizon => {
+            Ok(RayRadiance::new(radiance))
         }
+        RayTermination::Escaped => {
+            let sky_dir = out.escape_direction.unwrap_or(direction);
+            Ok(RayRadiance::new(
+                radiance.add(sky(sky_dir).scale(transmittance)),
+            ))
+        }
+        RayTermination::DiskCrossing => Ok(RayRadiance::new(radiance)),
+        RayTermination::StepBudgetExceeded
+        | RayTermination::NonFiniteState
+        | RayTermination::InitFailed
+        | RayTermination::DomainError => Err(out.diagnostic),
     }
-    Err(TonError::Domain("max steps exceeded".into()))
 }
 
 #[cfg(test)]
@@ -232,6 +380,24 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(hit, RayHit::Captured { .. }));
+    }
+
+    #[test]
+    fn step_budget_reports_exceeded_not_escape() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let cfg = TraceConfig {
+            max_steps: 4,
+            step_size: 0.5,
+            escape_radius: 1.0e6,
+            ..TraceConfig::default()
+        };
+        let diag = trace_geodesic_3d_diagnostic(
+            bh,
+            Vec3::new(20.0, 0.0, 0.0),
+            Vec3::new(-0.2, 0.01, 0.0),
+            cfg,
+        );
+        assert_eq!(diag.termination, RayTermination::StepBudgetExceeded);
     }
 
     #[test]

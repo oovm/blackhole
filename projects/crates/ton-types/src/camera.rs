@@ -1,4 +1,4 @@
-use crate::{BlackHole, Vec3};
+use crate::{BlackHole, DiskFrame, Vec3};
 
 /// 针孔相机（右手系，看向 -Z 或自定义）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,24 +35,28 @@ impl Camera {
         dir.normalize()
     }
 
-    /// 电影构图预设：距离约 10M、盘面倾角 ~70°、较窄视场，阴影约占画面高度 35%～55%。
+    /// 相对薄盘参考系的电影构图：`inclination` 为与盘面法线的极角（0=正视盘面，π/2=边视）。
+    pub fn cinematic_over_disk(
+        bh: BlackHole,
+        disk: DiskFrame,
+        inclination_rad: f64,
+        azimuth_rad: f64,
+    ) -> Self {
+        let dist = 10.0 * bh.mass;
+        let (t1, t2, n) = disk.tangent_basis();
+        let sin_i = inclination_rad.sin();
+        let cos_i = inclination_rad.cos();
+        let position = n
+            .scale(dist * cos_i)
+            .add(t1.scale(dist * sin_i * azimuth_rad.cos()))
+            .add(t2.scale(dist * sin_i * azimuth_rad.sin()));
+        Self::look_at(position, Vec3::ZERO, t1, 0.85)
+    }
+
+    /// 电影构图预设：赤道 XY 盘面、相对法线倾角约 70°（近边视，可看到透镜抬升）。
     pub fn cinematic(bh: BlackHole) -> Self {
-        let m = bh.mass;
-        let dist = 10.0 * m;
         let inclination = 70.0 * std::f64::consts::PI / 180.0;
-        let azimuth: f64 = 0.35;
-        let sin_i = inclination.sin();
-        let cos_i = inclination.cos();
-        let position = Vec3::new(
-            dist * sin_i * azimuth.cos(),
-            dist * cos_i,
-            dist * sin_i * azimuth.sin(),
-        );
-        let target = Vec3::ZERO;
-        let up = Vec3::new(0.0, 1.0, 0.0);
-        // ~49° 垂直视场，配合 10M 距离使 b_c/D 阴影角占画面主体。
-        let fov_y = 0.85;
-        Self::look_at(position, target, up, fov_y)
+        Self::cinematic_over_disk(bh, DiskFrame::equatorial_xy(), inclination, 0.35)
     }
 }
 
@@ -67,5 +71,17 @@ mod tests {
         let to_center = Vec3::ZERO.sub(cam.position).normalize();
         let align = cam.forward.dot(to_center);
         assert!(align > 0.99);
+    }
+
+    #[test]
+    fn cinematic_inclination_relative_to_disk_normal() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let disk = DiskFrame::equatorial_xy();
+        let (_, _, n) = disk.tangent_basis();
+        let cam = Camera::cinematic(bh);
+        let pos = cam.position.normalize();
+        let angle_from_normal = n.dot(pos).acos();
+        let expected = 70.0 * std::f64::consts::PI / 180.0;
+        assert!((angle_from_normal - expected).abs() < 0.02);
     }
 }
