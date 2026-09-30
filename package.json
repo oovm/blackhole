@@ -1,5 +1,5 @@
 {
-    "name": "@doki-land/blackhole",
+    "name": "blackhole-workspace",
     "private": true,
     "packageManager": "pnpm@10.28.0",
     "description": "TON 黑洞模拟器：ton-* Rust crates + Web 演示",
@@ -10,7 +10,11 @@
         "test": "cargo test --workspace",
         "render": "cargo run -p ton-view -- blackhole.png --width 800 --height 450",
         "build:wasm": "pnpm --filter @doki-land/blackhole-unknown-wasm32 run build:wasm",
-        "build:ts": "pnpm --filter @doki-land/blackhole-unknown-wasm32 run build",
+        "build:ts": "pnpm --filter @doki-land/blackhole run build && pnpm --filter @doki-land/blackhole-unknown-wasm32 run build",
         "dev:homepage": "pnpm --filter @doki-land/blackhole-homepage run dev"
+    },
+    "devDependencies": {
+        "@types/node": "^22.10.0",
+        "typescript": "5.9.3"
     }
 }

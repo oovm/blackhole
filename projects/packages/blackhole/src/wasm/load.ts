@@ -70,7 +70,10 @@ function readCString(memory: WebAssembly.Memory, ptr: number): string {
 }
 
 export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<TonWasmBindings> {
-    const url = options.wasmUrl ?? new URL("../lib/ton_wasm_bg.wasm", import.meta.url);
+    if (!options.wasmUrl && !options.module) {
+        throw new Error("loadTonWasm requires wasmUrl or module (use @doki-land/blackhole-unknown-wasm32)");
+    }
+    const url = options.wasmUrl!;
     const memoryRef: { current?: WebAssembly.Memory } = {};
     const registry = options.registry ?? new UcfHostHandleRegistry();
     const imports: WebAssembly.Imports = {

@@ -1,7 +1,7 @@
 {
     "name": "@doki-land/blackhole-unknown-wasm32",
     "version": "0.1.0",
-    "description": "TON blackhole simulator Wasm loader and WebGPU present (UCF downstream host)",
+    "description": "TON blackhole wasm32-unknown-unknown platform bag",
     "type": "module",
     "license": "MIT",
     "exports": {
@@ -12,22 +12,19 @@
         },
         "./ton_wasm_bg.wasm": "./lib/ton_wasm_bg.wasm"
     },
-    "files": [
-        "dist",
-        "lib/ton_wasm_bg.wasm"
-    ],
+    "files": ["dist", "lib/ton_wasm_bg.wasm"],
     "scripts": {
-        "build": "tsc -p tsconfig.json",
+        "build": "pnpm --filter @doki-land/blackhole run build && node ../../../scripts/run-tsc.mjs tsconfig.json",
         "build:wasm": "cargo build -p ton-wasm --manifest-path ../../../Cargo.toml --target wasm32-unknown-unknown --release && node ./scripts/copy-from-cargo.mjs",
         "copy:wasm": "node ./scripts/copy-from-cargo.mjs"
     },
+    "dependencies": {
+        "@doki-land/blackhole": "workspace:*"
+    },
     "devDependencies": {
-        "@types/node": "^22.10.0",
         "@webgpu/types": "^0.1.60",
         "typescript": "catalog:"
     },
-    "engines": {
-        "node": ">=18"
-    },
+    "engines": { "node": ">=18" },
     "publish": false
 }

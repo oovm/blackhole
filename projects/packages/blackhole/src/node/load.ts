@@ -1,0 +1,48 @@
+/// <reference types="node" />
+import { createRequire } from "node:module";
+
+export const tonNodeRustTarget = "node-napi" as const;
+
+export interface TonNapiBindings {
+    tonVersionCode(): number;
+    renderSchwarzschildRgba8(width: number, height: number, mass: number): Uint8Array;
+}
+
+export interface LoadTonNapiOptions {
+    addon?: TonNapiBindings;
+}
+
+const PLATFORM_PACKAGES: Record<string, string> = {
+    "win32-x64": "@doki-land/blackhole-win32-x64",
+    "win32-arm64": "@doki-land/blackhole-win32-arm64",
+    "darwin-x64": "@doki-land/blackhole-darwin-x64",
+    "darwin-arm64": "@doki-land/blackhole-darwin-arm64",
+    "linux-x64": "@doki-land/blackhole-linux-x64",
+    "linux-arm64": "@doki-land/blackhole-linux-arm64",
+};
+
+function resolvePlatformPackage(): string {
+    const key = `${process.platform}-${process.arch}`;
+    const pkg = PLATFORM_PACKAGES[key];
+    if (!pkg) {
+        throw new Error(`unsupported node platform: ${key}`);
+    }
+    return pkg;
+}
+
+export async function loadTonNapi(options: LoadTonNapiOptions = {}): Promise<TonNapiBindings> {
+    if (options.addon) {
+        return options.addon;
+    }
+    const pkg = resolvePlatformPackage();
+    const require = createRequire(import.meta.url);
+    const native = require(pkg) as {
+        tonVersionCode: () => number;
+        renderSchwarzschildRgba8: (width: number, height: number, mass: number) => Uint8Array;
+    };
+    return {
+        tonVersionCode: () => native.tonVersionCode(),
+        renderSchwarzschildRgba8: (width, height, mass) =>
+            native.renderSchwarzschildRgba8(width, height, mass),
+    };
+}

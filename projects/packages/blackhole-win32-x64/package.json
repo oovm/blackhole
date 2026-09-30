@@ -2,12 +2,19 @@
     "name": "@doki-land/blackhole-win32-x64",
     "version": "0.1.0",
     "private": true,
-    "description": "TON native N-API addon bag (win32-x64) for `ton-napi`",
+    "description": "TON blackhole native platform bag (win32-x64)",
     "license": "MIT",
-    "os": ["win32"],
-    "cpu": ["x64"],
+    "os": [
+        "win32"
+    ],
+    "cpu": [
+        "x64"
+    ],
     "main": "ton.win32-x64-msvc.node",
-    "files": ["ton.win32-x64-msvc.node", "readme.md"],
+    "files": [
+        "ton.win32-x64-msvc.node",
+        "readme.md"
+    ],
     "scripts": {
         "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release && node ./scripts/copy-from-cargo.mjs"
     },

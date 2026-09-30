@@ -1,0 +1,22 @@
+{
+    "name": "@doki-land/blackhole-darwin-arm64",
+    "version": "0.1.0",
+    "private": true,
+    "description": "TON blackhole native platform bag (darwin-arm64)",
+    "license": "MIT",
+    "os": [
+        "darwin"
+    ],
+    "cpu": [
+        "arm64"
+    ],
+    "main": "ton.darwin-arm64.node",
+    "files": [
+        "ton.darwin-arm64.node",
+        "readme.md"
+    ],
+    "scripts": {
+        "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release --target aarch64-apple-darwin && node ./scripts/copy-from-cargo.mjs"
+    },
+    "publish": false
+}

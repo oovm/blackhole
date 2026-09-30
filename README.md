@@ -42,9 +42,10 @@ blackhole/
   projects/
     crates/              # ton-* 算法 + ton-wasm / ton-napi
     packages/
-      blackhole-unknown-wasm32/  # @doki-land/blackhole-unknown-wasm32（`ton-wasm` npm 袋）
-      blackhole-win32-x64/       # @doki-land/blackhole-win32-x64（`ton-napi` npm 袋）
-      homepage/                  # @doki-land/blackhole-homepage VMZ 演示
+      blackhole/                 # @doki-land/blackhole（src/wasm + src/node 宿主）
+      blackhole-unknown-wasm32/  # wasm 平台袋
+      blackhole-<triple>/        # node 平台袋（win32/linux/darwin × arch）
+      homepage/                  # VMZ 演示（仅 wasm）
     examples/
 ```
 

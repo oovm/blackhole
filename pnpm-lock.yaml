@@ -18,19 +18,46 @@ catalogs:
 
 importers:
 
-  .: {}
-
-  projects/packages/blackhole-unknown-wasm32:
+  .:
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.4
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
+  projects/packages/blackhole:
+    devDependencies:
       '@webgpu/types':
         specifier: ^0.1.60
         version: 0.1.74
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
+
+  projects/packages/blackhole-darwin-arm64: {}
+
+  projects/packages/blackhole-darwin-x64: {}
+
+  projects/packages/blackhole-linux-arm64: {}
+
+  projects/packages/blackhole-linux-x64: {}
+
+  projects/packages/blackhole-unknown-wasm32:
+    dependencies:
+      '@doki-land/blackhole':
+        specifier: workspace:*
+        version: link:../blackhole
+    devDependencies:
+      '@webgpu/types':
+        specifier: ^0.1.60
+        version: 0.1.74
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  projects/packages/blackhole-win32-arm64: {}
 
   projects/packages/blackhole-win32-x64: {}
 
@@ -49,9 +76,9 @@ importers:
 
   projects/packages/zhihu-playground:
     dependencies:
-      '@ton/blackhole':
-        specifier: file:./vendor/blackhole
-        version: file:projects/packages/zhihu-playground/vendor/blackhole
+      '@doki-land/blackhole-unknown-wasm32':
+        specifier: file:./vendor/blackhole-unknown-wasm32
+        version: file:projects/packages/zhihu-playground/vendor/blackhole-unknown-wasm32
       '@vmz/core':
         specifier: ^0.2.5
         version: 0.2.5
@@ -62,9 +89,8 @@ importers:
 
 packages:
 
-  '@ton/blackhole@file:projects/packages/zhihu-playground/vendor/blackhole':
-    resolution: {directory: projects/packages/zhihu-playground/vendor/blackhole, type: directory}
-    engines: {node: '>=18'}
+  '@doki-land/blackhole-unknown-wasm32@file:projects/packages/zhihu-playground/vendor/blackhole-unknown-wasm32':
+    resolution: {directory: projects/packages/zhihu-playground/vendor/blackhole-unknown-wasm32, type: directory}
 
   '@types/node@22.20.4':
     resolution: {integrity: sha512-zJRE40jpHtKqE/C4fgHrAKQLJuSpzEnP9ff9Y7YtoR3Wd2pwqzlekDeEuUQXjRd+QCYnVnNwuJYmhdk9XV8gvA==}
@@ -227,7 +253,7 @@ packages:
 
 snapshots:
 
-  '@ton/blackhole@file:projects/packages/zhihu-playground/vendor/blackhole': {}
+  '@doki-land/blackhole-unknown-wasm32@file:projects/packages/zhihu-playground/vendor/blackhole-unknown-wasm32': {}
 
   '@types/node@22.20.4':
     dependencies:

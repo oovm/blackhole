@@ -1,0 +1,22 @@
+{
+    "name": "@doki-land/blackhole-linux-arm64",
+    "version": "0.1.0",
+    "private": true,
+    "description": "TON blackhole native platform bag (linux-arm64)",
+    "license": "MIT",
+    "os": [
+        "linux"
+    ],
+    "cpu": [
+        "arm64"
+    ],
+    "main": "ton.linux-arm64-gnu.node",
+    "files": [
+        "ton.linux-arm64-gnu.node",
+        "readme.md"
+    ],
+    "scripts": {
+        "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release --target aarch64-unknown-linux-gnu && node ./scripts/copy-from-cargo.mjs"
+    },
+    "publish": false
+}
