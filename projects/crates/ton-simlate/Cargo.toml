@@ -9,6 +9,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+ton-ucf = { workspace = true }
 ton-types = { workspace = true }
 ton-disk = { workspace = true }
 ton-render = { workspace = true }

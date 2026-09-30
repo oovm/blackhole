@@ -1,7 +1,8 @@
 use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
 use ton_render::{default_camera, Framebuffer, RenderConfig, Renderer};
-use ton_types::{BlackHole, Camera};
+use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind};
+use ton_ucf::{build_frame_graph, Graph};
 
 #[derive(Debug, Clone)]
 pub struct Scene {
@@ -11,6 +12,8 @@ pub struct Scene {
     pub width: u32,
     pub height: u32,
     pub trace: TraceConfig,
+    pub integrator: IntegratorKind,
+    pub disk_model: DiskModelKind,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +24,8 @@ pub struct SceneBuilder {
     width: u32,
     height: u32,
     trace: TraceConfig,
+    integrator: IntegratorKind,
+    disk_model: DiskModelKind,
 }
 
 impl SceneBuilder {
@@ -32,7 +37,19 @@ impl SceneBuilder {
             width: 640,
             height: 360,
             trace: TraceConfig::default(),
+            integrator: IntegratorKind::default(),
+            disk_model: DiskModelKind::default(),
         }
+    }
+
+    pub fn with_integrator(mut self, integrator: IntegratorKind) -> Self {
+        self.integrator = integrator;
+        self
+    }
+
+    pub fn with_disk_model(mut self, disk_model: DiskModelKind) -> Self {
+        self.disk_model = disk_model;
+        self
     }
 
     pub fn with_default_disk(mut self) -> Self {
@@ -62,6 +79,8 @@ impl SceneBuilder {
             width: self.width,
             height: self.height,
             trace: self.trace,
+            integrator: self.integrator,
+            disk_model: self.disk_model,
         }
     }
 }
@@ -69,6 +88,10 @@ impl SceneBuilder {
 impl Scene {
     pub fn builder(black_hole: BlackHole) -> SceneBuilder {
         SceneBuilder::new(black_hole)
+    }
+
+    pub fn build_ucf_graph(&self) -> Graph {
+        build_frame_graph(self.integrator, self.disk_model)
     }
 
     pub fn render_frame(&self) -> Framebuffer {
@@ -79,6 +102,7 @@ impl Scene {
             camera: self.camera,
             disk: self.disk,
             trace: self.trace,
+            integrator: self.integrator,
         })
         .render()
     }

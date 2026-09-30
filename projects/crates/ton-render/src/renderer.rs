@@ -1,6 +1,6 @@
 use ton_disk::{temperature_to_rgb, AccretionDisk};
-use ton_geodesic::{trace_schwarzschild, RayHit, TraceConfig};
-use ton_types::{BlackHole, Camera, Rgb, Vec3};
+use ton_geodesic::{trace_ray, RayHit, TraceConfig};
+use ton_types::{BlackHole, Camera, IntegratorKind, Rgb, Vec3};
 
 use crate::framebuffer::Framebuffer;
 use crate::sky::sky_color;
@@ -13,6 +13,7 @@ pub struct RenderConfig {
     pub camera: Camera,
     pub disk: Option<AccretionDisk>,
     pub trace: TraceConfig,
+    pub integrator: IntegratorKind,
 }
 
 pub struct Renderer {
@@ -41,7 +42,13 @@ impl Renderer {
                 let v = 1.0 - (y as f64 / h as f64) * 2.0;
                 let aspect = w as f64 / h as f64;
                 let dir = cam.ray_direction(u * aspect, v);
-                let color = match trace_schwarzschild(bh, cam.position, dir, trace_cfg) {
+                let color = match trace_ray(
+                    self.config.integrator,
+                    bh,
+                    cam.position,
+                    dir,
+                    trace_cfg,
+                ) {
                     Ok(RayHit::Captured { .. }) => Rgb::BLACK,
                     Ok(RayHit::Escaped { direction }) => sky_color(direction),
                     Ok(RayHit::Disk { radius, .. }) => self
