@@ -22,9 +22,13 @@ cache/
 dist/
 *.node
 *.wasm
+# `zhihu-playground` CloudBase static delivery wasm bytes
+!projects/packages/zhihu-playground/public/ton_wasm_bg.wasm
+!projects/packages/zhihu-playground/vendor/blackhole-unknown-wasm32/lib/ton_wasm_bg.wasm
 *.txt
 *.log
 
 
 # Renderer
 *.png
+*.zip
