@@ -9,7 +9,7 @@
     "main": "ton.win32-x64-msvc.node",
     "files": ["ton.win32-x64-msvc.node", "readme.md"],
     "scripts": {
-        "build:napi": "cargo build -p ton-napi --manifest-path ../../../../Cargo.toml --release && node ./scripts/copy-from-cargo.mjs"
+        "build:napi": "cargo build -p ton-napi --manifest-path ../../../Cargo.toml --release && node ./scripts/copy-from-cargo.mjs"
     },
     "publish": false
 }

@@ -41,10 +41,10 @@ ton-napi           ← Node N-API cdylib（native）
 blackhole/
   projects/
     crates/              # ton-* 算法 + ton-wasm / ton-napi
-    platforms/native/ton-win32-x64/  # @doki-land/blackhole-win32-x64
     packages/
-      blackhole-unknown-wasm32/    # @doki-land/blackhole-unknown-wasm32（`ton-wasm` npm 袋）
-      homepage/                    # @doki-land/blackhole-homepage VMZ 演示
+      blackhole-unknown-wasm32/  # @doki-land/blackhole-unknown-wasm32（`ton-wasm` npm 袋）
+      blackhole-win32-x64/       # @doki-land/blackhole-win32-x64（`ton-napi` npm 袋）
+      homepage/                  # @doki-land/blackhole-homepage VMZ 演示
     examples/
 ```
 

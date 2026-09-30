@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, "..");
-const repoRoot = resolve(pkgRoot, "../../../..");
+const repoRoot = resolve(pkgRoot, "../../..");
 const src = join(repoRoot, "target/release/ton_napi.dll");
 const dest = join(pkgRoot, "ton.win32-x64-msvc.node");
 

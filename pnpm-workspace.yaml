@@ -1,7 +1,6 @@
 packages:
   - "."
   - "projects/packages/*"
-  - "projects/platforms/native/*"
   - "projects/examples/*"
   - "projects/examples/*/*"
   - "projects/examples/*/*/*"

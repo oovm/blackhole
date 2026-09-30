@@ -32,6 +32,8 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  projects/packages/blackhole-win32-x64: {}
+
   projects/packages/homepage:
     dependencies:
       '@doki-land/blackhole-unknown-wasm32':
@@ -57,8 +59,6 @@ importers:
       '@vmz/vmz':
         specifier: ^0.2.5
         version: 0.2.5(typescript@5.9.3)
-
-  projects/platforms/native/ton-win32-x64: {}
 
 packages:
 
