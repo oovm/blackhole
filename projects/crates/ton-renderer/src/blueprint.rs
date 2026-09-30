@@ -47,7 +47,7 @@ pub fn build_frame_graph_with_post(
         b.chain(&[10, 11, 12, 13, 14, 15]);
     }
     let mut graph = b.build();
-    annotate_frame_programs(&mut graph, integrator);
+    annotate_frame_programs(&mut graph, integrator, disk);
     graph
 }
 
@@ -86,6 +86,20 @@ mod tests {
         assert!(matches!(
             node.params.get("program_name"),
             Some(ParamValue::Str(name)) if name == "geodesic_radial_infall_steps"
+        ));
+    }
+
+    #[test]
+    fn novikov_graph_binds_disk_shade_program() {
+        let g = build_frame_graph(IntegratorKind::Geodesic3d, DiskModelKind::NovikovThorneThin);
+        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 13).expect("shade");
+        assert!(matches!(
+            node.params.get("program_name"),
+            Some(ParamValue::Str(name)) if name == "disk_shade_novikov"
+        ));
+        assert!(matches!(
+            node.params.get("program_hash"),
+            Some(ParamValue::I64(h)) if *h != 0
         ));
     }
 

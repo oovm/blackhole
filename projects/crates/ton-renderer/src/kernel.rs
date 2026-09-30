@@ -1,8 +1,9 @@
 //! UCF 内核绑定：任务图节点关联 `ucf-program` 程序指纹（非领域 `op` 字符串替代）。
 
-use ton_types::IntegratorKind;
+use ton_types::{DiskModelKind, IntegratorKind};
 use ucf_program::{
-    geodesic_radial_infall_steps, orbit_step_once, program_hash, vector_math_normalize,
+    disk_shade_novikov, geodesic_radial_infall_steps, orbit_step_once, program_hash,
+    vector_math_normalize,
 };
 use ucf_types::ParamValue;
 
@@ -49,10 +50,18 @@ pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
     }
 }
 
-/// 盘面着色任务绑定（VectorMath 切片占位，后续换 DiskShade 程序）。
-pub fn shade_kernel() -> KernelBinding {
-    let p = vector_math_normalize();
-    KernelBinding::from_program_name_hash("vector_math_normalize", program_hash(&p))
+/// 盘面着色任务程序绑定（Novikov-Thorne 薄盘走 `disk_shade_novikov`，其余仍用占位切片）。
+pub fn shade_kernel(disk: DiskModelKind) -> KernelBinding {
+    match disk {
+        DiskModelKind::NovikovThorneThin => {
+            let p = disk_shade_novikov();
+            KernelBinding::from_program_name_hash("disk_shade_novikov", program_hash(&p))
+        }
+        _ => {
+            let p = vector_math_normalize();
+            KernelBinding::from_program_name_hash("vector_math_normalize", program_hash(&p))
+        }
+    }
 }
 
 /// 将 `program_hash` / `program_name` 写入指定任务节点 `params`。
@@ -70,9 +79,9 @@ pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) 
 }
 
 /// 帧图构建后标注 trace / shade 的程序绑定。
-pub fn annotate_frame_programs(graph: &mut Graph, integrator: IntegratorKind) {
+pub fn annotate_frame_programs(graph: &mut Graph, integrator: IntegratorKind, disk: DiskModelKind) {
     let trace = trace_kernel(integrator);
     attach_binding(graph, 12, &trace.binding);
-    let shade = shade_kernel();
+    let shade = shade_kernel(disk);
     attach_binding(graph, 13, &shade);
 }
