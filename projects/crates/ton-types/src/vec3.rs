@@ -67,4 +67,9 @@ impl Vec3 {
             z: self.z - other.z,
         }
     }
+
+    /// 分量均为有限值。
+    pub fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
 }
