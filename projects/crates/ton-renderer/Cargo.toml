@@ -15,6 +15,7 @@ ton-types = { workspace = true }
 ton-geodesic = { workspace = true }
 ton-disk = { workspace = true }
 ucf-ir = { path = "../../../../ucf.rs/projects/crates/ucf-ir" }
+ucf-program = { path = "../../../../ucf.rs/projects/crates/ucf-program" }
 ucf-types = { path = "../../../../ucf.rs/projects/crates/ucf-types" }
 
 [dev-dependencies]

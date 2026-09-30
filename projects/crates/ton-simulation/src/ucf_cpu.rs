@@ -82,6 +82,18 @@ pub fn execute_frame_graph_cpu(
         )));
     }
 
+    let trace_node = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|n| n.id.0 == 12)
+        .ok_or_else(|| TonError::Domain("missing trace task 12".into()))?;
+    if !trace_node.params.contains_key("program_hash") {
+        return Err(TonError::Domain(
+            "trace task missing program_hash (KernelBinding)".into(),
+        ));
+    }
+
     let mut frame = scene.render_frame();
     apply_post_ops(&mut frame, &executed_ops);
     Ok((frame, CpuGraphExecution { executed_ops }))

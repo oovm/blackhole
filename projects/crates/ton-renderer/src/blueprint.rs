@@ -3,6 +3,8 @@
 use ton_types::{DiskModelKind, IntegratorKind};
 use ucf_ir::{Domain, Graph, GraphBuilder};
 
+use crate::kernel::{annotate_frame_programs, trace_kernel, KernelInstance};
+
 fn disk_shade_op(disk: DiskModelKind) -> &'static str {
     match disk {
         DiskModelKind::None => "ton_shade_sky_only",
@@ -43,7 +45,14 @@ pub fn build_frame_graph_with_post(
         b.gpu(15, "ton_present_or_readback");
         b.chain(&[10, 11, 12, 13, 14, 15]);
     }
-    b.build()
+    let mut graph = b.build();
+    annotate_frame_programs(&mut graph, integrator);
+    graph
+}
+
+/// 当前帧图 trace 任务的 [`KernelInstance`]（含 `ucf-program` 指纹）。
+pub fn trace_kernel_for(integrator: IntegratorKind) -> KernelInstance {
+    trace_kernel(integrator)
 }
 
 #[cfg(test)]
@@ -51,6 +60,23 @@ mod tests {
     use super::*;
     use ton_types::{DiskModelKind, IntegratorKind};
     use ucf_types::ParamValue;
+
+    #[test]
+    fn trace_task_carries_program_hash() {
+        let g = build_frame_graph(
+            IntegratorKind::SchwarzschildOrbit,
+            DiskModelKind::NovikovThorneThin,
+        );
+        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 12).expect("trace");
+        assert!(matches!(
+            node.params.get("program_hash"),
+            Some(ParamValue::I64(h)) if *h != 0
+        ));
+        assert!(matches!(
+            node.params.get("program_name"),
+            Some(ParamValue::Str(name)) if name == "orbit_step_once"
+        ));
+    }
 
     #[test]
     fn schwarzschild_orbit_graph_validates() {

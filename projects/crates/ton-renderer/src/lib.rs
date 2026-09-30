@@ -4,11 +4,13 @@
 
 mod blueprint;
 mod framebuffer;
+mod kernel;
 mod post;
 mod renderer;
 mod sky;
 
-pub use blueprint::{build_frame_graph, build_frame_graph_with_post};
+pub use blueprint::{build_frame_graph, build_frame_graph_with_post, trace_kernel_for};
+pub use kernel::{attach_binding, KernelBinding, KernelInstance};
 pub use framebuffer::Framebuffer;
 pub use post::{apply_post_process, apply_tone_map, bloom_pass, tone_map_rgb};
 pub use renderer::{default_camera, RenderConfig, Renderer};
