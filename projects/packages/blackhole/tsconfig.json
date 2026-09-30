@@ -1,15 +1,17 @@
 {
     "compilerOptions": {
         "target": "ES2022",
-        "module": "NodeNext",
-        "moduleResolution": "NodeNext",
+        "module": "ES2022",
+        "moduleResolution": "bundler",
         "declaration": true,
-        "outDir": "dist",
-        "rootDir": "src",
+        "declarationMap": true,
+        "sourceMap": true,
+        "rootDir": "./lib",
+        "outDir": "./dist",
         "strict": true,
         "skipLibCheck": true,
-        "lib": ["ES2022"],
-        "types": ["node"]
+        "lib": ["ES2022", "DOM"],
+        "types": ["node", "@webgpu/types"]
     },
-    "include": ["src/**/*.ts"]
+    "include": ["lib/**/*.ts"]
 }
