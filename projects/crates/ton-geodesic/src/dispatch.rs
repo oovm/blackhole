@@ -1,6 +1,6 @@
 //! 按 `IntegratorKind` 分派光线追迹。
 
-use ton_types::{BlackHole, IntegratorKind, TonError, TonResult, Vec3};
+use ton_types::{BlackHole, IntegratorKind, TonResult, Vec3};
 
 use crate::geodesic3d::trace_geodesic_3d;
 use crate::kerr_equatorial::trace_kerr_equatorial;
@@ -25,3 +25,5 @@ pub fn trace_ray(
         IntegratorKind::KerrEquatorial => trace_kerr_equatorial(bh, origin, direction, config),
     }
 }
+
+pub use crate::radiance_dispatch::trace_ray_radiance;

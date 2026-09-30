@@ -4,7 +4,9 @@ use ton_metric::{
     schwarzschild_geodesic_accel, schwarzschild_null_four_velocity,
     spherical_velocity_to_cartesian, SphericalCoords,
 };
-use ton_types::{BlackHole, TonError, TonResult, Vec3};
+use ton_types::{BlackHole, Rgb, TonError, TonResult, Vec3};
+
+use crate::radiance::RayRadiance;
 
 use crate::ray::RayHit;
 use crate::trace::TraceConfig;
@@ -136,6 +138,78 @@ pub fn trace_geodesic_3d(
                         position: state.cartesian(),
                         radius,
                     });
+                }
+            }
+        }
+    }
+    Err(TonError::Domain("max steps exceeded".into()))
+}
+
+/// 3D 测地线 + 薄盘多次穿越 HDR 累积；`emit_disk` 返回局部发射，`sky` 在逃逸时乘透射率叠加。
+pub fn trace_geodesic_3d_radiance<F, S>(
+    bh: BlackHole,
+    origin: Vec3,
+    direction: Vec3,
+    config: TraceConfig,
+    mut emit_disk: F,
+    sky: S,
+) -> TonResult<RayRadiance>
+where
+    F: FnMut(f64, Vec3) -> Rgb,
+    S: Fn(Vec3) -> Rgb,
+{
+    const MAX_DISK_HITS: u32 = 8;
+    let mass = bh.mass;
+    if !mass.is_finite() || mass <= 0.0 {
+        return Err(TonError::Domain("mass must be finite and positive".into()));
+    }
+    let rs = bh.event_horizon_radius();
+    if origin.length() <= rs {
+        return Ok(RayRadiance::BLACK);
+    }
+    let u0 = schwarzschild_null_four_velocity(mass, origin, direction)
+        .ok_or_else(|| TonError::Domain("failed to initialize null four-velocity".into()))?;
+    let sph = SphericalCoords::from_cartesian(origin);
+    let mut state = GeodesicState {
+        t: 0.0,
+        r: sph.r,
+        theta: sph.theta,
+        phi: sph.phi,
+        u: u0,
+    };
+    let dlambda = config.step_size;
+    let mut radiance = Rgb::BLACK;
+    let mut transmittance = 1.0;
+    let mut disk_hits = 0u32;
+
+    for step in 0..config.max_steps {
+        if state.r <= rs {
+            return Ok(RayRadiance::new(radiance));
+        }
+        if state.r >= config.escape_radius {
+            let sky_dir = state.tangent_cartesian().normalize();
+            return Ok(RayRadiance::new(
+                radiance.add(sky(sky_dir).scale(transmittance)),
+            ));
+        }
+        if !state.r.is_finite() || state.u.iter().any(|v| !v.is_finite()) {
+            return Err(TonError::Domain("non-finite geodesic state".into()));
+        }
+        let prev = state;
+        state = rk4_geodesic_step(mass, prev, dlambda);
+        if step > 0 {
+            if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
+                if disk_hits < MAX_DISK_HITS {
+                    if let Some(radius) = disk_crossing(&prev, &state, inner, outer, rs) {
+                        let hit_pos = prev
+                            .cartesian()
+                            .add(state.cartesian().sub(prev.cartesian()).scale(0.5));
+                        let local = emit_disk(radius, hit_pos);
+                        radiance = radiance.add(local.scale(transmittance));
+                        let absorption = local.r.max(local.g).max(local.b) * 0.12;
+                        transmittance *= (1.0 - absorption).clamp(0.05, 1.0);
+                        disk_hits += 1;
+                    }
                 }
             }
         }
