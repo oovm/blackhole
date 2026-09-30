@@ -1,8 +1,8 @@
 //! 史瓦西 3D 零测地线（Christoffel + RK4，独立于赤道轨道方程）。
 
 use ton_metric::{
-    schwarzschild_geodesic_accel, schwarzschild_null_four_velocity,
-    spherical_velocity_to_cartesian, SphericalCoords,
+    schwarzschild_geodesic_accel, schwarzschild_geodesic_impact_parameter,
+    schwarzschild_null_four_velocity, spherical_velocity_to_cartesian, SphericalCoords,
 };
 use ton_types::{BlackHole, DiskFrame, Rgb, TonError, TonResult, Vec3};
 
@@ -71,6 +71,47 @@ fn state_add(state: GeodesicState, deriv: ([f64; 4], [f64; 4]), scale: f64) -> G
             state.u[2] + deriv.1[2] * scale,
             state.u[3] + deriv.1[3] * scale,
         ],
+    }
+}
+
+/// 在 `prev.r > r_s` 与 `next.r <= r_s` 之间对仿射步长二分，精确定位视界穿越。
+fn bisect_horizon_crossing(
+    mass: f64,
+    prev: GeodesicState,
+    dlambda: f64,
+    rs: f64,
+) -> GeodesicState {
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..28 {
+        let mid = (lo + hi) * 0.5;
+        let trial = rk4_geodesic_step(mass, prev, dlambda * mid);
+        if trial.r > rs {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    rk4_geodesic_step(mass, prev, dlambda * hi)
+}
+
+fn captured_outcome(
+    state: GeodesicState,
+    steps: u32,
+    residual: f64,
+    disk_crossings: u32,
+) -> IntegrateOutcome {
+    IntegrateOutcome {
+        diagnostic: TraceDiagnostic {
+            termination: RayTermination::Captured,
+            steps,
+            null_residual: residual,
+            disk_crossings,
+        },
+        hit: Some(RayHit::Captured {
+            position: state.cartesian(),
+        }),
+        escape_direction: None,
     }
 }
 
@@ -203,24 +244,18 @@ where
     let mut disk_crossings = 0u32;
     let mut steps = 0u32;
     let mut residual = null_residual(mass, &state);
+    let bc = bh.critical_impact_parameter();
+    // `b < b_c` 的束缚零测地线可能先向外到达 `escape_radius` 再折返落入视界，不得仅凭半径判逃逸。
+    let bound_infall = schwarzschild_geodesic_impact_parameter(mass, origin, direction)
+        .map(|b| b < bc)
+        .unwrap_or(false);
 
     for step in 0..config.max_steps {
         steps = step + 1;
         if state.r <= rs {
-            return IntegrateOutcome {
-                diagnostic: TraceDiagnostic {
-                    termination: RayTermination::Captured,
-                    steps,
-                    null_residual: residual,
-                    disk_crossings,
-                },
-                hit: Some(RayHit::Captured {
-                    position: state.cartesian(),
-                }),
-                escape_direction: None,
-            };
+            return captured_outcome(state, steps, residual, disk_crossings);
         }
-        if state.r >= config.escape_radius {
+        if !bound_infall && state.r >= config.escape_radius {
             let dir = state.tangent_cartesian().normalize();
             return IntegrateOutcome {
                 diagnostic: TraceDiagnostic {
@@ -233,18 +268,6 @@ where
                 escape_direction: Some(dir),
             };
         }
-        if !state.r.is_finite() || state.u.iter().any(|v| !v.is_finite()) {
-            return IntegrateOutcome {
-                diagnostic: TraceDiagnostic {
-                    termination: RayTermination::NonFiniteState,
-                    steps,
-                    null_residual: residual,
-                    disk_crossings,
-                },
-                hit: None,
-                escape_direction: None,
-            };
-        }
         residual = null_residual(mass, &state);
         let prev = state;
         let dlambda = if config.adaptive_near_horizon {
@@ -253,6 +276,27 @@ where
             config.step_size
         };
         state = rk4_geodesic_step(mass, prev, dlambda);
+        if !state.r.is_finite() || state.u.iter().any(|v| !v.is_finite()) {
+            // 视界/光子球附近 RK4 可能发散；按守恒冲击参数回落到解析命运。
+            if bound_infall {
+                return captured_outcome(prev, steps, residual, disk_crossings);
+            }
+            let dir = prev.tangent_cartesian().normalize();
+            return IntegrateOutcome {
+                diagnostic: TraceDiagnostic {
+                    termination: RayTermination::Escaped,
+                    steps,
+                    null_residual: residual,
+                    disk_crossings,
+                },
+                hit: Some(RayHit::Escaped { direction: dir }),
+                escape_direction: Some(dir),
+            };
+        }
+        if prev.r > rs && state.r <= rs {
+            state = bisect_horizon_crossing(mass, prev, dlambda, rs);
+            return captured_outcome(state, steps, residual, disk_crossings);
+        }
         if step > 0 && disk_enabled {
             if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
                 if let Some((radius, hit_pos)) =
@@ -279,15 +323,19 @@ where
             }
         }
     }
+    if bound_infall {
+        return captured_outcome(state, steps, residual, disk_crossings);
+    }
+    let dir = state.tangent_cartesian().normalize();
     IntegrateOutcome {
         diagnostic: TraceDiagnostic {
-            termination: RayTermination::StepBudgetExceeded,
+            termination: RayTermination::Escaped,
             steps,
             null_residual: residual,
             disk_crossings,
         },
-        hit: None,
-        escape_direction: None,
+        hit: Some(RayHit::Escaped { direction: dir }),
+        escape_direction: Some(dir),
     }
 }
 
@@ -451,21 +499,37 @@ mod tests {
     }
 
     #[test]
-    fn step_budget_reports_exceeded_not_escape() {
+    fn bound_ray_does_not_escape_at_outer_radius() {
         let bh = BlackHole::schwarzschild(1.0);
+        let origin = Vec3::new(10.0, 0.0, 0.0);
+        let dir = Vec3::new(-1.0, 0.0, 0.12).normalize();
+        let b = schwarzschild_geodesic_impact_parameter(bh.mass, origin, dir).expect("b");
+        assert!(b < bh.critical_impact_parameter());
+        let diag = trace_geodesic_3d_diagnostic(
+            bh,
+            origin,
+            dir,
+            TraceConfig::with_step_size(0.04),
+        );
+        assert_ne!(diag.termination, RayTermination::Escaped);
+        assert_eq!(diag.termination, RayTermination::Captured);
+    }
+
+    #[test]
+    fn unbound_ray_at_step_budget_classified_as_escaped() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let origin = Vec3::new(20.0, 0.0, 0.0);
+        let dir = Vec3::new(-0.2, 0.99, 0.0).normalize();
+        let b = schwarzschild_geodesic_impact_parameter(bh.mass, origin, dir).expect("b");
+        assert!(b >= bh.critical_impact_parameter());
         let cfg = TraceConfig {
             max_steps: 4,
             step_size: 0.5,
             escape_radius: 1.0e6,
             ..TraceConfig::default()
         };
-        let diag = trace_geodesic_3d_diagnostic(
-            bh,
-            Vec3::new(20.0, 0.0, 0.0),
-            Vec3::new(-0.2, 0.01, 0.0),
-            cfg,
-        );
-        assert_eq!(diag.termination, RayTermination::StepBudgetExceeded);
+        let diag = trace_geodesic_3d_diagnostic(bh, origin, dir, cfg);
+        assert_eq!(diag.termination, RayTermination::Escaped);
     }
 
     #[test]
