@@ -30,4 +30,7 @@ pub use orbit::OrbitState;
 pub use radiance::{DiskEmission, RayRadiance};
 pub use ray::RayHit;
 pub use sem_classical::trace_sem_classical;
+pub use ton_metric::{
+    schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter,
+};
 pub use trace::{trace_schwarzschild, TraceConfig};

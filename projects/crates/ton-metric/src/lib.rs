@@ -9,7 +9,8 @@ mod sem_classical;
 mod spherical;
 
 pub use geodesic::{
-    schwarzschild_geodesic_accel, schwarzschild_null_four_velocity,
+    schwarzschild_geodesic_accel, schwarzschild_geodesic_analytic_captured,
+    schwarzschild_geodesic_impact_parameter, schwarzschild_null_four_velocity,
     spherical_velocity_to_cartesian,
 };
 pub use kerr::Kerr;

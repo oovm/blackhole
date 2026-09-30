@@ -1,8 +1,45 @@
 //! 史瓦西度规下零测地线 Christoffel 右端项（坐标基 t, r, θ, φ）。
 
-use ton_types::Vec3;
+use ton_types::{BlackHole, Vec3};
 
 use crate::spherical::SphericalCoords;
+
+/// 由守恒量 `b = L/E` 计算冲击参数（与积分器初值一致，优于远场欧氏 `|r×k|`）。
+pub fn schwarzschild_geodesic_impact_parameter(
+    mass: f64,
+    position: Vec3,
+    direction: Vec3,
+) -> Option<f64> {
+    let u = schwarzschild_null_four_velocity(mass, position, direction)?;
+    let sph = SphericalCoords::from_cartesian(position);
+    let r = sph.r;
+    let f = 1.0 - 2.0 * mass / r;
+    if f <= 0.0 {
+        return None;
+    }
+    let sin_t = sph.theta.sin();
+    let energy = f * u[0];
+    let angular = r * r * sin_t * sin_t * u[3];
+    if energy <= 0.0 || !energy.is_finite() {
+        return None;
+    }
+    Some(angular.abs() / energy)
+}
+
+/// 史瓦西解析捕获：`b < b_c` 或起点在视界内。
+pub fn schwarzschild_geodesic_analytic_captured(
+    bh: BlackHole,
+    position: Vec3,
+    direction: Vec3,
+) -> bool {
+    if position.length() <= bh.event_horizon_radius() {
+        return true;
+    }
+    match schwarzschild_geodesic_impact_parameter(bh.mass, position, direction) {
+        Some(b) => b < bh.critical_impact_parameter(),
+        None => false,
+    }
+}
 
 /// 由笛卡尔位置与方向构造零测地线四速度 `(u^t, u^r, u^θ, u^φ)`。
 pub fn schwarzschild_null_four_velocity(
@@ -108,6 +145,16 @@ pub fn spherical_velocity_to_cartesian(
 mod tests {
     use super::*;
     use ton_types::BlackHole;
+
+    #[test]
+    fn geodesic_impact_parameter_matches_euclidean_at_far_radius() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let pos = Vec3::new(10.0, 0.0, 0.0);
+        let dir = Vec3::new(-1.0, 0.15, 0.05).normalize();
+        let b_geo = schwarzschild_geodesic_impact_parameter(bh.mass, pos, dir).expect("b");
+        let b_euc = pos.cross(dir).length();
+        assert!((b_geo - b_euc).abs() / b_geo < 0.08, "geo={b_geo} euc={b_euc}");
+    }
 
     #[test]
     fn null_velocity_satisfies_quadratic_constraint() {

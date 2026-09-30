@@ -7,6 +7,7 @@ mod disk_frame;
 mod color;
 mod error;
 mod kind;
+mod optics;
 mod post_flags;
 mod units;
 mod vec3;
@@ -17,6 +18,7 @@ pub use disk_frame::DiskFrame;
 pub use color::Rgb;
 pub use error::{TonError, TonResult};
 pub use kind::{DiskModelKind, IntegratorKind};
+pub use optics::{schwarzschild_analytic_captured, schwarzschild_impact_parameter};
 pub use post_flags::{
     post_bloom_from_flags, use_ucf_post, POST_RAW, POST_UCF_BLOOM, POST_UCF_TONE_MAP,
 };

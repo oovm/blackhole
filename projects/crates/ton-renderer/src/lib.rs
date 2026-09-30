@@ -19,7 +19,10 @@ pub use post::{
 pub use renderer::{
     default_camera, default_integrator, RenderConfig, RenderMode, RenderOutput, Renderer,
 };
-pub use shadow_overlay::{analytic_shadow_radius_ndc, draw_analytic_shadow_ring};
+pub use shadow_overlay::{
+    capture_classification_agreement, draw_analytic_shadow_ring, on_axis_shadow_radius_ndc,
+    pixel_ray_dir, schwarzschild_boundary_radius_ndc,
+};
 pub use ton_geodesic::TerminationHistogram;
 pub use sky::sky_color;
 pub use ucf_ir::Graph;

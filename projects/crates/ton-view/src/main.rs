@@ -263,19 +263,29 @@ fn run_convergence_report(
         &[0.08, 0.04, 0.02, 0.01],
     );
     eprintln!(
-        "  {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
-        "step", "max_steps", "captured", "escaped", "failed", "boundary_r", "analytic_r"
+        "  {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10} {:>8} {:>8}",
+        "step",
+        "max_steps",
+        "captured",
+        "escaped",
+        "failed",
+        "boundary_r",
+        "b_analytic",
+        "agree",
+        "on_axis"
     );
     for s in samples {
         eprintln!(
-            "  {:8.4} {:8} {:7.2}% {:7.2}% {:7.2}% {:10.5} {:10.5}",
+            "  {:8.4} {:8} {:7.2}% {:7.2}% {:7.2}% {:10.5} {:10.5} {:7.2}% {:8.5}",
             s.step_size,
             s.max_steps,
             s.captured_fraction * 100.0,
             s.escaped_fraction * 100.0,
             s.failure_fraction * 100.0,
             s.mean_boundary_radius,
-            s.analytic_shadow_radius_ndc
+            s.schwarzschild_boundary_radius_ndc,
+            s.capture_agreement * 100.0,
+            s.on_axis_shadow_radius_ndc
         );
     }
 }
