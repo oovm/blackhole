@@ -4,15 +4,19 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "dev": "vite",
-        "build": "vite build",
-        "preview": "vite preview"
+        "copy:wasm": "node ./scripts/copy-wasm.mjs",
+        "predev": "node ../../../scripts/ensure-vmz-host-manifest.mjs && pnpm run copy:wasm",
+        "prebuild": "node ../../../scripts/ensure-vmz-host-manifest.mjs && pnpm run copy:wasm",
+        "precheck": "node ../../../scripts/ensure-vmz-host-manifest.mjs",
+        "check": "vmz check .",
+        "dev": "vmz dev .",
+        "build": "vmz build ."
     },
     "dependencies": {
-        "@ton/blackhole": "workspace:*"
+        "@ton/blackhole": "workspace:*",
+        "@vmz/core": "catalog:"
     },
     "devDependencies": {
-        "typescript": "catalog:",
-        "vite": "catalog:"
+        "@vmz/vmz": "catalog:"
     }
 }

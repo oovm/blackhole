@@ -1,0 +1,184 @@
+<template>
+    <main class="layout">
+        <header>
+            <h1>TON 黑洞模拟</h1>
+            <p class="subtitle">史瓦西度规 · CPU 测地线（赤道薄盘） · UCF 运行时 · L2/L0 呈现</p>
+        </header>
+        <section class="stage">
+            <canvas id="ton-view" :width="width" :height="height"></canvas>
+        </section>
+        <section class="controls">
+            <label>
+                质量 M
+                <input
+                    type="range"
+                    min="0.5"
+                    max="3"
+                    step="0.1"
+                    :value="mass"
+                    @input="((e) => (mass = Number(e.target.value)))"
+                />
+                <span>{{ massLabel }}</span>
+            </label>
+            <label>
+                宽度
+                <input
+                    type="number"
+                    min="320"
+                    max="960"
+                    step="80"
+                    :value="width"
+                    @change="((e) => (width = Number(e.target.value)))"
+                />
+            </label>
+            <label>
+                高度
+                <input
+                    type="number"
+                    min="180"
+                    max="540"
+                    step="45"
+                    :value="height"
+                    @change="((e) => (height = Number(e.target.value)))"
+                />
+            </label>
+            <button type="button" :disabled="rendering" @click="(() => runRender())">渲染一帧</button>
+        </section>
+        <footer class="status">{{ status }}</footer>
+    </main>
+</template>
+<style>
+:root {
+    color-scheme: dark;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background: #05060a;
+    color: #e8ecf4;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+}
+
+.layout {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+}
+
+header h1 {
+    margin: 0 0 0.35rem;
+    font-size: 1.75rem;
+    letter-spacing: 0.04em;
+}
+
+.subtitle {
+    margin: 0;
+    color: #9aa3b5;
+    font-size: 0.95rem;
+}
+
+.stage {
+    margin: 1.5rem 0;
+    border: 1px solid #1e2433;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #000;
+}
+
+canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem 1.5rem;
+    align-items: flex-end;
+}
+
+.controls label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: #b8c0d0;
+}
+
+.controls input[type="range"] {
+    width: 160px;
+}
+
+.controls input[type="number"] {
+    width: 88px;
+    padding: 0.35rem 0.5rem;
+    border-radius: 6px;
+    border: 1px solid #2a3144;
+    background: #0d1018;
+    color: inherit;
+}
+
+.controls button {
+    padding: 0.55rem 1.1rem;
+    border: none;
+    border-radius: 8px;
+    background: #e8b84a;
+    color: #1a1200;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.controls button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.status {
+    margin-top: 1.25rem;
+    font-size: 0.82rem;
+    color: #7d8799;
+}
+</style>
+<script client>
+import { renderTonFrame } from "../lib/blackhole-frame";
+
+export default class BlackholeView {
+    mass = 1.0;
+    width = 640;
+    height = 360;
+    status = "点击「渲染一帧」开始";
+    rendering = false;
+
+    get massLabel() {
+        return this.mass.toFixed(1);
+    }
+
+    async runRender() {
+        const canvas = document.getElementById("ton-view");
+        if (!(canvas instanceof HTMLCanvasElement)) {
+            this.status = "失败: canvas 未找到";
+            return;
+        }
+        canvas.width = this.width;
+        canvas.height = this.height;
+        this.rendering = true;
+        this.status = "渲染中…（CPU 测地线，可能需数秒）";
+        const t0 = performance.now();
+        try {
+            const { statusLine } = await renderTonFrame(canvas, this.mass);
+            const dt = ((performance.now() - t0) / 1000).toFixed(2);
+            this.status = `${statusLine} · ${dt}s`;
+        } catch (err) {
+            this.status = `失败: ${err instanceof Error ? err.message : String(err)}`;
+        } finally {
+            this.rendering = false;
+        }
+    }
+}
+</script>
