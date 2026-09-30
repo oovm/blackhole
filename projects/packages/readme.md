@@ -1,10 +1,8 @@
 # packages
 
-npm 面前端与 Web 演示（Rust `ton-*` 为权威算法层）。
+应用层 npm 包：wasm 平台袋与 VMZ 演示。原生袋见 [`../platforms/`](../platforms/readme.md)。
 
-| 目录        | 包名              | 说明                                      |
-|-------------|-------------------|-------------------------------------------|
-| `blackhole` | `@ton/blackhole`  | `ton-wasm` + UCF L2/L0 宿主呈现 → `lib/` |
-| `homepage`  | `@ton/homepage`   | VMZ 黑洞可视化演示页（`@vmz/vmz`）      |
-
-UCF 不单独发 npm；当前上屏为 L0 readback，GPU 热路径后置 UCF compute。
+| 目录 | 包名 | 说明 |
+|------|------|------|
+| [`blackhole-unknown-wasm32`](blackhole-unknown-wasm32/readme.md) | `@doki-land/blackhole-unknown-wasm32` | `ton-wasm` cdylib + UCF L2/L0 Web 呈现 |
+| [`homepage`](homepage/readme.md) | `@doki-land/blackhole-homepage` | VMZ 黑洞可视化演示（`@vmz/vmz`） |

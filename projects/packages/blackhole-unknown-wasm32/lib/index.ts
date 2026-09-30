@@ -1,5 +1,5 @@
 /**
- * @ton/blackhole — TON 黑洞 Wasm + UCF L2/L0 呈现（宿主 WebGPU 胶水，无 Rust `wgpu` crate）。
+ * @doki-land/blackhole-unknown-wasm32 — `ton-wasm` + UCF L2/L0 呈现（宿主 WebGPU 胶水，无 Rust `wgpu` crate）。
  */
 
 export { tonWasmRustTarget } from "./load.js";

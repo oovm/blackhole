@@ -1,4 +1,4 @@
-import { renderBlackholeFrame } from "@ton/blackhole";
+import { renderBlackholeFrame } from "@doki-land/blackhole-unknown-wasm32";
 
 const WASM_URL = "/ton_wasm_bg.wasm";
 

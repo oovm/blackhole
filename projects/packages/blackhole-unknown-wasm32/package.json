@@ -1,5 +1,5 @@
 {
-    "name": "@ton/blackhole",
+    "name": "@doki-land/blackhole-unknown-wasm32",
     "version": "0.1.0",
     "description": "TON blackhole simulator Wasm loader and WebGPU present (UCF downstream host)",
     "type": "module",

@@ -1,20 +1,20 @@
-# `@ton/blackhole`
+# `@doki-land/blackhole-unknown-wasm32`
 
-TON 黑洞模拟 **下游 Web 封装**：加载 `ton-wasm`（`ton-sim` + UCF CPU 探针），L0 readback 上屏。
+`wasm32-unknown-unknown` npm 袋（`projects/packages/blackhole-unknown-wasm32`）：加载 `ton-wasm` cdylib，UCF L2/L0 Web 呈现。
 
 UCF 不单独发 npm；本包封装 wasm、`ucf_host` / `ton_host` WebGPU 宿主胶水。CPU 测地线在 `ton-sim`，上屏优先 UCF L2，降级 L0 readback。
 
 ## 构建
 
 ```bash
-pnpm --filter @ton/blackhole run build:wasm
-pnpm --filter @ton/blackhole run build
+pnpm --filter @doki-land/blackhole-unknown-wasm32 run build:wasm
+pnpm --filter @doki-land/blackhole-unknown-wasm32 run build
 ```
 
 ## API
 
 ```js
-import { renderBlackholeFrame } from "@ton/blackhole";
+import { renderBlackholeFrame } from "@doki-land/blackhole-unknown-wasm32";
 
 const canvas = document.querySelector("canvas");
 canvas.width = 640;

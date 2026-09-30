@@ -19,6 +19,8 @@ ton-disk           ← 吸积盘辐射
 ton-render         ← CPU 光线追踪
 ton-sim            ← 场景编排
 ton-view           ← CLI 二进制
+ton-wasm           ← Wasm cdylib（Web）
+ton-napi           ← Node N-API cdylib（native）
 ```
 
 | crate          | 职责                       |
@@ -30,18 +32,20 @@ ton-view           ← CLI 二进制
 | `ton-render`   | 逐像素着色 + 星空背景      |
 | `ton-sim`      | `Scene` 单帧渲染           |
 | `ton-view`     | 命令行输出 PNG             |
+| `ton-wasm`     | Wasm 导出 + UCF 同模块链入 |
+| `ton-napi`     | Node native RGBA8 渲染     |
 
 ## 仓库布局
 
 ```text
 blackhole/
   projects/
-    bindings/ton-wasm/   # Wasm cdylib（ton-sim + UCF 探针）
-    crates/              # ton-* Rust 算法
-    examples/            # 可运行示例
+    crates/              # ton-* 算法 + ton-wasm / ton-napi
+    platforms/native/ton-win32-x64/  # @doki-land/blackhole-win32-x64
     packages/
-      blackhole/         # @ton/blackhole → lib/（TS 加载 + UCF L0 readback）
-      homepage/          # VMZ 黑洞可视化演示（@vmz/vmz）
+      blackhole-unknown-wasm32/    # @doki-land/blackhole-unknown-wasm32（`ton-wasm` npm 袋）
+      homepage/                    # @doki-land/blackhole-homepage VMZ 演示
+    examples/
 ```
 
 ## Web 演示
