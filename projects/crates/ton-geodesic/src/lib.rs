@@ -15,7 +15,7 @@ pub use dispatch::{trace_ray, trace_ray_radiance};
 pub use geodesic3d::{trace_geodesic_3d, trace_geodesic_3d_radiance};
 pub use kerr_equatorial::trace_kerr_equatorial;
 pub use orbit::OrbitState;
-pub use radiance::RayRadiance;
+pub use radiance::{DiskEmission, RayRadiance};
 pub use ray::RayHit;
 pub use sem_classical::trace_sem_classical;
 pub use trace::{trace_schwarzschild, TraceConfig};

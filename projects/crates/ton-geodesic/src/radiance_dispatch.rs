@@ -4,20 +4,22 @@ use ton_types::{BlackHole, IntegratorKind, TonResult, Rgb, Vec3};
 
 use crate::geodesic3d::trace_geodesic_3d_radiance;
 use crate::kerr_equatorial::trace_kerr_equatorial;
-use crate::radiance::RayRadiance;
+use crate::radiance::{DiskEmission, RayRadiance};
 use crate::ray::RayHit;
 use crate::sem_classical::trace_sem_classical;
 use crate::trace::{trace_schwarzschild, TraceConfig};
 
 fn hit_to_radiance(
     hit: RayHit,
-    emit_disk: &mut impl FnMut(f64, Vec3) -> Rgb,
+    emit_disk: &mut impl FnMut(f64, Vec3) -> DiskEmission,
     sky: &impl Fn(Vec3) -> Rgb,
 ) -> RayRadiance {
     match hit {
         RayHit::Captured { .. } => RayRadiance::BLACK,
         RayHit::Escaped { direction } => RayRadiance::new(sky(direction)),
-        RayHit::Disk { position, radius } => RayRadiance::new(emit_disk(radius, position)),
+        RayHit::Disk { position, radius } => {
+            RayRadiance::new(emit_disk(radius, position).radiance)
+        }
     }
 }
 
@@ -32,7 +34,7 @@ pub fn trace_ray_radiance<F, S>(
     sky: S,
 ) -> TonResult<RayRadiance>
 where
-    F: FnMut(f64, Vec3) -> Rgb,
+    F: FnMut(f64, Vec3) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     match kind {

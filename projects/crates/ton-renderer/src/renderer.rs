@@ -1,5 +1,5 @@
 use ton_disk::{procedural_fbm_color, sample_disk_radiance, AccretionDisk};
-use ton_geodesic::{trace_ray_radiance, TraceConfig};
+use ton_geodesic::{trace_ray_radiance, DiskEmission, TraceConfig};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Rgb, Vec3};
 
 use crate::framebuffer::Framebuffer;
@@ -66,30 +66,33 @@ impl Renderer {
         fb
     }
 
-    fn emit_disk(&self, radius: f64, position: Vec3) -> Rgb {
+    fn emit_disk(&self, radius: f64, position: Vec3) -> DiskEmission {
         let disk = self.config.disk;
         let cam = self.config.camera;
         let bh = self.config.black_hole;
         match self.config.disk_model {
-            DiskModelKind::None => Rgb::BLACK,
+            DiskModelKind::None => DiskEmission::opaque(Rgb::BLACK),
             DiskModelKind::NovikovThorneThin => disk
                 .map(|d| {
                     let doppler = simplified_doppler(position, cam, radius, bh);
-                    sample_disk_radiance(d, radius, doppler).emissive_radiance
+                    let sample = sample_disk_radiance(d, radius, doppler);
+                    DiskEmission::with_absorption(sample.emissive_radiance, sample.absorption)
                 })
-                .unwrap_or(Rgb::new(1.0, 0.6, 0.2)),
+                .unwrap_or(DiskEmission::with_absorption(Rgb::new(1.0, 0.6, 0.2), 0.15)),
             DiskModelKind::ProceduralFbm => disk
                 .map(|d| {
                     let phi = position.y.atan2(position.x);
-                    procedural_fbm_color(
+                    let color = procedural_fbm_color(
                         radius,
                         phi,
                         d.config.inner_radius,
                         d.config.outer_radius,
                         0.0,
-                    )
+                    );
+                    let peak = color.r.max(color.g).max(color.b);
+                    DiskEmission::with_absorption(color, (peak * 0.1).clamp(0.05, 0.4))
                 })
-                .unwrap_or(Rgb::new(1.0, 0.45, 0.1)),
+                .unwrap_or(DiskEmission::with_absorption(Rgb::new(1.0, 0.45, 0.1), 0.15)),
         }
     }
 }

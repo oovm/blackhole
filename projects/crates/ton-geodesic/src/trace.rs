@@ -22,7 +22,7 @@ impl Default for TraceConfig {
         Self {
             max_steps: 4096,
             dphi: 0.02,
-            step_size: 0.2,
+            step_size: 0.08,
             disk_inner: None,
             disk_outer: None,
             escape_radius: 1.0e4,

@@ -22,9 +22,10 @@ pub fn sample_disk_radiance(disk: AccretionDisk, radius: f64, doppler: f64) -> D
     let temperature = disk.effective_temperature(radius);
     let base = temperature_to_rgb(temperature);
     let brightness = doppler.clamp(0.0, 8.0).powi(3);
+    let peak = base.r.max(base.g).max(base.b) * brightness;
     DiskSample {
         emissive_radiance: base.scale(brightness),
-        absorption: 0.0,
+        absorption: (peak * 0.18).clamp(0.04, 0.55),
         temperature,
         redshift_factor: doppler,
     }

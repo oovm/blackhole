@@ -6,7 +6,7 @@ use ton_metric::{
 };
 use ton_types::{BlackHole, Rgb, TonError, TonResult, Vec3};
 
-use crate::radiance::RayRadiance;
+use crate::radiance::{DiskEmission, RayRadiance};
 
 use crate::ray::RayHit;
 use crate::trace::TraceConfig;
@@ -73,7 +73,13 @@ fn rk4_geodesic_step(mass: f64, state: GeodesicState, dlambda: f64) -> GeodesicS
     state_add(state, (coord, accel), dlambda)
 }
 
-fn disk_crossing(prev: &GeodesicState, next: &GeodesicState, inner: f64, outer: f64, rs: f64) -> Option<f64> {
+fn disk_crossing(
+    prev: &GeodesicState,
+    next: &GeodesicState,
+    inner: f64,
+    outer: f64,
+    rs: f64,
+) -> Option<(f64, Vec3)> {
     let z0 = prev.cartesian().z;
     let z1 = next.cartesian().z;
     if z0.signum() == z1.signum() {
@@ -83,7 +89,7 @@ fn disk_crossing(prev: &GeodesicState, next: &GeodesicState, inner: f64, outer: 
     let hit = prev.cartesian().add(next.cartesian().sub(prev.cartesian()).scale(t));
     let r = hit.length();
     if r > rs && r >= inner && r <= outer {
-        Some(r)
+        Some((r, hit))
     } else {
         None
     }
@@ -133,11 +139,8 @@ pub fn trace_geodesic_3d(
         state = rk4_geodesic_step(mass, prev, dlambda);
         if step > 0 {
             if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
-                if let Some(radius) = disk_crossing(&prev, &state, inner, outer, rs) {
-                    return Ok(RayHit::Disk {
-                        position: state.cartesian(),
-                        radius,
-                    });
+                if let Some((radius, position)) = disk_crossing(&prev, &state, inner, outer, rs) {
+                    return Ok(RayHit::Disk { position, radius });
                 }
             }
         }
@@ -155,7 +158,7 @@ pub fn trace_geodesic_3d_radiance<F, S>(
     sky: S,
 ) -> TonResult<RayRadiance>
 where
-    F: FnMut(f64, Vec3) -> Rgb,
+    F: FnMut(f64, Vec3) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     const MAX_DISK_HITS: u32 = 8;
@@ -200,14 +203,10 @@ where
         if step > 0 {
             if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
                 if disk_hits < MAX_DISK_HITS {
-                    if let Some(radius) = disk_crossing(&prev, &state, inner, outer, rs) {
-                        let hit_pos = prev
-                            .cartesian()
-                            .add(state.cartesian().sub(prev.cartesian()).scale(0.5));
-                        let local = emit_disk(radius, hit_pos);
-                        radiance = radiance.add(local.scale(transmittance));
-                        let absorption = local.r.max(local.g).max(local.b) * 0.12;
-                        transmittance *= (1.0 - absorption).clamp(0.05, 1.0);
+                    if let Some((radius, hit_pos)) = disk_crossing(&prev, &state, inner, outer, rs) {
+                        let sample = emit_disk(radius, hit_pos);
+                        radiance = radiance.add(sample.radiance.scale(transmittance));
+                        transmittance *= (1.0 - sample.absorption).clamp(0.05, 1.0);
                         disk_hits += 1;
                     }
                 }
