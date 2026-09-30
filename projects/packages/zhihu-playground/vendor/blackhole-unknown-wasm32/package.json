@@ -1,0 +1,19 @@
+{
+    "name": "@doki-land/blackhole-unknown-wasm32",
+    "version": "0.1.0",
+    "description": "TON blackhole Wasm loader and WebGPU present (vendored for CloudBase delivery)",
+    "type": "module",
+    "license": "MIT",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "default": "./dist/index.js"
+        },
+        "./ton_wasm_bg.wasm": "./lib/ton_wasm_bg.wasm"
+    },
+    "files": [
+        "dist",
+        "lib/ton_wasm_bg.wasm"
+    ]
+}
