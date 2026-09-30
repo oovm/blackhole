@@ -1,8 +1,9 @@
 use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
-use ton_render::{default_camera, Framebuffer, RenderConfig, Renderer};
+use ton_renderer::{
+    build_frame_graph_with_post, default_camera, Framebuffer, Graph, RenderConfig, Renderer,
+};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
-use ton_ucf::{build_frame_graph_with_post, Graph};
 
 use crate::ucf_cpu::{execute_frame_graph_cpu, CpuGraphExecution};
 

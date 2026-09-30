@@ -1,8 +1,8 @@
-//! Node N-API 绑定：native 侧调用 `ton-sim`（不经 wasm）。
+//! Node N-API 绑定：native 侧调用 `ton-simulation`（不经 wasm）。
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use ton_sim::{black_hole_for_render, Scene};
+use ton_simulation::{black_hole_for_render, Scene};
 use ton_types::{
     post_bloom_from_flags, use_ucf_post, DiskModelKind, IntegratorKind,
 };

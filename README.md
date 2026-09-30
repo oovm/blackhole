@@ -16,8 +16,8 @@ ton-types          ← 共享类型（栈底）
 ton-metric         ← 史瓦西 / 克尔度规
 ton-geodesic       ← 零测地线积分
 ton-disk           ← 吸积盘辐射
-ton-render         ← CPU 光线追踪
-ton-sim            ← 场景编排
+ton-renderer       ← UCF 任务图 + CPU 光线追踪
+ton-simulation     ← 场景模拟
 ton-view           ← CLI 二进制
 ton-wasm           ← Wasm cdylib（Web）
 ton-napi           ← Node N-API cdylib（native）
@@ -29,8 +29,8 @@ ton-napi           ← Node N-API cdylib（native）
 | `ton-metric`   | 线元求值                   |
 | `ton-geodesic` | 光线追踪（史瓦西赤道平面） |
 | `ton-disk`     | Novikov-Thorne 薄盘近似    |
-| `ton-render`   | 逐像素着色 + 星空背景      |
-| `ton-sim`      | `Scene` 单帧渲染           |
+| `ton-renderer` | UCF 任务图 + 逐像素着色 + 后处理 |
+| `ton-simulation` | `Scene` 场景模拟         |
 | `ton-view`     | 命令行输出 PNG             |
 | `ton-wasm`     | Wasm 导出 + UCF 同模块链入 |
 | `ton-napi`     | Node native RGBA8 渲染     |
@@ -58,7 +58,7 @@ pnpm run build:ts
 pnpm run dev:homepage
 ```
 
-浏览器打开后点击「渲染一帧」。物理在 `ton-sim` CPU 测地线；UCF 同模块 wasm + `ucf_host` L2 WebGPU 上屏（降级 L0 readback）。
+浏览器打开后点击「渲染一帧」。物理在 `ton-simulation` + `ton-renderer` CPU 测地线；UCF 同模块 wasm + `ucf_host` L2 WebGPU 上屏（降级 L0 readback）。
 
 设计文档与路线图见工作区 `规划设计/` 与 `决策和进度表/`（不进本仓 README 外链）。
 

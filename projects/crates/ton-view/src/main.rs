@@ -3,7 +3,7 @@ use std::env;
 use std::path::PathBuf;
 
 use image::{ImageBuffer, Rgba};
-use ton_sim::Scene;
+use ton_simulation::Scene;
 use ton_types::BlackHole;
 
 fn main() {

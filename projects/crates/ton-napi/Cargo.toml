@@ -1,6 +1,6 @@
 [package]
 name = "ton-napi"
-description = "TON 黑洞模拟 Node N-API 桥（native 宿主 ↔ ton-sim）"
+description = "TON 黑洞模拟 Node N-API 桥（native 宿主 ↔ ton-simulation）"
 readme = "readme.md"
 version.workspace = true
 edition.workspace = true
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 napi.workspace = true
 napi-derive.workspace = true
-ton-sim = { workspace = true }
+ton-simulation = { workspace = true }
 ton-types = { workspace = true }
 
 [build-dependencies]

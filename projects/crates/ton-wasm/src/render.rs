@@ -1,6 +1,6 @@
 //! 场景一帧 RGBA8 渲染（积分器 × 盘模型 × 自旋 × 后处理可切换）。
 
-use ton_sim::{black_hole_for_render, Scene};
+use ton_simulation::{black_hole_for_render, Scene};
 use ton_types::{
     post_bloom_from_flags, use_ucf_post, DiskModelKind, IntegratorKind, TonError,
 };

@@ -1,17 +1,19 @@
 [package]
-name = "ton-ucf"
-description = "TON 黑洞单帧 UCF 任务图蓝图（IntegratorKind × DiskModelKind）"
+name = "ton-renderer"
+description = "TON 黑洞渲染器：UCF 任务图蓝图、CPU 光线追踪与后处理"
 readme = "readme.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-publish = false
-keywords = ["blackhole", "ucf", "ton"]
+publish.workspace = true
+keywords = ["blackhole", "ucf", "ton", "renderer"]
 categories = ["science", "simulation"]
 
 [dependencies]
 ton-types = { workspace = true }
+ton-geodesic = { workspace = true }
+ton-disk = { workspace = true }
 ucf-ir = { path = "../../../../ucf.rs/projects/crates/ucf-ir" }
 ucf-types = { path = "../../../../ucf.rs/projects/crates/ucf-types" }
 

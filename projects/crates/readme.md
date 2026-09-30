@@ -2,7 +2,7 @@
 
 
 
-黑洞模拟 Rust 算法栈（`ton-*`，命名取自超大质量黑洞 TON 618）。
+黑洞模拟 Rust 算法栈（`ton-*`，命名取自超大质量黑洞 TON 618）。**crate 名一律名词**（`ton-geodesic`、`ton-renderer`、`ton-simulation`），不用动词形。
 
 
 
@@ -18,9 +18,9 @@
 
 | [`ton-disk`](ton-disk/readme.md) | 吸积盘温度与黑体色 |
 
-| [`ton-render`](ton-render/readme.md) | CPU 光线追踪帧缓冲 |
+| [`ton-renderer`](ton-renderer/readme.md) | UCF 任务图 + CPU 光线追踪 |
 
-| [`ton-sim`](ton-simlate/readme.md) | 场景编排 |
+| [`ton-simulation`](ton-simulation/readme.md) | 场景模拟 |
 
 | [`ton-view`](ton-view/readme.md) | CLI 可执行（`ton-view`） |
 

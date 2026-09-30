@@ -1,6 +1,6 @@
 //! 小尺寸 CPU golden：每种算法族独立校验和，不互相替代。
 
-use ton_sim::Scene;
+use ton_simulation::Scene;
 use ton_types::{BlackHole, DiskModelKind, IntegratorKind};
 
 fn fnv1a64(bytes: &[u8]) -> u64 {

@@ -1,8 +1,7 @@
 //! UCF 帧图 CPU 参考执行：按任务链顺序校验 `op` 标签并驱动后处理。
 
-use ton_render::{apply_tone_map, bloom_pass, Framebuffer};
+use ton_renderer::{apply_tone_map, bloom_pass, Framebuffer, Graph};
 use ton_types::{DiskModelKind, TonError, TonResult};
-use ton_ucf::Graph;
 use ucf_types::ParamValue;
 
 use crate::Scene;

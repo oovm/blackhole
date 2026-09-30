@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-ton-sim = { workspace = true }
+ton-simulation = { workspace = true }
 ton-types = { workspace = true }
 ucf-wasm = { path = "../../../../ucf.rs/projects/bindings/ucf-wasm" }
 
