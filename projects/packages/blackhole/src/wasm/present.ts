@@ -1,3 +1,4 @@
+import { DiskModelKind, IntegratorKind } from "../kinds.js";
 import { initWebGpuHost } from "./ucf/index.js";
 import { loadTonWasm, type LoadTonWasmOptions, type TonWasmBindings } from "./load.js";
 
@@ -6,6 +7,8 @@ export type PresentTier = "L2" | "L0";
 
 export interface RenderBlackholeOptions extends LoadTonWasmOptions {
     mass?: number;
+    integrator?: IntegratorKind;
+    diskModel?: DiskModelKind;
     /** RGBA8 写入 wasm 线性内存偏移；默认 65536。 */
     outPtr?: number;
     /** 强制 L0（调试）；默认 WebGPU 可用时走 L2。 */
@@ -79,13 +82,15 @@ export async function renderBlackholeFrame(
     const width = canvas.width;
     const height = canvas.height;
     const mass = options.mass ?? 1.0;
+    const integrator = options.integrator ?? IntegratorKind.SchwarzschildOrbit;
+    const diskModel = options.diskModel ?? DiskModelKind.NovikovThorneThin;
     const outPtr = options.outPtr ?? DEFAULT_OUT_PTR;
     const byteLen = width * height * 4;
 
     const ton = await loadTonWasm(options);
-    const status = ton.renderSchwarzschildRgba8(width, height, mass, outPtr);
+    const status = ton.renderFrameRgba8(width, height, mass, integrator, diskModel, outPtr);
     if (status !== 0) {
-        throw new Error(`ton_render_schwarzschild_rgba8 failed: ${status}`);
+        throw new Error(`ton_render_frame_rgba8 failed: ${status}`);
     }
     if (outPtr + byteLen > ton.memory.buffer.byteLength) {
         throw new Error("ton wasm memory too small for frame readback");
@@ -112,5 +117,11 @@ export async function renderBlackholeFrame(
     return { ton, tier: "L0" };
 }
 
+export {
+    DiskModelKind,
+    IntegratorKind,
+    DISK_MODEL_OPTIONS,
+    INTEGRATOR_OPTIONS,
+} from "../kinds.js";
 export { loadTonWasm, type LoadTonWasmOptions, type TonWasmBindings, type TonWasmInfo } from "./load.js";
 export { initWebGpuHost, UcfHostHandleRegistry } from "./ucf/index.js";

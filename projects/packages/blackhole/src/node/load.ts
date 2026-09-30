@@ -1,10 +1,18 @@
 /// <reference types="node" />
 import { createRequire } from "node:module";
+import type { DiskModelKind, IntegratorKind } from "../kinds.js";
 
 export const tonNodeRustTarget = "node-napi" as const;
 
 export interface TonNapiBindings {
     tonVersionCode(): number;
+    renderFrameRgba8(
+        width: number,
+        height: number,
+        mass: number,
+        integrator: IntegratorKind,
+        diskModel: DiskModelKind,
+    ): Uint8Array;
     renderSchwarzschildRgba8(width: number, height: number, mass: number): Uint8Array;
 }
 
@@ -38,10 +46,23 @@ export async function loadTonNapi(options: LoadTonNapiOptions = {}): Promise<Ton
     const require = createRequire(import.meta.url);
     const native = require(pkg) as {
         tonVersionCode: () => number;
+        renderFrameRgba8?: (
+            width: number,
+            height: number,
+            mass: number,
+            integrator: number,
+            diskModel: number,
+        ) => Uint8Array;
         renderSchwarzschildRgba8: (width: number, height: number, mass: number) => Uint8Array;
     };
     return {
         tonVersionCode: () => native.tonVersionCode(),
+        renderFrameRgba8: (width, height, mass, integrator, diskModel) => {
+            if (native.renderFrameRgba8) {
+                return native.renderFrameRgba8(width, height, mass, integrator, diskModel);
+            }
+            return native.renderSchwarzschildRgba8(width, height, mass);
+        },
         renderSchwarzschildRgba8: (width, height, mass) =>
             native.renderSchwarzschildRgba8(width, height, mass),
     };

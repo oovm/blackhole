@@ -1,3 +1,4 @@
+import type { DiskModelKind, IntegratorKind } from "../kinds.js";
 import {
     buildTonHostImports,
     buildUcfHostImports,
@@ -16,6 +17,15 @@ export interface TonWasmInfo {
 
 export interface TonWasmBindings {
     info(): TonWasmInfo;
+    renderFrameRgba8(
+        width: number,
+        height: number,
+        mass: number,
+        integrator: IntegratorKind,
+        diskModel: DiskModelKind,
+        outPtr: number,
+    ): number;
+    /** @deprecated 使用 `renderFrameRgba8`（史瓦西轨道 + Novikov 薄盘）。 */
     renderSchwarzschildRgba8(
         width: number,
         height: number,
@@ -38,6 +48,14 @@ type WasmExports = {
     ton_version_code: () => number;
     ton_target_triple: () => number;
     ton_ucf_application_contract_diag_mask: (outPtr: number) => number;
+    ton_render_frame_rgba8: (
+        width: number,
+        height: number,
+        mass: number,
+        integrator: number,
+        diskModel: number,
+        outPtr: number,
+    ) => number;
     ton_render_schwarzschild_rgba8: (
         width: number,
         height: number,
@@ -92,7 +110,10 @@ export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<Ton
         exports = result.instance.exports as unknown as WasmExports;
     }
 
-    if (!exports.memory || !exports.ton_render_schwarzschild_rgba8) {
+    if (
+        !exports.memory ||
+        (!exports.ton_render_frame_rgba8 && !exports.ton_render_schwarzschild_rgba8)
+    ) {
         throw new Error("ton_wasm_bg.wasm unavailable: run build:wasm first");
     }
 
@@ -115,6 +136,19 @@ export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<Ton
                 targetTriple: readCString(memory, exports.ton_target_triple()),
                 ucfDiagMask,
             };
+        },
+        renderFrameRgba8: (width, height, mass, integrator, diskModel, outPtr) => {
+            if (exports.ton_render_frame_rgba8) {
+                return exports.ton_render_frame_rgba8(
+                    width,
+                    height,
+                    mass,
+                    integrator,
+                    diskModel,
+                    outPtr,
+                );
+            }
+            return exports.ton_render_schwarzschild_rgba8(width, height, mass, outPtr);
         },
         renderSchwarzschildRgba8: (width, height, mass, outPtr) =>
             exports.ton_render_schwarzschild_rgba8(width, height, mass, outPtr),

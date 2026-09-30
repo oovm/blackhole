@@ -19,3 +19,10 @@ export type {
     RenderBlackholeResult,
     PresentTier,
 } from "./present.js";
+
+export {
+    DiskModelKind,
+    IntegratorKind,
+    DISK_MODEL_OPTIONS,
+    INTEGRATOR_OPTIONS,
+} from "../kinds.js";
