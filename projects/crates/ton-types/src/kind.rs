@@ -11,7 +11,7 @@ pub enum IntegratorKind {
     SemiClassicalRayMarch = 1,
     /// 完整 3D 零测地线（Christoffel RK4）。
     Geodesic3d = 2,
-    /// 克尔赤道近似（占位，待实现）。
+    /// 克尔赤道近似（`u(φ)` 自旋修正轨道）。
     KerrEquatorial = 3,
 }
 

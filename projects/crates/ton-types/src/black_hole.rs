@@ -15,6 +15,14 @@ impl BlackHole {
         Self { mass, spin: 0.0 }
     }
 
+    /// 克尔黑洞；自旋参数 clamp 到 `|a| < M`。
+    pub fn kerr(mass: f64, spin: f64) -> Self {
+        Self {
+            mass,
+            spin: spin.clamp(-mass, mass),
+        }
+    }
+
     /// TON 618 量级参考（约 6.6×10¹⁰ 太阳质量，取对数刻度演示用）。
     pub fn ton618_scale() -> Self {
         Self::schwarzschild(6.6e10)

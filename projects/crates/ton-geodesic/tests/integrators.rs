@@ -54,16 +54,16 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn unimplemented_integrator_returns_domain_error() {
-        let bh = BlackHole::schwarzschild(1.0);
-        let err = trace_ray(
+    fn dispatch_routes_to_kerr_equatorial() {
+        let bh = BlackHole::kerr(1.0, 0.5);
+        let hit = trace_ray(
             IntegratorKind::KerrEquatorial,
             bh,
             Vec3::new(10.0, 0.0, 0.0),
             Vec3::new(-1.0, 0.0, 0.0),
             TraceConfig::default(),
         )
-        .unwrap_err();
-        assert!(matches!(err, TonError::Domain(_)));
+        .unwrap();
+        assert!(matches!(hit, RayHit::Captured { .. }));
     }
 }

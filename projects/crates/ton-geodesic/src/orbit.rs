@@ -24,11 +24,25 @@ pub fn schwarzschild_orbit_rhs(mass: f64, u: f64) -> f64 {
     3.0 * mass * u * u - u
 }
 
+/// 克尔赤道平面 null 轨道方程；`spin = 0` 时退化为史瓦西。
+pub fn kerr_equatorial_orbit_rhs(mass: f64, spin: f64, u: f64) -> f64 {
+    let schwarzschild = schwarzschild_orbit_rhs(mass, u);
+    let a = spin;
+    schwarzschild - a * a * u * u * u * u * (3.0 * mass * u - 2.0)
+}
+
 pub fn rk4_step(mass: f64, state: OrbitState, dphi: f64) -> OrbitState {
+    rk4_step_with_rhs(state, dphi, |u| schwarzschild_orbit_rhs(mass, u))
+}
+
+pub fn kerr_rk4_step(mass: f64, spin: f64, state: OrbitState, dphi: f64) -> OrbitState {
+    rk4_step_with_rhs(state, dphi, |u| kerr_equatorial_orbit_rhs(mass, spin, u))
+}
+
+fn rk4_step_with_rhs(state: OrbitState, dphi: f64, accel: impl Fn(f64) -> f64) -> OrbitState {
     let phi0 = state.phi;
     let mut u = state.u;
     let mut du = state.du_dphi;
-    let accel = |uu: f64| schwarzschild_orbit_rhs(mass, uu);
     let k1_du = accel(u);
     let k1_u = du;
     let u2 = u + 0.5 * dphi * k1_u;
