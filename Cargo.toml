@@ -9,6 +9,7 @@ members = [
     "projects/crates/ton-simlate",
     "projects/crates/ton-view",
     "projects/crates/ton-wasm",
+    "projects/crates/ton-napi",
     "projects/examples/render-schwarzschild",
 ]
 default-members = [

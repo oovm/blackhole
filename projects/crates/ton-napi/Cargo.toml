@@ -1,0 +1,24 @@
+[package]
+name = "ton-napi"
+description = "TON 黑洞模拟 Node N-API 桥（native 宿主 ↔ ton-sim）"
+readme = "readme.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+keywords = ["blackhole", "napi", "ton"]
+categories = ["science", "api-bindings"]
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+napi.workspace = true
+napi-derive.workspace = true
+ton-sim = { workspace = true }
+ton-types = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

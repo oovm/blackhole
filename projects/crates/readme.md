@@ -26,6 +26,8 @@
 
 | [`ton-wasm`](ton-wasm/readme.md) | Wasm cdylib（Web + UCF 探针） |
 
+| [`ton-napi`](ton-napi/readme.md) | Node N-API cdylib（native 宿主） |
+
 
 
 
