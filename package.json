@@ -5,6 +5,7 @@
     "description": "TON 黑洞模拟器：ton-* Rust crates + Web 演示",
     "license": "MIT",
     "scripts": {
+        "postinstall": "node ./scripts/ensure-vmz-host-manifest.mjs",
         "check": "cargo check --workspace && cargo test --workspace",
         "test": "cargo test --workspace",
         "render": "cargo run -p ton-view -- blackhole.png --width 800 --height 450",
