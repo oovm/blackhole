@@ -8,6 +8,7 @@ members = [
     "projects/crates/ton-render",
     "projects/crates/ton-simlate",
     "projects/crates/ton-view",
+    "projects/bindings/ton-wasm",
     "projects/examples/render-schwarzschild",
 ]
 default-members = [

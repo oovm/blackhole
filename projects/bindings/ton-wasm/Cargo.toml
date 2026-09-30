@@ -1,0 +1,23 @@
+[package]
+name = "ton-wasm"
+description = "TON 黑洞模拟 Wasm cdylib：史瓦西渲染 + UCF 运行时探针"
+readme = "readme.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+keywords = ["blackhole", "wasm", "ucf", "ton"]
+categories = ["wasm", "science"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+ton-sim = { workspace = true }
+ton-types = { workspace = true }
+ucf-wasm = { path = "../../../../ucf.rs/projects/bindings/ucf-wasm" }
+
+[dev-dependencies]
+wasmtime = "28"
