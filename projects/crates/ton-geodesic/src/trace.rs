@@ -8,7 +8,10 @@ use crate::ray::RayHit;
 pub struct TraceConfig {
     pub max_steps: u32,
     pub dphi: f64,
-    pub disk_radius: Option<f64>,
+    /// 薄盘内缘（几何单位）；与 `disk_outer` 成对使用。
+    pub disk_inner: Option<f64>,
+    /// 薄盘外缘。
+    pub disk_outer: Option<f64>,
     pub escape_radius: f64,
 }
 
@@ -17,7 +20,8 @@ impl Default for TraceConfig {
         Self {
             max_steps: 4096,
             dphi: 0.02,
-            disk_radius: None,
+            disk_inner: None,
+            disk_outer: None,
             escape_radius: 1.0e4,
         }
     }
@@ -48,19 +52,22 @@ pub fn trace_schwarzschild(
         0.0
     };
     let mut state = OrbitState::new(r0, du_dphi, phi0);
-    for _ in 0..config.max_steps {
+    for step in 0..config.max_steps {
         let r = state.radius();
         if r <= rs {
             return Ok(RayHit::Captured {
                 position: spherical_to_cartesian(r, state.phi),
             });
         }
-        if let Some(r_disk) = config.disk_radius {
-            if r <= r_disk && r > rs {
-                return Ok(RayHit::Disk {
-                    position: spherical_to_cartesian(r, state.phi),
-                    radius: r,
-                });
+        // 跳过 step 0：相机可能在盘内，不得把起点当成撞盘。
+        if step > 0 {
+            if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
+                if r > rs && r >= inner && r <= outer {
+                    return Ok(RayHit::Disk {
+                        position: spherical_to_cartesian(r, state.phi),
+                        radius: r,
+                    });
+                }
             }
         }
         if r >= config.escape_radius {

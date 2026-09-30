@@ -31,7 +31,8 @@ impl Renderer {
         let cam = self.config.camera;
         let bh = self.config.black_hole;
         let trace_cfg = TraceConfig {
-            disk_radius: self.config.disk.map(|d| d.config.outer_radius),
+            disk_inner: self.config.disk.map(|d| d.config.inner_radius),
+            disk_outer: self.config.disk.map(|d| d.config.outer_radius),
             ..self.config.trace
         };
         for y in 0..h {
@@ -59,9 +60,10 @@ impl Renderer {
 
 pub fn default_camera(bh: BlackHole) -> Camera {
     let m = bh.mass;
-    let dist = 25.0 * m;
+    // 在薄盘外缘之外、赤道平面内（当前测地线为赤道 2D 近似）。
+    let dist = 55.0 * m;
     Camera::look_at(
-        Vec3::new(dist, 0.0, 5.0 * m),
+        Vec3::new(dist, 0.0, 0.0),
         Vec3::ZERO,
         Vec3::new(0.0, 0.0, 1.0),
         std::f64::consts::FRAC_PI_4,
