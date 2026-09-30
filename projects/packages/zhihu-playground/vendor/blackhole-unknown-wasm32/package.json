@@ -6,14 +6,14 @@
     "license": "MIT",
     "exports": {
         ".": {
-            "types": "./dist/index.d.ts",
-            "import": "./dist/index.js",
-            "default": "./dist/index.js"
+            "types": "./runtime/index.d.ts",
+            "import": "./runtime/index.js",
+            "default": "./runtime/index.js"
         },
         "./ton_wasm_bg.wasm": "./lib/ton_wasm_bg.wasm"
     },
     "files": [
-        "dist",
+        "runtime",
         "lib/ton_wasm_bg.wasm"
     ]
 }
