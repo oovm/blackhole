@@ -263,7 +263,7 @@ fn run_convergence_report(
         &[0.08, 0.04, 0.02, 0.01],
     );
     eprintln!(
-        "  {:>8} {:>8} {:>8} {:>8} {:>8} {:>10}",
+        "  {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10}",
         "step", "max_steps", "captured", "escaped", "failed", "boundary_r", "analytic_r"
     );
     for s in samples {
