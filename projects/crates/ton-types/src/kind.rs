@@ -5,11 +5,11 @@
 #[repr(u8)]
 pub enum IntegratorKind {
     /// 史瓦西赤道平面轨道方程（Starless 同族）。
-    #[default]
     SchwarzschildOrbit = 0,
     /// 半经典 Ray March：平直空间 + 牛顿式加速度，速度归一化。
     SemiClassicalRayMarch = 1,
     /// 完整 3D 零测地线（Christoffel RK4）。
+    #[default]
     Geodesic3d = 2,
     /// 克尔赤道近似（`u(φ)` 自旋修正轨道）。
     KerrEquatorial = 3,

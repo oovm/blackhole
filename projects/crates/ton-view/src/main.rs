@@ -119,10 +119,11 @@ fn parse_integrator(args: &[String]) -> IntegratorKind {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
     {
+        Some("schwarzschild") => IntegratorKind::SchwarzschildOrbit,
         Some("sem-classical") => IntegratorKind::SemiClassicalRayMarch,
         Some("geodesic3d") => IntegratorKind::Geodesic3d,
         Some("kerr") => IntegratorKind::KerrEquatorial,
-        _ => IntegratorKind::SchwarzschildOrbit,
+        _ => IntegratorKind::Geodesic3d,
     }
 }
 

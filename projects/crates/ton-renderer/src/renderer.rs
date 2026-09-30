@@ -1,8 +1,9 @@
 use ton_disk::{procedural_fbm_color, sample_disk_radiance, AccretionDisk};
-use ton_geodesic::{trace_ray, RayHit, TraceConfig};
+use ton_geodesic::{trace_ray_radiance, TraceConfig};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Rgb, Vec3};
 
 use crate::framebuffer::Framebuffer;
+use crate::post::tone_map_rgb;
 use crate::sky::sky_color;
 
 #[derive(Debug, Clone)]
@@ -47,26 +48,25 @@ impl Renderer {
                 let v = 1.0 - (y as f64 / h as f64) * 2.0;
                 let aspect = w as f64 / h as f64;
                 let dir = cam.ray_direction(u * aspect, v);
-                let color = match trace_ray(
+                let hdr = trace_ray_radiance(
                     self.config.integrator,
                     bh,
                     cam.position,
                     dir,
                     trace_cfg,
-                ) {
-                    Ok(RayHit::Captured { .. }) => Rgb::BLACK,
-                    Ok(RayHit::Escaped { direction }) => sky_color(direction),
-                    Ok(RayHit::Disk { radius, position, .. }) => self
-                        .shade_disk(radius, position),
-                    Err(_) => sky_color(dir),
-                };
+                    |radius, position| self.emit_disk(radius, position),
+                    sky_color,
+                )
+                .map(|r| r.radiance)
+                .unwrap_or_else(|_| sky_color(dir));
+                let color = display_map(hdr);
                 fb.set(x, y, color);
             }
         }
         fb
     }
 
-    fn shade_disk(&self, radius: f64, position: Vec3) -> Rgb {
+    fn emit_disk(&self, radius: f64, position: Vec3) -> Rgb {
         let disk = self.config.disk;
         let cam = self.config.camera;
         let bh = self.config.black_hole;
@@ -96,6 +96,15 @@ impl Renderer {
 
 pub fn default_camera(bh: BlackHole) -> Camera {
     Camera::cinematic(bh)
+}
+
+/// 默认 cinematic 场景使用 3D 测地线（赤道 2D 积分器在倾角相机下会失真）。
+pub fn default_integrator(_bh: BlackHole) -> IntegratorKind {
+    IntegratorKind::Geodesic3d
+}
+
+fn display_map(hdr: Rgb) -> Rgb {
+    tone_map_rgb(hdr.scale(2.8))
 }
 
 /// 工程化 Doppler 近似：盘面切向速度 × 视线夹角。

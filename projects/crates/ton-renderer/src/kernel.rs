@@ -1,7 +1,7 @@
 //! UCF 内核绑定：任务图节点关联 `ucf-program` 程序指纹（非领域 `op` 字符串替代）。
 
 use ton_types::IntegratorKind;
-use ucf_program::{orbit_loop_accumulate, orbit_step_once, program_hash, vector_math_normalize};
+use ucf_program::{orbit_step_once, program_hash, ray_batch_steps, vector_math_normalize};
 use ucf_types::ParamValue;
 
 use ucf_ir::Graph;
@@ -37,8 +37,8 @@ pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
             ("orbit_step_once", program_hash(&p))
         }
         IntegratorKind::Geodesic3d | IntegratorKind::SemiClassicalRayMarch => {
-            let p = orbit_loop_accumulate();
-            ("orbit_loop_accumulate", program_hash(&p))
+            let p = ray_batch_steps();
+            ("ray_batch_steps", program_hash(&p))
         }
     };
     KernelInstance {

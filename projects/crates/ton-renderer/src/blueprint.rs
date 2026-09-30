@@ -79,6 +79,16 @@ mod tests {
     }
 
     #[test]
+    fn geodesic_graph_binds_ray_batch_program() {
+        let g = build_frame_graph(IntegratorKind::Geodesic3d, DiskModelKind::NovikovThorneThin);
+        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 12).expect("trace");
+        assert!(matches!(
+            node.params.get("program_name"),
+            Some(ParamValue::Str(name)) if name == "ray_batch_steps"
+        ));
+    }
+
+    #[test]
     fn schwarzschild_orbit_graph_validates() {
         let g = build_frame_graph(
             IntegratorKind::SchwarzschildOrbit,
