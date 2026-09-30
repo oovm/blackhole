@@ -20,7 +20,7 @@ export type DiskModelKind = (typeof DiskModelKind)[keyof typeof DiskModelKind];
 export const INTEGRATOR_OPTIONS: { value: IntegratorKind; label: string }[] = [
     { value: IntegratorKind.SchwarzschildOrbit, label: "史瓦西轨道" },
     { value: IntegratorKind.SemiClassicalRayMarch, label: "半经典 Ray March" },
-    { value: IntegratorKind.Geodesic3d, label: "3D 测地线（未实现）" },
+    { value: IntegratorKind.Geodesic3d, label: "3D 零测地线" },
     { value: IntegratorKind.KerrEquatorial, label: "克尔赤道（未实现）" },
 ];
 

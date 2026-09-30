@@ -75,4 +75,17 @@ mod tests {
             Some(ParamValue::Str(op)) if op == "ton_shade_procedural_fbm"
         ));
     }
+
+    #[test]
+    fn geodesic_3d_graph_uses_distinct_trace_op() {
+        let g = build_frame_graph(
+            IntegratorKind::Geodesic3d,
+            DiskModelKind::NovikovThorneThin,
+        );
+        g.validate().expect("graph must validate");
+        assert!(matches!(
+            g.tasks.nodes[2].params.get("op"),
+            Some(ParamValue::Str(op)) if op == "ton_trace_geodesic_3d"
+        ));
+    }
 }

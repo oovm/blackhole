@@ -46,3 +46,20 @@ fn golden_sem_classical_fbm_48x27() {
         "update golden if intentional algorithm change"
     );
 }
+
+#[test]
+fn golden_geodesic_3d_novikov_48x27() {
+    let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+        .with_default_disk()
+        .with_integrator(IntegratorKind::Geodesic3d)
+        .with_disk_model(DiskModelKind::NovikovThorneThin)
+        .with_resolution(48, 27)
+        .build();
+    let rgba = scene.render_frame().to_rgba8();
+    let hash = fnv1a64(&rgba);
+    assert_eq!(
+        hash,
+        1281810340172712011,
+        "update golden if intentional algorithm change"
+    );
+}

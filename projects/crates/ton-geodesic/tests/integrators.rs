@@ -40,10 +40,24 @@ mod dispatch_tests {
     }
 
     #[test]
+    fn dispatch_routes_to_geodesic_3d() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let hit = trace_ray(
+            IntegratorKind::Geodesic3d,
+            bh,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            TraceConfig::default(),
+        )
+        .unwrap();
+        assert!(matches!(hit, RayHit::Captured { .. }));
+    }
+
+    #[test]
     fn unimplemented_integrator_returns_domain_error() {
         let bh = BlackHole::schwarzschild(1.0);
         let err = trace_ray(
-            IntegratorKind::Geodesic3d,
+            IntegratorKind::KerrEquatorial,
             bh,
             Vec3::new(10.0, 0.0, 0.0),
             Vec3::new(-1.0, 0.0, 0.0),

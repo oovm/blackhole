@@ -13,7 +13,7 @@
                 <select :value="integrator" @change="((e) => (integrator = Number(e.target.value)))">
                     <option :value="0">史瓦西轨道</option>
                     <option :value="1">半经典 Ray March</option>
-                    <option :value="2">3D 测地线（未实现）</option>
+                    <option :value="2">3D 零测地线</option>
                     <option :value="3">克尔赤道（未实现）</option>
                 </select>
             </label>

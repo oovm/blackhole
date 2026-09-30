@@ -2,6 +2,7 @@
 
 use ton_types::{BlackHole, IntegratorKind, TonError, TonResult, Vec3};
 
+use crate::geodesic3d::trace_geodesic_3d;
 use crate::ray::RayHit;
 use crate::sem_classical::trace_sem_classical;
 use crate::trace::{trace_schwarzschild, TraceConfig};
@@ -19,7 +20,8 @@ pub fn trace_ray(
         IntegratorKind::SemiClassicalRayMarch => {
             trace_sem_classical(bh, origin, direction, config)
         }
-        IntegratorKind::Geodesic3d | IntegratorKind::KerrEquatorial => Err(TonError::Domain(format!(
+        IntegratorKind::Geodesic3d => trace_geodesic_3d(bh, origin, direction, config),
+        IntegratorKind::KerrEquatorial => Err(TonError::Domain(format!(
             "integrator `{kind:?}` not implemented yet"
         ))),
     }

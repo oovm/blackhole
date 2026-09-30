@@ -9,7 +9,7 @@ pub enum IntegratorKind {
     SchwarzschildOrbit = 0,
     /// 半经典 Ray March：平直空间 + 牛顿式加速度，速度归一化。
     SemiClassicalRayMarch = 1,
-    /// 完整 3D 零测地线（占位，待实现）。
+    /// 完整 3D 零测地线（Christoffel RK4）。
     Geodesic3d = 2,
     /// 克尔赤道近似（占位，待实现）。
     KerrEquatorial = 3,
