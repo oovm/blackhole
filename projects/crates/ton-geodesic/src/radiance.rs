@@ -41,3 +41,10 @@ impl RayRadiance {
         Self { radiance }
     }
 }
+
+/// 辐射追迹结果：始终附带终止诊断（单次积分，无二次追迹）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadianceTraceOutcome {
+    pub radiance: RayRadiance,
+    pub diagnostic: crate::termination::TraceDiagnostic,
+}

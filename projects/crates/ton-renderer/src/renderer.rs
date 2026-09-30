@@ -1,24 +1,26 @@
 use ton_disk::{procedural_fbm_color, sample_disk_radiance, AccretionDisk};
 use ton_geodesic::{
-    trace_ray_diagnostic, trace_ray_radiance_result, DiagnosticColorMode, DiskEmission,
+    trace_ray_diagnostic, trace_ray_radiance_outcome, DiagnosticColorMode, DiskEmission,
     TerminationHistogram, TraceConfig, TraceDiagnostic,
 };
 use ton_types::{BlackHole, Camera, DiskFrame, DiskModelKind, IntegratorKind, Rgb, Vec3};
 
-use crate::framebuffer::Framebuffer;
-use crate::post::tone_map_rgb;
+use crate::framebuffer::{Framebuffer, FramebufferEncoding};
+use crate::post::DEFAULT_EXPOSURE;
 use crate::sky::sky_color;
 
 /// 渲染输出模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
-    /// 常规 HDR 辐射 + 色调映射。
+    /// 线性 HDR 辐射（曝光后、无色调映射）；失败像素为黑。
     #[default]
     Beauty,
     /// 按终止原因着色（捕获 / 逃逸 / 预算耗尽 / 数值失败等）。
     TerminationMap,
     /// 关闭盘与星空，仅显示黑洞阴影轮廓与失败像素。
     CaptureSilhouette,
+    /// 仅高亮积分失败像素，成功路径为中性底。
+    FailureMap,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,31 @@ pub struct RenderConfig {
     pub integrator: IntegratorKind,
     pub disk_model: DiskModelKind,
     pub mode: RenderMode,
+    pub exposure: f64,
+}
+
+impl RenderConfig {
+    pub fn exposure(mut self, exposure: f64) -> Self {
+        self.exposure = exposure;
+        self
+    }
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            width: 640,
+            height: 360,
+            black_hole: BlackHole::schwarzschild(1.0),
+            camera: Camera::cinematic(BlackHole::schwarzschild(1.0)),
+            disk: None,
+            trace: TraceConfig::default(),
+            integrator: IntegratorKind::Geodesic3d,
+            disk_model: DiskModelKind::NovikovThorneThin,
+            mode: RenderMode::Beauty,
+            exposure: DEFAULT_EXPOSURE,
+        }
+    }
 }
 
 pub struct Renderer {
@@ -54,13 +81,16 @@ impl Renderer {
         self.render_with_histogram().framebuffer
     }
 
-    /// 渲染一帧；诊断模式下同时返回终止分类直方图。
+    /// 渲染一帧；所有模式均可附带终止直方图（Beauty 用于验收失败率）。
     pub fn render_with_histogram(&self) -> RenderOutput {
         match self.config.mode {
-            RenderMode::Beauty => RenderOutput {
-                framebuffer: self.render_beauty(),
-                termination_histogram: None,
-            },
+            RenderMode::Beauty => {
+                let (fb, hist) = self.render_beauty();
+                RenderOutput {
+                    framebuffer: fb,
+                    termination_histogram: Some(hist),
+                }
+            }
             RenderMode::TerminationMap => {
                 let (fb, hist) =
                     self.render_diagnostic(DiagnosticColorMode::TerminationMap);
@@ -77,20 +107,29 @@ impl Renderer {
                     termination_histogram: Some(hist),
                 }
             }
+            RenderMode::FailureMap => {
+                let (fb, hist) = self.render_diagnostic(DiagnosticColorMode::FailureOnly);
+                RenderOutput {
+                    framebuffer: fb,
+                    termination_histogram: Some(hist),
+                }
+            }
         }
     }
 
-    fn render_beauty(&self) -> Framebuffer {
+    fn render_beauty(&self) -> (Framebuffer, TerminationHistogram) {
         let w = self.config.width;
         let h = self.config.height;
         let mut fb = Framebuffer::new(w, h);
+        let mut histogram = TerminationHistogram::default();
         let cam = self.config.camera;
         let bh = self.config.black_hole;
         let trace_cfg = self.trace_config_with_disk();
+        let exposure = self.config.exposure;
         for y in 0..h {
             for x in 0..w {
                 let dir = self.pixel_ray_dir(x, y, w, h, cam);
-                let pixel = match trace_ray_radiance_result(
+                let outcome = trace_ray_radiance_outcome(
                     self.config.integrator,
                     bh,
                     cam.position,
@@ -98,14 +137,17 @@ impl Renderer {
                     trace_cfg,
                     |radius, position| self.emit_disk(radius, position),
                     sky_color,
-                ) {
-                    Ok(r) => display_map(r.radiance),
-                    Err(diag) => diagnostic_to_display_rgb(diag, DiagnosticColorMode::TerminationMap),
+                );
+                histogram.record(outcome.diagnostic.termination);
+                let pixel = if outcome.diagnostic.is_trace_failure() {
+                    Rgb::BLACK
+                } else {
+                    linear_exposure(outcome.radiance.radiance, exposure)
                 };
                 fb.set(x, y, pixel);
             }
         }
-        fb
+        (fb, histogram)
     }
 
     fn render_diagnostic(
@@ -119,11 +161,13 @@ impl Renderer {
         let cam = self.config.camera;
         let bh = self.config.black_hole;
         let trace_cfg = match color_mode {
-            DiagnosticColorMode::CaptureSilhouette => TraceConfig {
-                disk_inner: None,
-                disk_outer: None,
-                ..self.config.trace
-            },
+            DiagnosticColorMode::CaptureSilhouette | DiagnosticColorMode::FailureOnly => {
+                TraceConfig {
+                    disk_inner: None,
+                    disk_outer: None,
+                    ..self.config.trace
+                }
+            }
             DiagnosticColorMode::TerminationMap => self.trace_config_with_disk(),
         };
         for y in 0..h {
@@ -140,6 +184,7 @@ impl Renderer {
                 fb.set(x, y, diagnostic_to_display_rgb(diag, color_mode));
             }
         }
+        fb.encoding = FramebufferEncoding::Display;
         (fb, histogram)
     }
 
@@ -202,8 +247,8 @@ pub fn default_integrator(_bh: BlackHole) -> IntegratorKind {
     IntegratorKind::Geodesic3d
 }
 
-fn display_map(hdr: Rgb) -> Rgb {
-    tone_map_rgb(hdr.scale(2.8))
+fn linear_exposure(hdr: Rgb, exposure: f64) -> Rgb {
+    hdr.scale(exposure.max(0.0))
 }
 
 fn diagnostic_to_display_rgb(diag: TraceDiagnostic, mode: DiagnosticColorMode) -> Rgb {

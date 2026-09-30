@@ -2,7 +2,7 @@ use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
 use ton_renderer::{
     build_frame_graph_with_post, default_camera, default_integrator, Framebuffer, Graph,
-    RenderConfig, RenderMode, RenderOutput, Renderer,
+    RenderConfig, RenderMode, RenderOutput, Renderer, DEFAULT_EXPOSURE,
 };
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
 
@@ -93,7 +93,16 @@ impl SceneBuilder {
     }
 
     pub fn with_step_size(mut self, step_size: f64) -> Self {
-        self.trace.step_size = step_size;
+        let inner = self.trace.disk_inner;
+        let outer = self.trace.disk_outer;
+        self.trace = TraceConfig::with_step_size(step_size);
+        self.trace.disk_inner = inner;
+        self.trace.disk_outer = outer;
+        self
+    }
+
+    pub fn with_max_steps(mut self, max_steps: u32) -> Self {
+        self.trace.max_steps = max_steps;
         self
     }
 
@@ -157,6 +166,7 @@ impl Scene {
             integrator: self.integrator,
             disk_model: self.disk_model,
             mode: self.render_mode,
+            exposure: DEFAULT_EXPOSURE,
         })
         .render_with_histogram()
     }

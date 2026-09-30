@@ -2,12 +2,13 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use image::{ImageBuffer, Rgba};
 use ton_simulation::{RenderMode, Scene};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Vec3};
 
-fn main() {
+fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let out = args
         .get(1)
@@ -22,9 +23,11 @@ fn main() {
     let disk_model = parse_disk_model(&args);
     let ucf_tone = args.iter().any(|a| a == "--ucf-tone");
     let bloom = args.iter().any(|a| a == "--bloom");
+    let strict = args.iter().any(|a| a == "--strict");
     let camera = parse_camera(&args, mass, spin);
     let render_mode = parse_render_mode(&args);
     let step_size = parse_f64_arg(&args, "--step-size", 0.08);
+    let max_steps = parse_optional_u32_arg(&args, "--max-steps");
 
     let bh = if spin.abs() > f64::EPSILON {
         BlackHole::kerr(mass, spin)
@@ -41,11 +44,16 @@ fn main() {
         .with_step_size(step_size)
         .with_post_bloom(bloom);
 
+    if let Some(steps) = max_steps {
+        builder = builder.with_max_steps(steps);
+    }
+
     if disk_model != DiskModelKind::None {
         builder = builder.with_default_disk();
     }
 
     let scene = builder.build();
+    let trace = scene.trace;
 
     eprintln!(
         "TON view: mode={}, integrator={}, disk={}, camera={}, {}x{} → {}",
@@ -58,29 +66,59 @@ fn main() {
         out.display()
     );
     eprintln!(
-        "  M={:.3} r_s={:.3} b_c={:.3} shadowθ@10M={:.4} rad step={:.4}",
+        "  M={:.3} r_s={:.3} b_c={:.3} shadowθ@10M={:.4} rad step={:.4} max_steps={} escape_r={:.1}",
         bh.mass,
         bh.event_horizon_radius(),
         bh.critical_impact_parameter(),
         bh.shadow_angular_radius(10.0 * bh.mass),
-        step_size
+        trace.step_size,
+        trace.max_steps,
+        trace.escape_radius
     );
 
-    let fb = if render_mode != RenderMode::Beauty {
+    let (fb, failure_pct) = if render_mode != RenderMode::Beauty {
         let output = scene.render_frame_with_histogram();
         if let Some(hist) = output.termination_histogram {
             eprintln!("{}", hist);
+            (output.framebuffer, hist.trace_failure_percent())
+        } else {
+            (output.framebuffer, 0.0)
         }
-        output.framebuffer
     } else if ucf_tone || bloom {
+        let output = scene.render_frame_with_histogram();
+        let failure_pct = output
+            .termination_histogram
+            .as_ref()
+            .map(|h| h.trace_failure_percent())
+            .unwrap_or(0.0);
+        if let Some(hist) = &output.termination_histogram {
+            eprintln!("{}", hist);
+        }
         let (frame, report) = scene
             .render_frame_ucf_cpu()
             .expect("UCF CPU render failed");
         eprintln!("  UCF ops: {}", report.executed_ops.join(" → "));
-        frame
+        (frame, failure_pct)
     } else {
-        scene.render_frame()
+        let output = scene.render_frame_with_histogram();
+        let failure_pct = output
+            .termination_histogram
+            .as_ref()
+            .map(|h| h.trace_failure_percent())
+            .unwrap_or(0.0);
+        if let Some(hist) = &output.termination_histogram {
+            eprintln!("{}", hist);
+        }
+        (output.framebuffer, failure_pct)
     };
+
+    if failure_pct > 0.0 {
+        eprintln!("  trace failures: {:.2}%", failure_pct);
+    }
+    if strict && failure_pct > 0.1 {
+        eprintln!("strict: trace failure rate {:.2}% exceeds 0.1% threshold", failure_pct);
+        return ExitCode::from(2);
+    }
 
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
@@ -94,6 +132,7 @@ fn main() {
     img.save(&out).expect("failed to write PNG");
 
     eprintln!("done.");
+    ExitCode::SUCCESS
 }
 
 fn equatorial_far_camera(bh: BlackHole) -> Camera {
@@ -148,6 +187,7 @@ fn parse_render_mode(args: &[String]) -> RenderMode {
     {
         Some("termination") => RenderMode::TerminationMap,
         Some("capture") => RenderMode::CaptureSilhouette,
+        Some("failure") => RenderMode::FailureMap,
         _ => RenderMode::Beauty,
     }
 }
@@ -157,6 +197,7 @@ fn render_mode_label(mode: RenderMode) -> &'static str {
         RenderMode::Beauty => "beauty",
         RenderMode::TerminationMap => "termination",
         RenderMode::CaptureSilhouette => "capture",
+        RenderMode::FailureMap => "failure",
     }
 }
 
@@ -208,6 +249,13 @@ fn parse_u32_arg(args: &[String], flag: &str, default: u32) -> u32 {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+fn parse_optional_u32_arg(args: &[String], flag: &str) -> Option<u32> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
 }
 
 fn parse_f64_arg(args: &[String], flag: &str, default: f64) -> f64 {

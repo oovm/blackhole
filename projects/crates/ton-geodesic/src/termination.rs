@@ -58,10 +58,33 @@ impl TraceDiagnostic {
         }
     }
 
+    /// 失败专用图：成功路径为中性灰，失败保留伪彩色。
+    pub fn failure_only_color(self) -> (u8, u8, u8) {
+        match self.termination {
+            RayTermination::StepBudgetExceeded => (200, 0, 200),
+            RayTermination::NonFiniteState => (220, 0, 0),
+            RayTermination::InitFailed => (220, 220, 0),
+            RayTermination::DomainError => (128, 0, 128),
+            RayTermination::OriginInsideHorizon => (64, 64, 72),
+            _ => (40, 42, 48),
+        }
+    }
+
+    pub fn is_trace_failure(self) -> bool {
+        matches!(
+            self.termination,
+            RayTermination::StepBudgetExceeded
+                | RayTermination::NonFiniteState
+                | RayTermination::InitFailed
+                | RayTermination::DomainError
+        )
+    }
+
     pub fn to_rgb8(self, mode: DiagnosticColorMode) -> (u8, u8, u8) {
         match mode {
             DiagnosticColorMode::TerminationMap => self.termination_color(),
             DiagnosticColorMode::CaptureSilhouette => self.capture_silhouette_color(),
+            DiagnosticColorMode::FailureOnly => self.failure_only_color(),
         }
     }
 }
@@ -71,6 +94,8 @@ impl TraceDiagnostic {
 pub enum DiagnosticColorMode {
     TerminationMap,
     CaptureSilhouette,
+    /// 仅高亮积分失败像素，成功路径统一中性底。
+    FailureOnly,
 }
 
 /// 整帧终止原因计数（诊断验收用）。
@@ -103,6 +128,18 @@ impl TerminationHistogram {
             return 0.0;
         }
         self.count(termination) as f64 / self.total as f64 * 100.0
+    }
+
+    /// 积分失败像素占比（预算耗尽 / 非有限 / 初始化失败 / 域错误）。
+    pub fn trace_failure_percent(&self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        let failed = self.count(RayTermination::StepBudgetExceeded)
+            + self.count(RayTermination::NonFiniteState)
+            + self.count(RayTermination::InitFailed)
+            + self.count(RayTermination::DomainError);
+        failed as f64 / self.total as f64 * 100.0
     }
 
     /// 按固定顺序输出人类可读摘要（stderr 用）。

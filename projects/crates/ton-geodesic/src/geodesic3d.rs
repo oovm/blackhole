@@ -6,7 +6,7 @@ use ton_metric::{
 };
 use ton_types::{BlackHole, Rgb, TonError, TonResult, Vec3};
 
-use crate::radiance::{DiskEmission, RayRadiance};
+use crate::radiance::{DiskEmission, RadianceTraceOutcome, RayRadiance};
 use crate::ray::RayHit;
 use crate::termination::{RayTermination, TraceDiagnostic};
 use crate::trace::TraceConfig;
@@ -308,15 +308,15 @@ pub fn trace_geodesic_3d(
     }
 }
 
-/// 3D 测地线 + 薄盘多次穿越 HDR 累积。
-pub fn trace_geodesic_3d_radiance<F, S>(
+/// 3D 测地线 + 薄盘多次穿越 HDR 累积（单次积分，附带诊断）。
+pub fn trace_geodesic_3d_radiance_outcome<F, S>(
     bh: BlackHole,
     origin: Vec3,
     direction: Vec3,
     config: TraceConfig,
     mut emit_disk: F,
     sky: S,
-) -> Result<RayRadiance, TraceDiagnostic>
+) -> RadianceTraceOutcome
 where
     F: FnMut(f64, Vec3) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
@@ -346,21 +346,52 @@ where
         },
     );
 
-    match out.diagnostic.termination {
+    let diagnostic = out.diagnostic;
+    let ray = match diagnostic.termination {
         RayTermination::Captured | RayTermination::OriginInsideHorizon => {
-            Ok(RayRadiance::new(radiance))
+            RayRadiance::new(radiance)
         }
         RayTermination::Escaped => {
             let sky_dir = out.escape_direction.unwrap_or(direction);
-            Ok(RayRadiance::new(
-                radiance.add(sky(sky_dir).scale(transmittance)),
-            ))
+            RayRadiance::new(radiance.add(sky(sky_dir).scale(transmittance)))
         }
-        RayTermination::DiskCrossing => Ok(RayRadiance::new(radiance)),
+        RayTermination::DiskCrossing => RayRadiance::new(radiance),
         RayTermination::StepBudgetExceeded
         | RayTermination::NonFiniteState
         | RayTermination::InitFailed
-        | RayTermination::DomainError => Err(out.diagnostic),
+        | RayTermination::DomainError => RayRadiance::BLACK,
+    };
+    RadianceTraceOutcome {
+        radiance: ray,
+        diagnostic,
+    }
+}
+
+/// 3D 测地线 + 薄盘多次穿越 HDR 累积。
+pub fn trace_geodesic_3d_radiance<F, S>(
+    bh: BlackHole,
+    origin: Vec3,
+    direction: Vec3,
+    config: TraceConfig,
+    emit_disk: F,
+    sky: S,
+) -> Result<RayRadiance, TraceDiagnostic>
+where
+    F: FnMut(f64, Vec3) -> DiskEmission,
+    S: Fn(Vec3) -> Rgb,
+{
+    let out = trace_geodesic_3d_radiance_outcome(
+        bh,
+        origin,
+        direction,
+        config,
+        emit_disk,
+        sky,
+    );
+    if out.diagnostic.is_trace_failure() {
+        Err(out.diagnostic)
+    } else {
+        Ok(out.radiance)
     }
 }
 

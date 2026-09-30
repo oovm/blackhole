@@ -17,16 +17,28 @@ pub struct TraceConfig {
     pub escape_radius: f64,
 }
 
-impl Default for TraceConfig {
-    fn default() -> Self {
+impl TraceConfig {
+    /// 按步长缩放积分预算，使 `max_steps * step_size` 覆盖逃逸半径并留螺旋余量。
+    pub fn with_step_size(step_size: f64) -> Self {
+        let step_size = step_size.max(1.0e-6);
+        // 电影相机典型距离 ~10M；逃逸判定不必推到 1e4。
+        let escape_radius = 80.0;
+        let radial_steps = escape_radius / step_size;
+        let max_steps = (radial_steps * 16.0).ceil() as u32;
         Self {
-            max_steps: 4096,
+            max_steps: max_steps.clamp(4096, 131_072),
             dphi: 0.02,
-            step_size: 0.08,
+            step_size,
             disk_inner: None,
             disk_outer: None,
-            escape_radius: 1.0e4,
+            escape_radius,
         }
+    }
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self::with_step_size(0.08)
     }
 }
 

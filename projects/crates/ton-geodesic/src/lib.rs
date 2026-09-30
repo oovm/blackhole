@@ -18,7 +18,10 @@ pub use radiance_dispatch::{trace_ray_radiance, trace_ray_radiance_result};
 pub use diagnostic_dispatch::trace_ray_diagnostic;
 pub use geodesic3d::{
     trace_geodesic_3d, trace_geodesic_3d_diagnostic, trace_geodesic_3d_radiance,
+    trace_geodesic_3d_radiance_outcome,
 };
+pub use radiance::RadianceTraceOutcome;
+pub use radiance_dispatch::trace_ray_radiance_outcome;
 pub use termination::{
     DiagnosticColorMode, RayTermination, TerminationHistogram, TraceDiagnostic,
 };
