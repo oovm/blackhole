@@ -14,3 +14,4 @@ ton-types = { workspace = true }
 ton-disk = { workspace = true }
 ton-render = { workspace = true }
 ton-geodesic = { workspace = true }
+ucf-types = { path = "../../../../ucf.rs/projects/crates/ucf-types" }

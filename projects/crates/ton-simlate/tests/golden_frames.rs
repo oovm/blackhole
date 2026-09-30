@@ -63,3 +63,20 @@ fn golden_geodesic_3d_novikov_48x27() {
         "update golden if intentional algorithm change"
     );
 }
+
+#[test]
+fn golden_kerr_equatorial_novikov_48x27() {
+    let scene = Scene::builder(BlackHole::kerr(1.0, 0.5))
+        .with_default_disk()
+        .with_integrator(IntegratorKind::KerrEquatorial)
+        .with_disk_model(DiskModelKind::NovikovThorneThin)
+        .with_resolution(48, 27)
+        .build();
+    let rgba = scene.render_frame().to_rgba8();
+    let hash = fnv1a64(&rgba);
+    assert_eq!(
+        hash,
+        968992088206601693,
+        "update golden if intentional algorithm change"
+    );
+}
