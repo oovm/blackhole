@@ -109,7 +109,8 @@ impl SceneBuilder {
     pub fn with_step_size(mut self, step_size: f64) -> Self {
         let inner = self.trace.disk_inner;
         let outer = self.trace.disk_outer;
-        self.trace = TraceConfig::with_step_size(step_size);
+        let adaptive = self.trace.adaptive_near_horizon;
+        self.trace = TraceConfig::with_step_size_adaptive(step_size, adaptive);
         self.trace.disk_inner = inner;
         self.trace.disk_outer = outer;
         self

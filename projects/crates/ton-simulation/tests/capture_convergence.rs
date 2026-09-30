@@ -50,9 +50,10 @@ fn capture_boundary_radius_stable_across_step_halving() {
     );
     let analytic = samples[0].analytic_shadow_radius_ndc;
     let analytic_drift = (r0 - analytic).abs() / analytic.max(1e-6);
+    // `analytic_r` 为轴对称小角近似；倾角 cinematic 相机下数值边界偏小仍属已知偏差。
     assert!(
         analytic_drift < 0.35,
-        "numerical boundary {:.4} vs analytic {:.4} drift {:.1}% (integrator still converging)",
+        "numerical boundary {:.4} vs on-axis analytic {:.4} drift {:.1}%",
         r0,
         analytic,
         analytic_drift * 100.0

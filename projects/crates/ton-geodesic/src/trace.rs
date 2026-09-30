@@ -17,16 +17,24 @@ pub struct TraceConfig {
     pub escape_radius: f64,
     /// 薄盘参考系（法线 + 切向基）；默认赤道 XY 盘面。
     pub disk_frame: DiskFrame,
+    /// 在光子球 / 视界附近缩小仿射步长（`Geodesic3d` 专用）。
+    pub adaptive_near_horizon: bool,
 }
 
 impl TraceConfig {
     /// 按步长缩放积分预算，使 `max_steps * step_size` 覆盖逃逸半径并留螺旋余量。
     pub fn with_step_size(step_size: f64) -> Self {
+        Self::with_step_size_adaptive(step_size, true)
+    }
+
+    /// 显式控制近视界自适应步长。
+    pub fn with_step_size_adaptive(step_size: f64, adaptive_near_horizon: bool) -> Self {
         let step_size = step_size.max(1.0e-6);
         // 电影相机典型距离 ~10M；逃逸判定不必推到 1e4。
         let escape_radius = 80.0;
         let radial_steps = escape_radius / step_size;
-        let max_steps = (radial_steps * 16.0).ceil() as u32;
+        let budget_scale = if adaptive_near_horizon { 32.0 } else { 16.0 };
+        let max_steps = (radial_steps * budget_scale).ceil() as u32;
         Self {
             max_steps: max_steps.clamp(4096, 131_072),
             dphi: 0.02,
@@ -35,6 +43,7 @@ impl TraceConfig {
             disk_outer: None,
             escape_radius,
             disk_frame: DiskFrame::equatorial_xy(),
+            adaptive_near_horizon,
         }
     }
 }

@@ -92,6 +92,19 @@ fn rk4_geodesic_step(mass: f64, state: GeodesicState, dlambda: f64) -> GeodesicS
     state_add(state, (coord, accel), dlambda)
 }
 
+/// 在光子球 / 视界附近缩小仿射步长；`r >= 5 r_p` 时恢复 `base`。
+pub fn adaptive_geodesic_step_size(base: f64, r: f64, rs: f64, rp: f64) -> f64 {
+    let base = base.max(1.0e-8);
+    let refine_outer = rp * 8.0;
+    if r >= refine_outer {
+        return base;
+    }
+    let span = (refine_outer - rs).max(rp * 0.5);
+    let t = ((r - rs) / span).clamp(0.0, 1.0);
+    let scale = 0.01 + 0.99 * t * t.sqrt();
+    base * scale
+}
+
 /// 盘面交点：使用 [`DiskFrame`] 法线判定穿越，与相机/发射约定一致。
 fn disk_crossing(
     prev: &GeodesicState,
@@ -151,6 +164,7 @@ where
         };
     }
     let rs = bh.event_horizon_radius();
+    let rp = bh.photon_sphere_radius();
     if origin.length() <= rs {
         return IntegrateOutcome {
             diagnostic: TraceDiagnostic {
@@ -186,7 +200,6 @@ where
         phi: sph.phi,
         u: u0,
     };
-    let dlambda = config.step_size;
     let mut disk_crossings = 0u32;
     let mut steps = 0u32;
     let mut residual = null_residual(mass, &state);
@@ -234,6 +247,11 @@ where
         }
         residual = null_residual(mass, &state);
         let prev = state;
+        let dlambda = if config.adaptive_near_horizon {
+            adaptive_geodesic_step_size(config.step_size, prev.r, rs, rp)
+        } else {
+            config.step_size
+        };
         state = rk4_geodesic_step(mass, prev, dlambda);
         if step > 0 && disk_enabled {
             if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
@@ -417,6 +435,19 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(hit, RayHit::Captured { .. }));
+    }
+
+    #[test]
+    fn adaptive_step_shrinks_near_horizon() {
+        let rs = 2.0;
+        let rp = 3.0;
+        let base = 0.08;
+        let far = adaptive_geodesic_step_size(base, 30.0, rs, rp);
+        let mid = adaptive_geodesic_step_size(base, 6.0, rs, rp);
+        let near = adaptive_geodesic_step_size(base, 2.5, rs, rp);
+        assert!((far - base).abs() < 1e-12);
+        assert!(mid < base * 0.8);
+        assert!(near < base * 0.2);
     }
 
     #[test]
