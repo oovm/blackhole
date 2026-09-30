@@ -80,3 +80,20 @@ fn golden_kerr_equatorial_novikov_48x27() {
         "update golden if intentional algorithm change"
     );
 }
+
+#[test]
+fn golden_ucf_tone_map_schwarzschild_48x27() {
+    let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+        .with_default_disk()
+        .with_integrator(IntegratorKind::SchwarzschildOrbit)
+        .with_disk_model(DiskModelKind::NovikovThorneThin)
+        .with_resolution(48, 27)
+        .build();
+    let (frame, _) = scene.render_frame_ucf_cpu().expect("ucf cpu");
+    let hash = fnv1a64(&frame.to_rgba8());
+    assert_eq!(
+        hash,
+        4831892383622624774,
+        "update golden if intentional algorithm change"
+    );
+}

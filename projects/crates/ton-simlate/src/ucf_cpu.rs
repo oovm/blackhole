@@ -1,7 +1,7 @@
-//! UCF 帧图 CPU 参考执行：按任务链顺序校验 `op` 标签并驱动 `Scene::render_frame`。
+//! UCF 帧图 CPU 参考执行：按任务链顺序校验 `op` 标签并驱动后处理。
 
-use ton_render::Framebuffer;
-use ton_types::{DiskModelKind, IntegratorKind, TonError, TonResult};
+use ton_render::{apply_tone_map, bloom_pass, Framebuffer};
+use ton_types::{DiskModelKind, TonError, TonResult};
 use ton_ucf::Graph;
 use ucf_types::ParamValue;
 
@@ -35,7 +35,25 @@ fn expected_disk_op(disk: DiskModelKind) -> &'static str {
     }
 }
 
-/// 线性帧图 CPU 参考执行：校验 trace / shade `op` 与场景一致后渲染一帧。
+fn task_chain(bloom: bool) -> &'static [u64] {
+    if bloom {
+        &[10, 11, 12, 13, 14, 15, 16]
+    } else {
+        &[10, 11, 12, 13, 14, 15]
+    }
+}
+
+fn apply_post_ops(frame: &mut Framebuffer, ops: &[String]) {
+    for op in ops {
+        match op.as_str() {
+            "ton_bloom" => bloom_pass(frame, 0.85, 0.35),
+            "ton_tone_map" => apply_tone_map(frame),
+            _ => {}
+        }
+    }
+}
+
+/// 线性帧图 CPU 参考执行：校验 trace / shade / 后处理 `op` 与场景一致。
 pub fn execute_frame_graph_cpu(
     scene: &Scene,
     graph: &Graph,
@@ -44,10 +62,10 @@ pub fn execute_frame_graph_cpu(
         .validate()
         .map_err(|e| TonError::Domain(format!("graph validate: {e}")))?;
 
-    let chain = [10u64, 11, 12, 13, 14, 15];
+    let chain = task_chain(scene.post_bloom);
     let mut executed_ops = Vec::with_capacity(chain.len());
     for id in chain {
-        executed_ops.push(task_op(graph, id)?.to_string());
+        executed_ops.push(task_op(graph, *id)?.to_string());
     }
 
     let trace_op = scene.integrator.ucf_op_name();
@@ -65,14 +83,15 @@ pub fn execute_frame_graph_cpu(
         )));
     }
 
-    let frame = scene.render_frame();
+    let mut frame = scene.render_frame();
+    apply_post_ops(&mut frame, &executed_ops);
     Ok((frame, CpuGraphExecution { executed_ops }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ton_types::BlackHole;
+    use ton_types::{BlackHole, IntegratorKind};
 
     #[test]
     fn cpu_executor_runs_full_chain_for_sem_classical() {
@@ -86,7 +105,24 @@ mod tests {
         assert_eq!(report.executed_ops.len(), 6);
         assert_eq!(report.executed_ops[2], "ton_trace_sem_classical");
         assert_eq!(report.executed_ops[3], "ton_shade_procedural_fbm");
+        assert_eq!(report.executed_ops[4], "ton_tone_map");
         assert_eq!(frame.width, 32);
+        assert!(frame.to_rgba8().iter().any(|&b| b > 0));
+    }
+
+    #[test]
+    fn cpu_executor_applies_bloom_when_enabled() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_default_disk()
+            .with_integrator(IntegratorKind::SchwarzschildOrbit)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_post_bloom(true)
+            .with_resolution(32, 24)
+            .build();
+        let (frame, report) = scene.render_frame_ucf_cpu().expect("execute");
+        assert_eq!(report.executed_ops.len(), 7);
+        assert_eq!(report.executed_ops[4], "ton_bloom");
+        assert_eq!(report.executed_ops[5], "ton_tone_map");
         assert!(frame.to_rgba8().iter().any(|&b| b > 0));
     }
 }

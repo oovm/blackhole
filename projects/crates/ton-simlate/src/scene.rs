@@ -2,7 +2,7 @@ use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
 use ton_render::{default_camera, Framebuffer, RenderConfig, Renderer};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
-use ton_ucf::{build_frame_graph, Graph};
+use ton_ucf::{build_frame_graph_with_post, Graph};
 
 use crate::ucf_cpu::{execute_frame_graph_cpu, CpuGraphExecution};
 
@@ -16,6 +16,8 @@ pub struct Scene {
     pub trace: TraceConfig,
     pub integrator: IntegratorKind,
     pub disk_model: DiskModelKind,
+    /// UCF 帧图是否插入 `ton_bloom` 任务。
+    pub post_bloom: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,7 @@ pub struct SceneBuilder {
     trace: TraceConfig,
     integrator: IntegratorKind,
     disk_model: DiskModelKind,
+    post_bloom: bool,
 }
 
 impl SceneBuilder {
@@ -41,7 +44,13 @@ impl SceneBuilder {
             trace: TraceConfig::default(),
             integrator: IntegratorKind::default(),
             disk_model: DiskModelKind::default(),
+            post_bloom: false,
         }
+    }
+
+    pub fn with_post_bloom(mut self, enabled: bool) -> Self {
+        self.post_bloom = enabled;
+        self
     }
 
     pub fn with_integrator(mut self, integrator: IntegratorKind) -> Self {
@@ -83,6 +92,7 @@ impl SceneBuilder {
             trace: self.trace,
             integrator: self.integrator,
             disk_model: self.disk_model,
+            post_bloom: self.post_bloom,
         }
     }
 }
@@ -93,7 +103,7 @@ impl Scene {
     }
 
     pub fn build_ucf_graph(&self) -> Graph {
-        build_frame_graph(self.integrator, self.disk_model)
+        build_frame_graph_with_post(self.integrator, self.disk_model, self.post_bloom)
     }
 
     /// UCF 帧图 CPU 参考路径：校验蓝图 `op` 后渲染一帧。
