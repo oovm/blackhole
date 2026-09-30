@@ -91,7 +91,7 @@ fn bisect_horizon_crossing(
 ) -> GeodesicState {
     let mut lo = 0.0;
     let mut hi = 1.0;
-    for _ in 0..28 {
+    for _ in 0..36 {
         let mid = (lo + hi) * 0.5;
         let trial = rk4_geodesic_step(mass, prev, dlambda * mid);
         if trial.r > rs {
@@ -101,6 +101,51 @@ fn bisect_horizon_crossing(
         }
     }
     rk4_geodesic_step(mass, prev, dlambda * hi)
+}
+
+enum GeodesicAdvance {
+    Normal(GeodesicState),
+    CrossedHorizon(GeodesicState),
+    NonFinite,
+}
+
+/// 单步推进：近视界带内自动缩小仿射步长，穿越时二分定位视界。
+fn advance_geodesic_step(
+    mass: f64,
+    prev: GeodesicState,
+    dlambda: f64,
+    rs: f64,
+) -> GeodesicAdvance {
+    let approach_band = (rs * 0.12).max(0.35);
+    let mut h = dlambda;
+    if prev.r > rs {
+        let margin = prev.r - rs;
+        if margin < approach_band {
+            h = h.min(margin * 0.42);
+        }
+    }
+    for _ in 0..8 {
+        let trial = rk4_geodesic_step(mass, prev, h);
+        if !trial.r.is_finite() || trial.u.iter().any(|v| !v.is_finite()) {
+            h *= 0.5;
+            continue;
+        }
+        if prev.r > rs && trial.r <= rs {
+            return GeodesicAdvance::CrossedHorizon(bisect_horizon_crossing(mass, prev, h, rs));
+        }
+        if prev.r <= rs {
+            return GeodesicAdvance::CrossedHorizon(trial);
+        }
+        return GeodesicAdvance::Normal(trial);
+    }
+    let trial = rk4_geodesic_step(mass, prev, h);
+    if !trial.r.is_finite() || trial.u.iter().any(|v| !v.is_finite()) {
+        return GeodesicAdvance::NonFinite;
+    }
+    if prev.r > rs && trial.r <= rs {
+        return GeodesicAdvance::CrossedHorizon(bisect_horizon_crossing(mass, prev, h, rs));
+    }
+    GeodesicAdvance::Normal(trial)
 }
 
 fn captured_outcome(
@@ -283,27 +328,28 @@ where
         } else {
             config.step_size
         };
-        state = rk4_geodesic_step(mass, prev, dlambda);
-        if !state.r.is_finite() || state.u.iter().any(|v| !v.is_finite()) {
-            // 视界/光子球附近 RK4 可能发散；按守恒冲击参数回落到解析命运。
-            if bound_infall {
-                return captured_outcome(prev, steps, residual, disk_crossings);
+        match advance_geodesic_step(mass, prev, dlambda, rs) {
+            GeodesicAdvance::CrossedHorizon(crossed) => {
+                return captured_outcome(crossed, steps, residual, disk_crossings);
             }
-            let dir = prev.tangent_cartesian().normalize();
-            return IntegrateOutcome {
-                diagnostic: TraceDiagnostic {
-                    termination: RayTermination::Escaped,
-                    steps,
-                    null_residual: residual,
-                    disk_crossings,
-                },
-                hit: Some(RayHit::Escaped { direction: dir }),
-                escape_direction: Some(dir),
-            };
-        }
-        if prev.r > rs && state.r <= rs {
-            state = bisect_horizon_crossing(mass, prev, dlambda, rs);
-            return captured_outcome(state, steps, residual, disk_crossings);
+            GeodesicAdvance::NonFinite => {
+                // 视界/光子球附近 RK4 可能发散；按守恒冲击参数回落到解析命运。
+                if bound_infall {
+                    return captured_outcome(prev, steps, residual, disk_crossings);
+                }
+                let dir = prev.tangent_cartesian().normalize();
+                return IntegrateOutcome {
+                    diagnostic: TraceDiagnostic {
+                        termination: RayTermination::Escaped,
+                        steps,
+                        null_residual: residual,
+                        disk_crossings,
+                    },
+                    hit: Some(RayHit::Escaped { direction: dir }),
+                    escape_direction: Some(dir),
+                };
+            }
+            GeodesicAdvance::Normal(next) => state = next,
         }
         if step > 0 && disk_enabled {
             if let (Some(inner), Some(outer)) = (config.disk_inner, config.disk_outer) {
@@ -483,7 +529,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ton_types::TonError;
+    use ton_metric::schwarzschild_geodesic_analytic_captured;
+    use ton_types::{Camera, TonError};
+
+    #[test]
+    fn cinematic_grazing_boundary_rays_classify_cleanly() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let cam = Camera::cinematic(bh);
+        let trace = TraceConfig::with_step_size(0.08);
+        let w = 48u32;
+        let h = 27u32;
+        let aspect = w as f64 / h as f64;
+        let mut failures = 0u32;
+        let mut mismatches = 0u32;
+        for y in 0..h {
+            for x in 0..w {
+                let u = (x as f64 / w as f64) * 2.0 - 1.0;
+                let v = 1.0 - (y as f64 / h as f64) * 2.0;
+                let dir = cam.ray_direction(u * aspect, v);
+                let diag = trace_geodesic_3d_diagnostic(bh, cam.position, dir, trace);
+                if diag.is_trace_failure() {
+                    failures += 1;
+                    continue;
+                }
+                let analytic = schwarzschild_geodesic_analytic_captured(bh, cam.position, dir);
+                let captured = matches!(diag.termination, RayTermination::Captured);
+                if analytic != captured {
+                    mismatches += 1;
+                }
+            }
+        }
+        assert_eq!(failures, 0, "trace failures on cinematic grazing grid");
+        let total = w * h;
+        let mismatch_frac = mismatches as f64 / total as f64;
+        assert!(
+            mismatch_frac < 0.06,
+            "classification mismatch {:.1}% exceeds 6%",
+            mismatch_frac * 100.0
+        );
+    }
 
     #[test]
     fn radial_inward_is_captured() {
