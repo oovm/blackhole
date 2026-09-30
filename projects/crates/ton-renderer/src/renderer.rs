@@ -1,4 +1,4 @@
-use ton_disk::{procedural_fbm_color, temperature_to_rgb, AccretionDisk};
+use ton_disk::{procedural_fbm_color, sample_disk_radiance, AccretionDisk};
 use ton_geodesic::{trace_ray, RayHit, TraceConfig};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Rgb, Vec3};
 
@@ -68,10 +68,15 @@ impl Renderer {
 
     fn shade_disk(&self, radius: f64, position: Vec3) -> Rgb {
         let disk = self.config.disk;
+        let cam = self.config.camera;
+        let bh = self.config.black_hole;
         match self.config.disk_model {
             DiskModelKind::None => Rgb::BLACK,
             DiskModelKind::NovikovThorneThin => disk
-                .map(|d| temperature_to_rgb(d.effective_temperature(radius)))
+                .map(|d| {
+                    let doppler = simplified_doppler(position, cam, radius, bh);
+                    sample_disk_radiance(d, radius, doppler).emissive_radiance
+                })
                 .unwrap_or(Rgb::new(1.0, 0.6, 0.2)),
             DiskModelKind::ProceduralFbm => disk
                 .map(|d| {
@@ -90,13 +95,20 @@ impl Renderer {
 }
 
 pub fn default_camera(bh: BlackHole) -> Camera {
-    let m = bh.mass;
-    // 在薄盘外缘之外、赤道平面内（当前测地线为赤道 2D 近似）。
-    let dist = 55.0 * m;
-    Camera::look_at(
-        Vec3::new(dist, 0.0, 0.0),
-        Vec3::ZERO,
-        Vec3::new(0.0, 0.0, 1.0),
-        std::f64::consts::FRAC_PI_4,
-    )
+    Camera::cinematic(bh)
+}
+
+/// 工程化 Doppler 近似：盘面切向速度 × 视线夹角。
+fn simplified_doppler(position: Vec3, camera: Camera, radius: f64, bh: BlackHole) -> f64 {
+    let m = bh.mass.max(1e-12);
+    let speed = (m / radius.max(2.0 * m)).sqrt();
+    let tangent = Vec3::new(-position.y, position.x, 0.0);
+    let vel = if tangent.length() > 1e-12 {
+        tangent.normalize().scale(speed)
+    } else {
+        Vec3::new(speed, 0.0, 0.0)
+    };
+    let view = camera.position.sub(position).normalize();
+    let cos_theta = vel.dot(view) / speed.max(1e-12);
+    (1.0 / (1.0 - cos_theta * 0.35).max(0.05)).clamp(0.25, 4.0)
 }
