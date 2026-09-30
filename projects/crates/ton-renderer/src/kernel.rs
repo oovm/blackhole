@@ -1,7 +1,9 @@
 //! UCF 内核绑定：任务图节点关联 `ucf-program` 程序指纹（非领域 `op` 字符串替代）。
 
 use ton_types::IntegratorKind;
-use ucf_program::{orbit_step_once, program_hash, ray_batch_steps, vector_math_normalize};
+use ucf_program::{
+    geodesic_radial_infall_steps, orbit_step_once, program_hash, vector_math_normalize,
+};
 use ucf_types::ParamValue;
 
 use ucf_ir::Graph;
@@ -29,7 +31,7 @@ impl KernelBinding {
     }
 }
 
-/// 测地线 trace 任务当前阶段的程序绑定（随积分器族区分，后续替换为真实测地线 IR）。
+/// 测地线 trace 任务程序绑定（随积分器族区分）。
 pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
     let (name, hash) = match integrator {
         IntegratorKind::SchwarzschildOrbit | IntegratorKind::KerrEquatorial => {
@@ -37,8 +39,8 @@ pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
             ("orbit_step_once", program_hash(&p))
         }
         IntegratorKind::Geodesic3d | IntegratorKind::SemiClassicalRayMarch => {
-            let p = ray_batch_steps();
-            ("ray_batch_steps", program_hash(&p))
+            let p = geodesic_radial_infall_steps();
+            ("geodesic_radial_infall_steps", program_hash(&p))
         }
     };
     KernelInstance {

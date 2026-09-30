@@ -19,3 +19,4 @@ ucf-program = { path = "../../../../ucf.rs/projects/crates/ucf-program" }
 ucf-types = { path = "../../../../ucf.rs/projects/crates/ucf-types" }
 
 [dev-dependencies]
+ton-metric = { workspace = true }
