@@ -8,6 +8,8 @@ use crate::ray::RayHit;
 pub struct TraceConfig {
     pub max_steps: u32,
     pub dphi: f64,
+    /// 半经典 Ray March 步长（几何单位）。
+    pub step_size: f64,
     /// 薄盘内缘（几何单位）；与 `disk_outer` 成对使用。
     pub disk_inner: Option<f64>,
     /// 薄盘外缘。
@@ -20,6 +22,7 @@ impl Default for TraceConfig {
         Self {
             max_steps: 4096,
             dphi: 0.02,
+            step_size: 0.2,
             disk_inner: None,
             disk_outer: None,
             escape_radius: 1.0e4,
@@ -34,6 +37,9 @@ pub fn trace_schwarzschild(
     config: TraceConfig,
 ) -> TonResult<RayHit> {
     let mass = bh.mass;
+    if !mass.is_finite() || mass <= 0.0 {
+        return Err(TonError::Domain("mass must be finite and positive".into()));
+    }
     let rs = bh.event_horizon_radius();
     let start = SphericalCoords::from_cartesian(origin);
     if start.r <= rs {
@@ -42,15 +48,18 @@ pub fn trace_schwarzschild(
     let dir = direction.normalize();
     let r0 = start.r;
     let phi0 = start.phi;
-    let cart_step = dir.scale(0.01);
-    let end_sph = SphericalCoords::from_cartesian(origin.add(cart_step));
-    let dr = end_sph.r - r0;
-    let dphi_init = end_sph.phi - phi0;
-    let du_dphi = if r0.abs() > f64::EPSILON {
-        -dr / (r0 * r0) / dphi_init.max(1.0e-6)
-    } else {
-        0.0
-    };
+    let radial = origin.scale(1.0 / r0);
+    let radial_velocity = dir.dot(radial);
+    let angular_momentum = origin.cross(dir).z.abs();
+    if angular_momentum <= 1.0e-9 {
+        if radial_velocity < 0.0 {
+            return Ok(RayHit::Captured {
+                position: origin,
+            });
+        }
+        return Ok(RayHit::Escaped { direction: dir });
+    }
+    let du_dphi = -radial_velocity / angular_momentum;
     let mut state = OrbitState::new(r0, du_dphi, phi0);
     for step in 0..config.max_steps {
         let r = state.radius();
@@ -90,4 +99,43 @@ fn spherical_to_cartesian(r: f64, phi: f64) -> Vec3 {
         phi,
     }
     .to_cartesian()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ton_types::TonError;
+
+    #[test]
+    fn radial_rays_skip_azimuthal_integrator() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let inward = trace_schwarzschild(
+            bh,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            TraceConfig::default(),
+        )
+        .unwrap();
+        assert!(matches!(inward, RayHit::Captured { .. }));
+
+        let outward = trace_schwarzschild(
+            bh,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            TraceConfig::default(),
+        )
+        .unwrap();
+        assert!(matches!(outward, RayHit::Escaped { .. }));
+    }
+
+    #[test]
+    fn rejects_non_positive_mass() {
+        let result = trace_schwarzschild(
+            BlackHole::schwarzschild(0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            TraceConfig::default(),
+        );
+        assert!(matches!(result, Err(TonError::Domain(_))));
+    }
 }
