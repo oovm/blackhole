@@ -27,7 +27,7 @@ pub use termination::{
 };
 pub use kerr_equatorial::trace_kerr_equatorial;
 pub use orbit::OrbitState;
-pub use radiance::{DiskEmission, RayRadiance};
+pub use radiance::{DiskEmission, DiskHit, RayRadiance};
 pub use ray::RayHit;
 pub use sem_classical::trace_sem_classical;
 pub use ton_metric::{

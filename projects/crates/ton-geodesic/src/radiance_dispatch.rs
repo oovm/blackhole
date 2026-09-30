@@ -5,7 +5,7 @@ use ton_types::{BlackHole, IntegratorKind, TonError, TonResult, Rgb, Vec3};
 use crate::geodesic3d::trace_geodesic_3d_radiance_outcome;
 use crate::radiance::RadianceTraceOutcome;
 use crate::kerr_equatorial::trace_kerr_equatorial;
-use crate::radiance::{DiskEmission, RayRadiance};
+use crate::radiance::{DiskEmission, DiskHit, RayRadiance};
 use crate::ray::RayHit;
 use crate::sem_classical::trace_sem_classical;
 use crate::termination::TraceDiagnostic;
@@ -13,30 +13,40 @@ use crate::trace::{trace_schwarzschild, TraceConfig};
 
 fn hit_to_radiance(
     hit: RayHit,
-    emit_disk: &mut impl FnMut(f64, Vec3) -> DiskEmission,
+    origin: Vec3,
+    emit_disk: &mut impl FnMut(DiskHit) -> DiskEmission,
     sky: &impl Fn(Vec3) -> Rgb,
 ) -> RayRadiance {
     match hit {
         RayHit::Captured { .. } => RayRadiance::BLACK,
         RayHit::Escaped { direction } => RayRadiance::new(sky(direction)),
         RayHit::Disk { position, radius } => {
-            RayRadiance::new(emit_disk(radius, position).radiance)
+            let incoming = origin.sub(position).normalize();
+            RayRadiance::new(
+                emit_disk(DiskHit {
+                    radius,
+                    position,
+                    incoming_to_observer: incoming,
+                })
+                .radiance,
+            )
         }
     }
 }
 
 fn legacy_radiance_outcome<F, S>(
     hit: TonResult<RayHit>,
+    origin: Vec3,
     emit_disk: &mut F,
     sky: &S,
 ) -> RadianceTraceOutcome
 where
-    F: FnMut(f64, Vec3) -> DiskEmission,
+    F: FnMut(DiskHit) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     match hit {
         Ok(h) => RadianceTraceOutcome {
-            radiance: hit_to_radiance(h, emit_disk, sky),
+            radiance: hit_to_radiance(h, origin, emit_disk, sky),
             diagnostic: TraceDiagnostic {
                 termination: match h {
                     RayHit::Captured { .. } => crate::termination::RayTermination::Captured,
@@ -95,7 +105,7 @@ pub fn trace_ray_radiance_outcome<F, S>(
     sky: S,
 ) -> RadianceTraceOutcome
 where
-    F: FnMut(f64, Vec3) -> DiskEmission,
+    F: FnMut(DiskHit) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     match kind {
@@ -109,16 +119,19 @@ where
         ),
         IntegratorKind::SchwarzschildOrbit => legacy_radiance_outcome(
             trace_schwarzschild(bh, origin, direction, config),
+            origin,
             &mut emit_disk,
             &sky,
         ),
         IntegratorKind::SemiClassicalRayMarch => legacy_radiance_outcome(
             trace_sem_classical(bh, origin, direction, config),
+            origin,
             &mut emit_disk,
             &sky,
         ),
         IntegratorKind::KerrEquatorial => legacy_radiance_outcome(
             trace_kerr_equatorial(bh, origin, direction, config),
+            origin,
             &mut emit_disk,
             &sky,
         ),
@@ -132,11 +145,11 @@ pub fn trace_ray_radiance_result<F, S>(
     origin: Vec3,
     direction: Vec3,
     config: TraceConfig,
-    mut emit_disk: F,
+    emit_disk: F,
     sky: S,
 ) -> Result<RayRadiance, TraceDiagnostic>
 where
-    F: FnMut(f64, Vec3) -> DiskEmission,
+    F: FnMut(DiskHit) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     let out = trace_ray_radiance_outcome(
@@ -166,7 +179,7 @@ pub fn trace_ray_radiance<F, S>(
     sky: S,
 ) -> TonResult<RayRadiance>
 where
-    F: FnMut(f64, Vec3) -> DiskEmission,
+    F: FnMut(DiskHit) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     trace_ray_radiance_result(kind, bh, origin, direction, config, emit_disk, sky).map_err(|d| {

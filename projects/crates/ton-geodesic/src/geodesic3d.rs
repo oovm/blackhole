@@ -6,7 +6,7 @@ use ton_metric::{
 };
 use ton_types::{BlackHole, DiskFrame, Rgb, TonError, TonResult, Vec3};
 
-use crate::radiance::{DiskEmission, RadianceTraceOutcome, RayRadiance};
+use crate::radiance::{DiskEmission, DiskHit, RadianceTraceOutcome, RayRadiance};
 use crate::ray::RayHit;
 use crate::termination::{RayTermination, TraceDiagnostic};
 use crate::trace::TraceConfig;
@@ -72,6 +72,14 @@ fn state_add(state: GeodesicState, deriv: ([f64; 4], [f64; 4]), scale: f64) -> G
             state.u[3] + deriv.1[3] * scale,
         ],
     }
+}
+
+fn incoming_to_observer(prev: &GeodesicState) -> Vec3 {
+    let tangent = prev.tangent_cartesian();
+    if tangent.length() <= 1e-12 {
+        return Vec3::new(0.0, 0.0, 1.0);
+    }
+    tangent.scale(-1.0).normalize()
 }
 
 /// 在 `prev.r > r_s` 与 `next.r <= r_s` 之间对仿射步长二分，精确定位视界穿越。
@@ -189,7 +197,7 @@ fn integrate_geodesic<F>(
     mut on_disk: F,
 ) -> IntegrateOutcome
 where
-    F: FnMut(f64, Vec3) -> bool,
+    F: FnMut(DiskHit) -> bool,
 {
     let mass = bh.mass;
     if !mass.is_finite() || mass <= 0.0 {
@@ -303,7 +311,12 @@ where
                     disk_crossing(&prev, &state, config.disk_frame, inner, outer, rs)
                 {
                     disk_crossings += 1;
-                    let stop = on_disk(radius, hit_pos);
+                    let hit = DiskHit {
+                        radius,
+                        position: hit_pos,
+                        incoming_to_observer: incoming_to_observer(&prev),
+                    };
+                    let stop = on_disk(hit);
                     if single_disk_hit || stop {
                         return IntegrateOutcome {
                             diagnostic: TraceDiagnostic {
@@ -347,7 +360,7 @@ pub fn trace_geodesic_3d_diagnostic(
     config: TraceConfig,
 ) -> TraceDiagnostic {
     let disk_on = config.disk_inner.is_some() && config.disk_outer.is_some();
-    integrate_geodesic(bh, origin, direction, config, disk_on, true, |_r, _p| true).diagnostic
+    integrate_geodesic(bh, origin, direction, config, disk_on, true, |_| true).diagnostic
 }
 
 /// 完整 3D 零测地线：Christoffel RK4，与 `SchwarzschildOrbit` 独立 golden。
@@ -358,7 +371,7 @@ pub fn trace_geodesic_3d(
     config: TraceConfig,
 ) -> TonResult<RayHit> {
     let disk_on = config.disk_inner.is_some() && config.disk_outer.is_some();
-    let out = integrate_geodesic(bh, origin, direction, config, disk_on, true, |_r, _p| true);
+    let out = integrate_geodesic(bh, origin, direction, config, disk_on, true, |_| true);
     match out.hit {
         Some(hit) => Ok(hit),
         None => match out.diagnostic.termination {
@@ -390,7 +403,7 @@ pub fn trace_geodesic_3d_radiance_outcome<F, S>(
     sky: S,
 ) -> RadianceTraceOutcome
 where
-    F: FnMut(f64, Vec3) -> DiskEmission,
+    F: FnMut(DiskHit) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     const MAX_DISK_HITS: u32 = 8;
@@ -406,11 +419,11 @@ where
         config,
         disk_on,
         false,
-        |radius, hit_pos| {
+        |hit| {
             if disk_hits >= MAX_DISK_HITS {
                 return false;
             }
-            let sample = emit_disk(radius, hit_pos);
+            let sample = emit_disk(hit);
             radiance = radiance.add(sample.radiance.scale(transmittance));
             transmittance *= (1.0 - sample.absorption).clamp(0.0, 1.0);
             disk_hits += 1;
@@ -449,7 +462,7 @@ pub fn trace_geodesic_3d_radiance<F, S>(
     sky: S,
 ) -> Result<RayRadiance, TraceDiagnostic>
 where
-    F: FnMut(f64, Vec3) -> DiskEmission,
+    F: FnMut(DiskHit) -> DiskEmission,
     S: Fn(Vec3) -> Rgb,
 {
     let out = trace_geodesic_3d_radiance_outcome(

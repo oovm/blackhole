@@ -37,6 +37,39 @@ fn solid_disk_appears_in_both_vertical_halves() {
 }
 
 #[test]
+fn novikov_disk_shows_doppler_asymmetry_in_linear_hdr() {
+    let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+        .with_default_disk()
+        .with_integrator(IntegratorKind::Geodesic3d)
+        .with_disk_model(DiskModelKind::NovikovThorneThin)
+        .with_resolution(128, 72)
+        .build();
+    let fb = scene.render_frame();
+    let mid = scene.width / 2;
+    let mut left = 0.0;
+    let mut right = 0.0;
+    for y in 0..scene.height {
+        for x in 0..scene.width {
+            let p = fb.pixels[y as usize * scene.width as usize + x as usize];
+            let energy = p.r + p.g + p.b;
+            if energy < 0.8 {
+                continue;
+            }
+            if x < mid {
+                left += energy;
+            } else {
+                right += energy;
+            }
+        }
+    }
+    let ratio = left / right.max(1e-6);
+    assert!(
+        ratio > 1.12 || ratio < 0.88,
+        "expected Doppler left/right asymmetry, ratio={ratio:.3}"
+    );
+}
+
+#[test]
 fn solid_disk_linear_hdr_has_high_energy_pixels() {
     let scene = Scene::builder(BlackHole::schwarzschild(1.0))
         .with_default_disk()

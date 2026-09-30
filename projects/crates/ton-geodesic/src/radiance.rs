@@ -1,6 +1,15 @@
 //! 沿测地线累积的 HDR 辐射（非单次命中着色）。
 
-use ton_types::Rgb;
+use ton_types::{Rgb, Vec3};
+
+/// 薄盘命中上下文：含沿测地线指向观测者的入射方向。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DiskHit {
+    pub radius: f64,
+    pub position: Vec3,
+    /// 沿测地线指向观测者的单位方向（逆仿射参数）。
+    pub incoming_to_observer: Vec3,
+}
 
 /// 薄盘局部发射与吸收（供测地线透射率累积）。
 #[derive(Debug, Clone, Copy, PartialEq)]

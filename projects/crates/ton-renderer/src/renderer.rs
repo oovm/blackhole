@@ -1,6 +1,6 @@
 use ton_disk::{procedural_fbm_color, sample_disk_radiance, AccretionDisk};
 use ton_geodesic::{
-    trace_ray_diagnostic, trace_ray_radiance_outcome, DiagnosticColorMode, DiskEmission,
+    trace_ray_diagnostic, trace_ray_radiance_outcome, DiagnosticColorMode, DiskEmission, DiskHit,
     TerminationHistogram, TraceConfig, TraceDiagnostic,
 };
 use ton_types::{BlackHole, Camera, DiskFrame, DiskModelKind, IntegratorKind, Rgb, Vec3};
@@ -142,7 +142,7 @@ impl Renderer {
                     cam.position,
                     dir,
                     trace_cfg,
-                    |radius, position| self.emit_disk(radius, position),
+                    |hit| self.emit_disk(hit),
                     sky_color,
                 );
                 histogram.record(outcome.diagnostic.termination);
@@ -214,15 +214,17 @@ impl Renderer {
         cam.ray_direction(u * aspect, v)
     }
 
-    fn emit_disk(&self, radius: f64, position: Vec3) -> DiskEmission {
+    fn emit_disk(&self, hit: DiskHit) -> DiskEmission {
         let disk = self.config.disk;
-        let cam = self.config.camera;
         let bh = self.config.black_hole;
+        let radius = hit.radius;
+        let position = hit.position;
         match self.config.disk_model {
             DiskModelKind::None => DiskEmission::opaque(Rgb::BLACK),
             DiskModelKind::NovikovThorneThin => disk
                 .map(|d| {
-                    let doppler = disk_frame_doppler(position, cam, radius, bh);
+                    let doppler =
+                        disk_frame_doppler(position, hit.incoming_to_observer, radius, bh);
                     let sample = sample_disk_radiance(d, radius, doppler);
                     DiskEmission::with_absorption(sample.emissive_radiance, sample.absorption)
                 })
@@ -272,8 +274,13 @@ fn diagnostic_to_display_rgb(diag: TraceDiagnostic, mode: DiagnosticColorMode) -
     Rgb::new(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
 }
 
-/// 盘面切向 Doppler：使用 [`DiskFrame::equatorial_xy`] 切向基，与盘面法线约定一致。
-fn disk_frame_doppler(position: Vec3, camera: Camera, radius: f64, bh: BlackHole) -> f64 {
+/// 盘面切向 Doppler：观测方向沿测地线入射，而非相机直线。
+fn disk_frame_doppler(
+    position: Vec3,
+    incoming_to_observer: Vec3,
+    radius: f64,
+    bh: BlackHole,
+) -> f64 {
     let (_, _, n) = DiskFrame::equatorial_xy().tangent_basis();
     let m = bh.mass.max(1e-12);
     let speed = (m / radius.max(2.0 * m)).sqrt();
@@ -283,7 +290,7 @@ fn disk_frame_doppler(position: Vec3, camera: Camera, radius: f64, bh: BlackHole
     } else {
         Vec3::new(speed, 0.0, 0.0)
     };
-    let view = camera.position.sub(position).normalize();
+    let view = incoming_to_observer.normalize();
     let cos_theta = vel.dot(view) / speed.max(1e-12);
     (1.0 / (1.0 - cos_theta * 0.35).max(0.05)).clamp(0.25, 4.0)
 }
