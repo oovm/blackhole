@@ -8,7 +8,7 @@ members = [
     "projects/crates/ton-render",
     "projects/crates/ton-simlate",
     "projects/crates/ton-view",
-    "projects/bindings/ton-wasm",
+    "projects/crates/ton-wasm",
     "projects/examples/render-schwarzschild",
 ]
 default-members = [
@@ -46,6 +46,8 @@ ton-geodesic = { path = "projects/crates/ton-geodesic", version = "0.1.0" }
 ton-disk = { path = "projects/crates/ton-disk", version = "0.1.0" }
 ton-render = { path = "projects/crates/ton-render", version = "0.1.0" }
 ton-sim = { path = "projects/crates/ton-simlate", version = "0.1.0" }
+napi = { version = "3.12.1", default-features = true, features = ["napi4"] }
+napi-derive = "3.6.3"
 
 [profile.release]
 lto = true

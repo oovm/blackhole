@@ -1,6 +1,6 @@
 # ton-wasm
 
-`wasm32-unknown-unknown` cdylib：导出稳定 C ABI，供 `@ton/blackhole` 浏览器宿主加载。
+`wasm32-unknown-unknown` cdylib：导出稳定 C ABI，供 `@doki-land/blackhole-unknown-wasm32` npm 袋加载。
 
 - **物理渲染**：`ton-sim` CPU 史瓦西光线追踪 → RGBA8
 - **UCF**：同模块链 `ucf` CPU 后端（应用契约诊断探针）
@@ -13,7 +13,7 @@ rustup target add wasm32-unknown-unknown
 cargo build -p ton-wasm --target wasm32-unknown-unknown --release
 ```
 
-产物拷贝见 `projects/packages/blackhole/scripts/copy-from-cargo.mjs`。
+产物拷贝见 `projects/packages/blackhole-unknown-wasm32/scripts/copy-from-cargo.mjs`。
 
 ## 导出（C ABI）
 
