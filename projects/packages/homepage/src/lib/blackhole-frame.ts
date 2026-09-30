@@ -1,12 +1,25 @@
-import { renderBlackholeFrame } from "@doki-land/blackhole-unknown-wasm32";
+import {
+    type DiskModelKind,
+    type IntegratorKind,
+    renderBlackholeFrame,
+} from "@doki-land/blackhole/wasm";
 
 const WASM_URL = "/ton_wasm_bg.wasm";
 
+export interface RenderTonFrameOptions {
+    mass: number;
+    integrator: IntegratorKind;
+    diskModel: DiskModelKind;
+}
+
 export async function renderTonFrame(
     canvas: HTMLCanvasElement,
-    mass: number,
+    options: RenderTonFrameOptions,
 ): Promise<{ tier: string; statusLine: string }> {
-    const { ton, tier } = await renderBlackholeFrame(canvas, { mass, wasmUrl: WASM_URL });
+    const { ton, tier } = await renderBlackholeFrame(canvas, {
+        ...options,
+        wasmUrl: WASM_URL,
+    });
     const info = ton.info();
     return {
         tier,

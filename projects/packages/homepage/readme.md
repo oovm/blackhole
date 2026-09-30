@@ -1,6 +1,6 @@
 # TON 黑洞可视化首页（VMZ）
 
-基于 `@doki-land/blackhole-unknown-wasm32` 的 **VMZ** 演示页：史瓦西黑洞 CPU 光线追踪、UCF 运行时探针、L0 readback 上屏。
+基于 `@doki-land/blackhole/wasm` 的 **VMZ** 演示页：史瓦西黑洞 CPU 光线追踪、UCF 运行时探针、L0 readback 上屏。`ton_wasm_bg.wasm` 由 `copy:wasm` 从平台袋复制到 `public/`。
 
 依赖 npm 上的 `@vmz/vmz` / `@vmz/core`（无需本地 `vmz-framework` 路径）。
 
@@ -8,7 +8,7 @@
 
 ```bash
 pnpm --filter @doki-land/blackhole-unknown-wasm32 run build:wasm
-pnpm --filter @doki-land/blackhole-unknown-wasm32 run build
+pnpm --filter @doki-land/blackhole run build
 pnpm --filter @doki-land/blackhole-homepage run dev
 ```
 

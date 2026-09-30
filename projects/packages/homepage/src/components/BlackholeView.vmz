@@ -2,12 +2,29 @@
     <main class="layout">
         <header>
             <h1>TON 黑洞模拟</h1>
-            <p class="subtitle">史瓦西度规 · CPU 测地线（赤道薄盘） · UCF 运行时 · L2/L0 呈现</p>
+            <p class="subtitle">多积分器 × 多盘模型 · CPU 参考实现 · UCF 运行时 · L2/L0 呈现</p>
         </header>
         <section class="stage">
             <canvas id="ton-view" :width="width" :height="height"></canvas>
         </section>
         <section class="controls">
+            <label>
+                积分器
+                <select :value="integrator" @change="((e) => (integrator = Number(e.target.value)))">
+                    <option :value="0">史瓦西轨道</option>
+                    <option :value="1">半经典 Ray March</option>
+                    <option :value="2">3D 测地线（未实现）</option>
+                    <option :value="3">克尔赤道（未实现）</option>
+                </select>
+            </label>
+            <label>
+                盘模型
+                <select :value="diskModel" @change="((e) => (diskModel = Number(e.target.value)))">
+                    <option :value="0">无盘</option>
+                    <option :value="1">Novikov-Thorne 薄盘</option>
+                    <option :value="2">程序化 FBM</option>
+                </select>
+            </label>
             <label>
                 质量 M
                 <input
@@ -115,6 +132,15 @@ canvas {
     width: 160px;
 }
 
+.controls select {
+    min-width: 168px;
+    padding: 0.35rem 0.5rem;
+    border-radius: 6px;
+    border: 1px solid #2a3144;
+    background: #0d1018;
+    color: inherit;
+}
+
 .controls input[type="number"] {
     width: 88px;
     padding: 0.35rem 0.5rem;
@@ -150,6 +176,8 @@ import { renderTonFrame } from "../lib/blackhole-frame";
 
 export default class BlackholeView {
     mass = 1.0;
+    integrator = 0;
+    diskModel = 1;
     width = 640;
     height = 360;
     status = "点击「渲染一帧」开始";
@@ -171,7 +199,11 @@ export default class BlackholeView {
         this.status = "渲染中…（CPU 测地线，可能需数秒）";
         const t0 = performance.now();
         try {
-            const { statusLine } = await renderTonFrame(canvas, this.mass);
+            const { statusLine } = await renderTonFrame(canvas, {
+                mass: this.mass,
+                integrator: this.integrator,
+                diskModel: this.diskModel,
+            });
             const dt = ((performance.now() - t0) / 1000).toFixed(2);
             this.status = `${statusLine} · ${dt}s`;
         } catch (err) {

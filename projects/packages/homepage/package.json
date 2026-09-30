@@ -5,15 +5,15 @@
     "type": "module",
     "scripts": {
         "copy:wasm": "node ./scripts/copy-wasm.mjs",
-        "predev": "node ../../../scripts/ensure-vmz-host-manifest.mjs && pnpm run copy:wasm",
-        "prebuild": "node ../../../scripts/ensure-vmz-host-manifest.mjs && pnpm run copy:wasm",
+        "predev": "node ../../../scripts/ensure-vmz-host-manifest.mjs && pnpm --filter @doki-land/blackhole run build && pnpm run copy:wasm",
+        "prebuild": "node ../../../scripts/ensure-vmz-host-manifest.mjs && pnpm --filter @doki-land/blackhole run build && pnpm run copy:wasm",
         "precheck": "node ../../../scripts/ensure-vmz-host-manifest.mjs",
         "check": "vmz check .",
         "dev": "vmz dev .",
         "build": "vmz build ."
     },
     "dependencies": {
-        "@doki-land/blackhole-unknown-wasm32": "workspace:*",
+        "@doki-land/blackhole": "workspace:*",
         "@vmz/core": "catalog:"
     },
     "devDependencies": {
