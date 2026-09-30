@@ -1,4 +1,5 @@
 import { DiskModelKind, IntegratorKind } from "../kinds.js";
+import { buildPostFlags, type PostFlagsValue } from "../post-flags.js";
 import { initWebGpuHost } from "./ucf/index.js";
 import { loadTonWasm, type LoadTonWasmOptions, type TonWasmBindings } from "./load.js";
 
@@ -11,6 +12,12 @@ export interface RenderBlackholeOptions extends LoadTonWasmOptions {
     spin?: number;
     integrator?: IntegratorKind;
     diskModel?: DiskModelKind;
+    /** UCF 色调映射（`POST_UCF_TONE_MAP`）。 */
+    ucfToneMap?: boolean;
+    /** UCF 泛光（须同时启用 `ucfToneMap`）。 */
+    bloom?: boolean;
+    /** 直接传入 `post_flags`；覆盖 `ucfToneMap` / `bloom`。 */
+    postFlags?: PostFlagsValue;
     /** RGBA8 写入 wasm 线性内存偏移；默认 65536。 */
     outPtr?: number;
     /** 强制 L0（调试）；默认 WebGPU 可用时走 L2。 */
@@ -87,11 +94,23 @@ export async function renderBlackholeFrame(
     const spin = options.spin ?? 0.0;
     const integrator = options.integrator ?? IntegratorKind.SchwarzschildOrbit;
     const diskModel = options.diskModel ?? DiskModelKind.NovikovThorneThin;
+    const postFlags =
+        options.postFlags ??
+        buildPostFlags(options.ucfToneMap ?? false, options.bloom ?? false);
     const outPtr = options.outPtr ?? DEFAULT_OUT_PTR;
     const byteLen = width * height * 4;
 
     const ton = await loadTonWasm(options);
-    const status = ton.renderFrameRgba8(width, height, mass, spin, integrator, diskModel, outPtr);
+    const status = ton.renderFrameRgba8(
+        width,
+        height,
+        mass,
+        spin,
+        integrator,
+        diskModel,
+        postFlags,
+        outPtr,
+    );
     if (status !== 0) {
         throw new Error(`ton_render_frame_rgba8 failed: ${status}`);
     }
@@ -126,5 +145,6 @@ export {
     DISK_MODEL_OPTIONS,
     INTEGRATOR_OPTIONS,
 } from "../kinds.js";
+export { PostFlags, buildPostFlags, type PostFlagsValue } from "../post-flags.js";
 export { loadTonWasm, type LoadTonWasmOptions, type TonWasmBindings, type TonWasmInfo } from "./load.js";
 export { initWebGpuHost, UcfHostHandleRegistry } from "./ucf/index.js";

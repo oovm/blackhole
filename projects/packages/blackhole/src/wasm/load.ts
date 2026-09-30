@@ -1,4 +1,5 @@
 import type { DiskModelKind, IntegratorKind } from "../kinds.js";
+import type { PostFlagsValue } from "../post-flags.js";
 import {
     buildTonHostImports,
     buildUcfHostImports,
@@ -24,6 +25,7 @@ export interface TonWasmBindings {
         spin: number,
         integrator: IntegratorKind,
         diskModel: DiskModelKind,
+        postFlags: PostFlagsValue,
         outPtr: number,
     ): number;
     /** @deprecated 使用 `renderFrameRgba8`（史瓦西轨道 + Novikov 薄盘）。 */
@@ -56,6 +58,7 @@ type WasmExports = {
         spin: number,
         integrator: number,
         diskModel: number,
+        postFlags: number,
         outPtr: number,
     ) => number;
     ton_render_schwarzschild_rgba8: (
@@ -139,7 +142,7 @@ export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<Ton
                 ucfDiagMask,
             };
         },
-        renderFrameRgba8: (width, height, mass, spin, integrator, diskModel, outPtr) => {
+        renderFrameRgba8: (width, height, mass, spin, integrator, diskModel, postFlags, outPtr) => {
             if (exports.ton_render_frame_rgba8) {
                 return exports.ton_render_frame_rgba8(
                     width,
@@ -148,6 +151,7 @@ export async function loadTonWasm(options: LoadTonWasmOptions = {}): Promise<Ton
                     spin,
                     integrator,
                     diskModel,
+                    postFlags,
                     outPtr,
                 );
             }

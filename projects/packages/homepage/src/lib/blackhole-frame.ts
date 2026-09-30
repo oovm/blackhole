@@ -1,5 +1,7 @@
 import {
     IntegratorKind,
+    PostFlags,
+    buildPostFlags,
     type DiskModelKind,
     type IntegratorKind as IntegratorKindType,
     renderBlackholeFrame,
@@ -13,6 +15,10 @@ export interface RenderTonFrameOptions {
     spin: number;
     integrator: IntegratorKindType;
     diskModel: DiskModelKind;
+    /** UCF 色调映射（默认 demo 开启）。 */
+    ucfToneMap?: boolean;
+    /** UCF 泛光（须开启色调映射）。 */
+    bloom?: boolean;
 }
 
 export async function renderTonFrame(
@@ -21,9 +27,13 @@ export async function renderTonFrame(
 ): Promise<{ tier: string; statusLine: string }> {
     const spin =
         options.integrator === IntegratorKind.KerrEquatorial ? options.spin : 0;
+    const ucfToneMap = options.ucfToneMap ?? true;
+    const bloom = ucfToneMap && (options.bloom ?? false);
+    const postFlags = buildPostFlags(ucfToneMap, bloom);
     const { ton, tier } = await renderBlackholeFrame(canvas, {
         ...options,
         spin,
+        postFlags,
         wasmUrl: WASM_URL,
     });
     const info = ton.info();
@@ -31,10 +41,16 @@ export async function renderTonFrame(
         options.integrator === IntegratorKind.KerrEquatorial
             ? ` · a=${spin.toFixed(2)}`
             : "";
+    const postNote =
+        postFlags === PostFlags.Raw
+            ? ""
+            : bloom
+              ? " · UCF tone+bloom"
+              : " · UCF tone";
     return {
         tier,
         statusLine:
             `${info.name} v${info.version} · UCF diag=0x${info.ucfDiagMask.toString(16)} · ` +
-            `present ${tier} · ${canvas.width}×${canvas.height}${spinNote}`,
+            `present ${tier} · ${canvas.width}×${canvas.height}${spinNote}${postNote}`,
     };
 }

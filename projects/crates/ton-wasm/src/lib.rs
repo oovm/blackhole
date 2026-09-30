@@ -41,9 +41,10 @@ pub unsafe extern "C" fn ton_render_frame_rgba8(
     spin: f64,
     integrator: u8,
     disk_model: u8,
+    post_flags: u8,
     out: *mut u8,
 ) -> i32 {
-    unsafe { write_frame_rgba8(width, height, mass, spin, integrator, disk_model, out) }
+    unsafe { write_frame_rgba8(width, height, mass, spin, integrator, disk_model, post_flags, out) }
 }
 
 /// 史瓦西轨道 + Novikov 薄盘（兼容旧导出）。

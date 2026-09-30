@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { createRequire } from "node:module";
 import type { DiskModelKind, IntegratorKind } from "../kinds.js";
+import type { PostFlagsValue } from "../post-flags.js";
 
 export const tonNodeRustTarget = "node-napi" as const;
 
@@ -13,6 +14,7 @@ export interface TonNapiBindings {
         spin: number,
         integrator: IntegratorKind,
         diskModel: DiskModelKind,
+        postFlags: PostFlagsValue,
     ): Uint8Array;
     renderSchwarzschildRgba8(width: number, height: number, mass: number): Uint8Array;
 }
@@ -54,14 +56,23 @@ export async function loadTonNapi(options: LoadTonNapiOptions = {}): Promise<Ton
             spin: number,
             integrator: number,
             diskModel: number,
+            postFlags: number,
         ) => Uint8Array;
         renderSchwarzschildRgba8: (width: number, height: number, mass: number) => Uint8Array;
     };
     return {
         tonVersionCode: () => native.tonVersionCode(),
-        renderFrameRgba8: (width, height, mass, spin, integrator, diskModel) => {
+        renderFrameRgba8: (width, height, mass, spin, integrator, diskModel, postFlags) => {
             if (native.renderFrameRgba8) {
-                return native.renderFrameRgba8(width, height, mass, spin, integrator, diskModel);
+                return native.renderFrameRgba8(
+                    width,
+                    height,
+                    mass,
+                    spin,
+                    integrator,
+                    diskModel,
+                    postFlags,
+                );
             }
             return native.renderSchwarzschildRgba8(width, height, mass);
         },

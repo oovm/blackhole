@@ -3,7 +3,9 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use ton_sim::{black_hole_for_render, Scene};
-use ton_types::{DiskModelKind, IntegratorKind};
+use ton_types::{
+    post_bloom_from_flags, use_ucf_post, DiskModelKind, IntegratorKind,
+};
 
 /// 与 `ton-wasm` / `ton-view` 对齐的版本编码。
 #[napi]
@@ -18,6 +20,7 @@ fn render_frame_rgba8_inner(
     spin: f64,
     integrator: IntegratorKind,
     disk_model: DiskModelKind,
+    post_flags: u8,
 ) -> Result<Buffer> {
     if width == 0 || height == 0 {
         return Ok(Buffer::from(vec![]));
@@ -27,14 +30,24 @@ fn render_frame_rgba8_inner(
     let mut builder = Scene::builder(black_hole)
         .with_integrator(integrator)
         .with_disk_model(disk_model)
+        .with_post_bloom(post_bloom_from_flags(post_flags))
         .with_resolution(width, height);
     if disk_model != DiskModelKind::None {
         builder = builder.with_default_disk();
     }
-    Ok(Buffer::from(builder.build().render_frame().to_rgba8()))
+    let scene = builder.build();
+    let rgba = if use_ucf_post(post_flags) {
+        scene
+            .render_frame_ucf_cpu()
+            .map(|(fb, _)| fb.to_rgba8())
+            .map_err(|e| Error::from_reason(format!("{e}")))?
+    } else {
+        scene.render_frame().to_rgba8()
+    };
+    Ok(Buffer::from(rgba))
 }
 
-/// 积分器 × 盘模型 × 自旋一帧 RGBA8（`integrator` / `disk_model` 为 `u8` 判别值）。
+/// 积分器 × 盘模型 × 自旋 × 后处理一帧 RGBA8。
 #[napi]
 pub fn render_frame_rgba8(
     width: u32,
@@ -43,12 +56,13 @@ pub fn render_frame_rgba8(
     spin: f64,
     integrator: u8,
     disk_model: u8,
+    post_flags: u8,
 ) -> Result<Buffer> {
     let integrator = IntegratorKind::from_u8(integrator)
         .ok_or_else(|| Error::from_reason("invalid integrator discriminant"))?;
     let disk_model = DiskModelKind::from_u8(disk_model)
         .ok_or_else(|| Error::from_reason("invalid disk_model discriminant"))?;
-    render_frame_rgba8_inner(width, height, mass, spin, integrator, disk_model)
+    render_frame_rgba8_inner(width, height, mass, spin, integrator, disk_model, post_flags)
 }
 
 /// 史瓦西轨道 + Novikov 薄盘（兼容旧 API）。
@@ -61,5 +75,6 @@ pub fn render_schwarzschild_rgba8(width: u32, height: u32, mass: f64) -> Result<
         0.0,
         IntegratorKind::SchwarzschildOrbit,
         DiskModelKind::NovikovThorneThin,
+        0,
     )
 }

@@ -39,6 +39,23 @@
                 <span>{{ spinLabel }}</span>
             </label>
             <label>
+                <input
+                    type="checkbox"
+                    :checked="ucfToneMap"
+                    @change="((e) => (ucfToneMap = e.target.checked))"
+                />
+                UCF 色调映射
+            </label>
+            <label :class="{ dimmed: !ucfToneMap }">
+                <input
+                    type="checkbox"
+                    :checked="bloom"
+                    :disabled="!ucfToneMap"
+                    @change="((e) => (bloom = e.target.checked))"
+                />
+                泛光 Bloom
+            </label>
+            <label>
                 质量 M
                 <input
                     type="range"
@@ -145,6 +162,10 @@ canvas {
     width: 160px;
 }
 
+.controls label input[type="checkbox"] {
+    margin-right: 0.35rem;
+}
+
 .controls label.dimmed {
     opacity: 0.55;
 }
@@ -201,6 +222,8 @@ export default class BlackholeView {
     spinRatio = 0.5;
     integrator = 0;
     diskModel = 1;
+    ucfToneMap = true;
+    bloom = false;
     width = 640;
     height = 360;
     status = "点击「渲染一帧」开始";
@@ -236,6 +259,8 @@ export default class BlackholeView {
                 spin: this.spin,
                 integrator: this.integrator,
                 diskModel: this.diskModel,
+                ucfToneMap: this.ucfToneMap,
+                bloom: this.bloom,
             });
             const dt = ((performance.now() - t0) / 1000).toFixed(2);
             this.status = `${statusLine} · ${dt}s`;

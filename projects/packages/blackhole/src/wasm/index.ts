@@ -26,3 +26,5 @@ export {
     DISK_MODEL_OPTIONS,
     INTEGRATOR_OPTIONS,
 } from "../kinds.js";
+
+export { PostFlags, buildPostFlags, type PostFlagsValue } from "../post-flags.js";
