@@ -75,7 +75,7 @@ mod tests {
         ));
         assert!(matches!(
             node.params.get("program_name"),
-            Some(ParamValue::Str(name)) if name == "orbit_step_once"
+            Some(ParamValue::Str(name)) if name == "equatorial_orbit_rk4_step"
         ));
         let ParamValue::Program { hash, body, .. } = node.params.get("program").expect("program body") else {
             panic!("trace task must carry a structured UCF program");

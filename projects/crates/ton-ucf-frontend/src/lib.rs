@@ -64,6 +64,92 @@ pub fn orbit_step_once() -> Program {
     ProgramBuilder::new().entry(builder).expect("TON orbit program must build").finish().expect("TON orbit program must validate")
 }
 
+/// 构建赤道面零测地线 RK4 单步程序。
+///
+/// 状态 buffer `0` 每实例为 `[u, du_dphi, phi]`，其中 `u = 1 / r`。
+/// uniform `0` 为质量，uniform `1` 为自旋，uniform `2` 为 `dphi`。
+/// 自旋为零时得到 Schwarzschild 赤道轨道，非零时得到 Kerr 赤道轨道。
+pub fn equatorial_orbit_rk4_step() -> Program {
+    let mut builder = FunctionBuilder::new("equatorial_orbit_rk4_step");
+    let index = builder.emit_global_id().expect("open block");
+    let stride = builder.emit_const_u32(3).expect("open block");
+    let base = builder.emit_mul_u32(index, stride).expect("u32 index");
+    let offset_u = builder.emit_const_u32(0).expect("open block");
+    let offset_du = builder.emit_const_u32(1).expect("open block");
+    let offset_phi = builder.emit_const_u32(2).expect("open block");
+    let index_u = builder.emit_add_u32(base, offset_u).expect("u32 index");
+    let index_du = builder.emit_add_u32(base, offset_du).expect("u32 index");
+    let index_phi = builder.emit_add_u32(base, offset_phi).expect("u32 index");
+    let u = builder.emit_load_buffer(0, index_u, Ty::f64()).expect("u state");
+    let du = builder.emit_load_buffer(0, index_du, Ty::f64()).expect("du state");
+    let phi = builder.emit_load_buffer(0, index_phi, Ty::f64()).expect("phi state");
+    let mass = builder.emit_load_uniform(0, Ty::f64()).expect("mass uniform");
+    let spin = builder.emit_load_uniform(1, Ty::f64()).expect("spin uniform");
+    let dphi = builder.emit_load_uniform(2, Ty::f64()).expect("step uniform");
+    let c3 = builder.emit_const_f64(3.0).expect("constant");
+    let c2 = builder.emit_const_f64(2.0).expect("constant");
+    let c6 = builder.emit_const_f64(6.0).expect("constant");
+    let c05 = builder.emit_const_f64(0.5).expect("constant");
+    let rhs = |builder: &mut FunctionBuilder, value: ucf_program::ValueId| {
+        let value2 = builder.emit_binary(BinOp::Mul, value, value).expect("rhs square");
+        let mass_value = builder.emit_binary(BinOp::Mul, mass, value2).expect("rhs mass");
+        let three_mass_value = builder.emit_binary(BinOp::Mul, c3, mass_value).expect("rhs mass term");
+        let schwarzschild = builder.emit_binary(BinOp::Sub, three_mass_value, value).expect("rhs Schwarzschild");
+        let spin2 = builder.emit_binary(BinOp::Mul, spin, spin).expect("spin square");
+        let value4 = builder.emit_binary(BinOp::Mul, value2, value2).expect("rhs fourth power");
+        let mass_u = builder.emit_binary(BinOp::Mul, mass, value).expect("rhs mass u");
+        let three_mass_u = builder.emit_binary(BinOp::Mul, c3, mass_u).expect("rhs 3Mu");
+        let correction_factor = builder.emit_binary(BinOp::Sub, three_mass_u, c2).expect("rhs correction factor");
+        let value_correction = builder.emit_binary(BinOp::Mul, value4, correction_factor).expect("rhs correction");
+        let correction = builder.emit_binary(BinOp::Mul, spin2, value_correction).expect("rhs correction");
+        builder.emit_binary(BinOp::Sub, schwarzschild, correction).expect("Kerr rhs")
+    };
+    let half_step = builder.emit_binary(BinOp::Mul, dphi, c05).expect("half step");
+    let k1_u = du;
+    let k1_du = rhs(&mut builder, u);
+    let k1_u_step = builder.emit_binary(BinOp::Mul, half_step, k1_u).expect("k1 u");
+    let u2 = builder.emit_binary(BinOp::Add, u, k1_u_step).expect("u2");
+    let k1_du_step = builder.emit_binary(BinOp::Mul, half_step, k1_du).expect("k1 du");
+    let du2 = builder.emit_binary(BinOp::Add, du, k1_du_step).expect("du2");
+    let k2_u = du2;
+    let k2_du = rhs(&mut builder, u2);
+    let k2_u_step = builder.emit_binary(BinOp::Mul, half_step, k2_u).expect("k2 u");
+    let u3 = builder.emit_binary(BinOp::Add, u, k2_u_step).expect("u3");
+    let k2_du_step = builder.emit_binary(BinOp::Mul, half_step, k2_du).expect("k2 du");
+    let du3 = builder.emit_binary(BinOp::Add, du, k2_du_step).expect("du3");
+    let k3_u = du3;
+    let k3_du = rhs(&mut builder, u3);
+    let k3_u_step = builder.emit_binary(BinOp::Mul, dphi, k3_u).expect("k3 u");
+    let u4 = builder.emit_binary(BinOp::Add, u, k3_u_step).expect("u4");
+    let k3_du_step = builder.emit_binary(BinOp::Mul, dphi, k3_du).expect("k3 du");
+    let du4 = builder.emit_binary(BinOp::Add, du, k3_du_step).expect("du4");
+    let k4_u = du4;
+    let k4_du = rhs(&mut builder, u4);
+    let two_k2_u = builder.emit_binary(BinOp::Mul, c2, k2_u).expect("2k2");
+    let first_u = builder.emit_binary(BinOp::Add, k1_u, two_k2_u).expect("weighted u");
+    let two_k3_u = builder.emit_binary(BinOp::Mul, c2, k3_u).expect("2k3");
+    let second_u = builder.emit_binary(BinOp::Add, two_k3_u, k4_u).expect("weighted u");
+    let weighted_u = builder.emit_binary(BinOp::Add, first_u, second_u).expect("weighted u");
+    let two_k2_du = builder.emit_binary(BinOp::Mul, c2, k2_du).expect("2k2");
+    let first_du = builder.emit_binary(BinOp::Add, k1_du, two_k2_du).expect("weighted du");
+    let two_k3_du = builder.emit_binary(BinOp::Mul, c2, k3_du).expect("2k3");
+    let second_du = builder.emit_binary(BinOp::Add, two_k3_du, k4_du).expect("weighted du");
+    let weighted_du = builder.emit_binary(BinOp::Add, first_du, second_du).expect("weighted du");
+    let scaled_u = builder.emit_binary(BinOp::Div, weighted_u, c6).expect("rk4 scale");
+    let increment_u = builder.emit_binary(BinOp::Mul, dphi, scaled_u).expect("u increment");
+    let next_u = builder.emit_binary(BinOp::Add, u, increment_u).expect("next u");
+    let scaled_du = builder.emit_binary(BinOp::Div, weighted_du, c6).expect("rk4 scale");
+    let increment_du = builder.emit_binary(BinOp::Mul, dphi, scaled_du).expect("du increment");
+    let next_du = builder.emit_binary(BinOp::Add, du, increment_du).expect("next du");
+    let next_phi = builder.emit_binary(BinOp::Add, phi, dphi).expect("next phi");
+    for (offset, value) in [(offset_u, next_u), (offset_du, next_du), (offset_phi, next_phi)] {
+        let target = builder.emit_add_u32(base, offset).expect("u32 index");
+        builder.emit_store_buffer(0, target, value).expect("store orbit state");
+    }
+    builder.return_value(next_u).expect("open block");
+    ProgramBuilder::new().entry(builder).expect("valid orbit builder").finish().expect("valid orbit program")
+}
+
 /// 构建有界径向推进程序。
 pub fn geodesic_radial_infall_steps() -> Program {
     f(
@@ -812,5 +898,48 @@ mod integration_tests {
         let output = interpreter.buffer(0).expect("state output");
         assert_eq!(output[8], Value::F32(2.0));
         assert_eq!(output[1], Value::F32(10.0));
+    }
+
+    #[test]
+    fn equatorial_orbit_program_matches_independent_rk4_reference() {
+        fn rhs(mass: f64, spin: f64, value: f64) -> f64 {
+            3.0 * mass * value * value
+                - value
+                - spin * spin * value.powi(4) * (3.0 * mass * value - 2.0)
+        }
+        fn reference(mass: f64, spin: f64, u: f64, du: f64, phi: f64, step: f64) -> [f64; 3] {
+            let half = step * 0.5;
+            let k1_u = du;
+            let k1_du = rhs(mass, spin, u);
+            let k2_u = du + half * k1_du;
+            let k2_du = rhs(mass, spin, u + half * k1_u);
+            let k3_u = du + half * k2_du;
+            let k3_du = rhs(mass, spin, u + half * k2_u);
+            let k4_u = du + step * k3_du;
+            let k4_du = rhs(mass, spin, u + step * k3_u);
+            [
+                u + step * (k1_u + 2.0 * k2_u + 2.0 * k3_u + k4_u) / 6.0,
+                du + step * (k1_du + 2.0 * k2_du + 2.0 * k3_du + k4_du) / 6.0,
+                phi + step,
+            ]
+        }
+
+        let state = [0.08, -0.01, 0.3];
+        let mass = 1.0;
+        let spin = 0.5;
+        let step = 0.02;
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F64(mass));
+        interpreter.with_uniform(1, Value::F64(spin));
+        interpreter.with_uniform(2, Value::F64(step));
+        interpreter.with_buffer(0, state.into_iter().map(Value::F64).collect());
+        interpreter
+            .run_parallel(&equatorial_orbit_rk4_step(), 1)
+            .expect("equatorial orbit execution");
+        let output = interpreter.buffer(0).expect("orbit state output");
+        let expected = reference(mass, spin, state[0], state[1], state[2], step);
+        for (actual, expected) in output.iter().zip(expected) {
+            assert!((actual.as_f64().expect("f64 output") - expected).abs() < 1.0e-12);
+        }
     }
 }

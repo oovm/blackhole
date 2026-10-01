@@ -3,7 +3,7 @@
 use ton_types::{DiskModelKind, IntegratorKind};
 use ton_ucf_frontend::{
     disk_shade_novikov, generate_camera_ray, geodesic_capture_classify, geodesic_radial_infall_steps,
-    orbit_step_once, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk,
+    equatorial_orbit_rk4_step, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk,
     tone_map_aces, vector_math_normalize,
     Program,
 };
@@ -40,10 +40,10 @@ impl KernelBinding {
 pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
     match integrator {
         IntegratorKind::SchwarzschildOrbit | IntegratorKind::KerrEquatorial => {
-            let p = orbit_step_once();
+            let p = equatorial_orbit_rk4_step();
             return KernelInstance {
                 op: integrator.ucf_op_name().to_string(),
-                binding: KernelBinding::from_program("orbit_step_once", p),
+                binding: KernelBinding::from_program("equatorial_orbit_rk4_step", p),
             };
         }
         IntegratorKind::Geodesic3d | IntegratorKind::SemiClassicalRayMarch => {
