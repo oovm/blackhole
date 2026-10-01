@@ -8,6 +8,7 @@ mod kernel;
 mod post;
 mod post_ucf;
 mod renderer;
+mod shade_ucf;
 mod shadow_overlay;
 mod sky;
 
@@ -22,6 +23,7 @@ pub use post_ucf::{
     apply_tone_map_ucf, bloom_pass_ucf, extract_bright_pass_ucf, DEFAULT_BLOOM_INTENSITY,
     DEFAULT_BLOOM_THRESHOLD,
 };
+pub use shade_ucf::{sample_disk_radiance_ucf, DiskShadeUcf};
 pub use renderer::{
     default_camera, default_integrator, RenderConfig, RenderMode, RenderOutput, Renderer,
 };

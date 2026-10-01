@@ -169,6 +169,11 @@ impl Scene {
 
     /// 渲染一帧；`termination` / `capture` 模式下附带终止直方图。
     pub fn render_frame_with_histogram(&self) -> RenderOutput {
+        self.render_frame_with_histogram_opts(false)
+    }
+
+    /// 渲染线性 HDR 帧；`use_ucf_shade` 为真时 Novikov 盘面走 UCF 解释器。
+    pub fn render_frame_with_histogram_opts(&self, use_ucf_shade: bool) -> RenderOutput {
         Renderer::new(RenderConfig {
             width: self.width,
             height: self.height,
@@ -181,6 +186,7 @@ impl Scene {
             mode: self.render_mode,
             exposure: DEFAULT_EXPOSURE,
             overlay_analytic_shadow: self.overlay_analytic_shadow,
+            use_ucf_shade,
         })
         .render_with_histogram()
     }

@@ -98,6 +98,18 @@ pub fn execute_frame_graph_cpu(
         ));
     }
 
+    let shade_node = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|n| n.id.0 == 13)
+        .ok_or_else(|| TonError::Domain("missing shade task 13".into()))?;
+    if !shade_node.params.contains_key("program_hash") {
+        return Err(TonError::Domain(
+            "shade task missing program_hash (KernelBinding)".into(),
+        ));
+    }
+
     let tone_task_id = if scene.post_bloom { 15 } else { 14 };
     let tone_node = graph
         .tasks
@@ -124,7 +136,9 @@ pub fn execute_frame_graph_cpu(
         }
     }
 
-    let mut frame = scene.render_frame();
+    let mut frame = scene
+        .render_frame_with_histogram_opts(true)
+        .framebuffer;
     apply_post_ops(&mut frame, &executed_ops);
     Ok((frame, CpuGraphExecution { executed_ops }))
 }
@@ -165,5 +179,24 @@ mod tests {
         assert_eq!(report.executed_ops[4], "ton_bloom");
         assert_eq!(report.executed_ops[5], "ton_tone_map");
         assert!(frame.to_rgba8().iter().any(|&b| b > 0));
+    }
+
+    #[test]
+    fn ucf_shade_path_matches_native_rgba_for_small_frame() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_default_disk()
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_resolution(24, 16)
+            .build();
+        let native = scene.render_frame_with_histogram_opts(false).framebuffer;
+        let ucf = scene.render_frame_with_histogram_opts(true).framebuffer;
+        assert_eq!(native.pixels.len(), ucf.pixels.len());
+        for (i, (a, b)) in native.pixels.iter().zip(ucf.pixels.iter()).enumerate() {
+            assert!(
+                (a.r - b.r).abs() < 1e-5 && (a.g - b.g).abs() < 1e-5 && (a.b - b.b).abs() < 1e-5,
+                "pixel {i} native={a:?} ucf={b:?}"
+            );
+        }
     }
 }

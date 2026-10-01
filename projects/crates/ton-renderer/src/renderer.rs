@@ -7,6 +7,7 @@ use ton_types::{BlackHole, Camera, DiskFrame, DiskModelKind, IntegratorKind, Rgb
 
 use crate::framebuffer::{Framebuffer, FramebufferEncoding};
 use crate::post::DEFAULT_EXPOSURE;
+use crate::shade_ucf::DiskShadeUcf;
 use crate::shadow_overlay::draw_analytic_shadow_ring;
 use crate::sky::sky_color;
 
@@ -38,6 +39,8 @@ pub struct RenderConfig {
     pub exposure: f64,
     /// 在捕获/失败诊断图上叠加解析阴影参考环。
     pub overlay_analytic_shadow: bool,
+    /// Beauty 路径对 Novikov-Thorne 盘面走 UCF `disk_shade_novikov` 解释器。
+    pub use_ucf_shade: bool,
 }
 
 impl RenderConfig {
@@ -61,6 +64,7 @@ impl Default for RenderConfig {
             mode: RenderMode::Beauty,
             exposure: DEFAULT_EXPOSURE,
             overlay_analytic_shadow: false,
+            use_ucf_shade: false,
         }
     }
 }
@@ -133,6 +137,10 @@ impl Renderer {
         let bh = self.config.black_hole;
         let trace_cfg = self.trace_config_with_disk();
         let exposure = self.config.exposure;
+        let mut ucf_shade = self
+            .config
+            .use_ucf_shade
+            .then(DiskShadeUcf::new);
         for y in 0..h {
             for x in 0..w {
                 let dir = self.pixel_ray_dir(x, y, w, h, cam);
@@ -142,7 +150,7 @@ impl Renderer {
                     cam.position,
                     dir,
                     trace_cfg,
-                    |hit| self.emit_disk(hit),
+                    |hit| self.emit_disk(hit, ucf_shade.as_mut()),
                     sky_color,
                 );
                 histogram.record(outcome.diagnostic.termination);
@@ -214,7 +222,7 @@ impl Renderer {
         cam.ray_direction(u * aspect, v)
     }
 
-    fn emit_disk(&self, hit: DiskHit) -> DiskEmission {
+    fn emit_disk(&self, hit: DiskHit, ucf_shade: Option<&mut DiskShadeUcf>) -> DiskEmission {
         let disk = self.config.disk;
         let bh = self.config.black_hole;
         let radius = hit.radius;
@@ -225,7 +233,11 @@ impl Renderer {
                 .map(|d| {
                     let doppler =
                         disk_frame_doppler(position, hit.incoming_to_observer, radius, bh);
-                    let sample = sample_disk_radiance(d, radius, doppler);
+                    let sample = if let Some(shade) = ucf_shade {
+                        shade.sample(d, radius, doppler)
+                    } else {
+                        sample_disk_radiance(d, radius, doppler)
+                    };
                     DiskEmission::with_absorption(sample.emissive_radiance, sample.absorption)
                 })
                 .unwrap_or(DiskEmission::with_absorption(Rgb::new(1.0, 0.6, 0.2), 0.15)),
