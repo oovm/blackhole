@@ -514,6 +514,10 @@ fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhau
         ucf_program::Ty::f32(),
         builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(9))),
     );
+    let input_status = builder.let_value(
+        ucf_program::Ty::f32(),
+        builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(8))),
+    );
     let mass = builder.load_uniform(0);
     let step = builder.load_uniform(1);
     let horizon = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
@@ -527,7 +531,11 @@ fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhau
     }
     let status = builder.let_value(
         ucf_program::Ty::f32(),
-        builder.select(initial_finite, builder.const_f32(0.0), builder.const_f32(4.0)),
+        builder.select(
+            b(&builder, BinOp::Eq, Expr::LoadLocal(input_status), builder.const_f32(0.0)),
+            builder.select(initial_finite, builder.const_f32(0.0), builder.const_f32(4.0)),
+            Expr::LoadLocal(input_status),
+        ),
     );
     let active = |builder: &StructuredFunctionBuilder| {
         builder.select(
@@ -579,6 +587,11 @@ fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhau
         b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(4.0)),
         builder.const_f32(4.0),
         builder.select(captured, builder.const_f32(1.0), builder.select(escaped, builder.const_f32(2.0), builder.const_f32(0.0))),
+    );
+    let terminal_status = builder.select(
+        b(&builder, BinOp::Ne, Expr::LoadLocal(status), builder.const_f32(0.0)),
+        Expr::LoadLocal(status),
+        terminal_status,
     );
     let final_status = if report_budget_exhaustion {
         builder.select(
@@ -780,5 +793,24 @@ mod integration_tests {
         interpreter.with_buffer(0, state);
         interpreter.run_parallel(&program, 1).expect("chunk execution");
         assert_eq!(interpreter.buffer(0).expect("state output")[8], Value::F32(0.0));
+    }
+
+    #[test]
+    fn geodesic_chunk_preserves_terminal_instance_state() {
+        let program = schwarzschild_geodesic_rk4_chunk(4);
+        let state = vec![
+            Value::F32(0.0), Value::F32(10.0), Value::F32(1.1), Value::F32(0.3),
+            Value::F32(1.2), Value::F32(-0.7), Value::F32(0.02), Value::F32(0.01),
+            Value::F32(2.0), Value::F32(0.0),
+        ];
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(1.0));
+        interpreter.with_uniform(1, Value::F32(0.01));
+        interpreter.with_uniform(2, Value::F32(100.0));
+        interpreter.with_buffer(0, state);
+        interpreter.run_parallel(&program, 1).expect("terminal chunk execution");
+        let output = interpreter.buffer(0).expect("state output");
+        assert_eq!(output[8], Value::F32(2.0));
+        assert_eq!(output[1], Value::F32(10.0));
     }
 }
