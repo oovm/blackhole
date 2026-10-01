@@ -1,60 +1,70 @@
 //! UCF 内核绑定：任务图节点关联 `ucf-program` 程序指纹（非领域 `op` 字符串替代）。
 
 use ton_types::{DiskModelKind, IntegratorKind};
-use ucf_program::{
+use ton_ucf_frontend::{
     disk_shade_novikov, generate_camera_ray, geodesic_capture_classify, geodesic_radial_infall_steps,
-    orbit_step_once, post_bloom_extract, program_hash, tone_map_aces, vector_math_normalize,
+    orbit_step_once, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk,
+    tone_map_aces, vector_math_normalize,
+    Program,
 };
 use ucf_types::ParamValue;
 
 use ucf_ir::Graph;
 
 /// 单个 UCF Program 绑定摘要（可序列化进任务 `params`）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KernelBinding {
     pub program_name: String,
     pub program_hash: u64,
+    pub program: Program,
 }
 
 /// 任务图上一项可执行内核：`op` 为调度标签，`binding` 为程序正文指纹。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KernelInstance {
     pub op: String,
     pub binding: KernelBinding,
 }
 
 impl KernelBinding {
-    pub fn from_program_name_hash(name: impl Into<String>, hash: u64) -> Self {
+    pub fn from_program(name: impl Into<String>, program: Program) -> Self {
         Self {
             program_name: name.into(),
-            program_hash: hash,
+            program_hash: program_hash(&program),
+            program,
         }
     }
 }
 
 /// 测地线 trace 任务程序绑定（随积分器族区分）。
 pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
-    let (name, hash) = match integrator {
+    match integrator {
         IntegratorKind::SchwarzschildOrbit | IntegratorKind::KerrEquatorial => {
             let p = orbit_step_once();
-            ("orbit_step_once", program_hash(&p))
+            return KernelInstance {
+                op: integrator.ucf_op_name().to_string(),
+                binding: KernelBinding::from_program("orbit_step_once", p),
+            };
         }
         IntegratorKind::Geodesic3d | IntegratorKind::SemiClassicalRayMarch => {
-            // 完整 3D 测地线仍由宿主数值积分；图上绑定径向切片 + 捕获分类由 diagnostics 路径使用。
-            let p = geodesic_radial_infall_steps();
-            ("geodesic_radial_infall_steps", program_hash(&p))
+            let (name, p) = if matches!(integrator, IntegratorKind::Geodesic3d) {
+                // 3D Schwarzschild 前端使用有界 chunk 程序。Kerr 仍需独立前端，不能复用该绑定。
+                ("schwarzschild_geodesic_rk4_chunk", schwarzschild_geodesic_rk4_chunk(16))
+            } else {
+                ("geodesic_radial_infall_steps", geodesic_radial_infall_steps())
+            };
+            return KernelInstance {
+                op: integrator.ucf_op_name().to_string(),
+                binding: KernelBinding::from_program(name, p),
+            };
         }
-    };
-    KernelInstance {
-        op: integrator.ucf_op_name().to_string(),
-        binding: KernelBinding::from_program_name_hash(name, hash),
-    }
+}
 }
 
 /// 解析捕获分类程序绑定（史瓦西 `b < b_c`）。
 pub fn capture_classify_kernel() -> KernelBinding {
     let p = geodesic_capture_classify();
-    KernelBinding::from_program_name_hash("geodesic_capture_classify", program_hash(&p))
+    KernelBinding::from_program("geodesic_capture_classify", p)
 }
 
 /// 盘面着色任务程序绑定（Novikov-Thorne 薄盘走 `disk_shade_novikov`，其余仍用占位切片）。
@@ -62,11 +72,11 @@ pub fn shade_kernel(disk: DiskModelKind) -> KernelBinding {
     match disk {
         DiskModelKind::NovikovThorneThin => {
             let p = disk_shade_novikov();
-            KernelBinding::from_program_name_hash("disk_shade_novikov", program_hash(&p))
+            KernelBinding::from_program("disk_shade_novikov", p)
         }
         _ => {
             let p = vector_math_normalize();
-            KernelBinding::from_program_name_hash("vector_math_normalize", program_hash(&p))
+            KernelBinding::from_program("vector_math_normalize", p)
         }
     }
 }
@@ -74,19 +84,19 @@ pub fn shade_kernel(disk: DiskModelKind) -> KernelBinding {
 /// 相机射线生成任务程序绑定。
 pub fn generate_rays_kernel() -> KernelBinding {
     let p = generate_camera_ray();
-    KernelBinding::from_program_name_hash("generate_camera_ray", program_hash(&p))
+    KernelBinding::from_program("generate_camera_ray", p)
 }
 
 /// 色调映射任务程序绑定（ACES 拟合）。
 pub fn tone_map_kernel() -> KernelBinding {
     let p = tone_map_aces();
-    KernelBinding::from_program_name_hash("tone_map_aces", program_hash(&p))
+    KernelBinding::from_program("tone_map_aces", p)
 }
 
 /// 泛光亮部提取任务程序绑定（多尺度模糊仍由宿主完成）。
 pub fn bloom_kernel() -> KernelBinding {
     let p = post_bloom_extract();
-    KernelBinding::from_program_name_hash("post_bloom_extract", program_hash(&p))
+    KernelBinding::from_program("post_bloom_extract", p)
 }
 
 /// 将 `program_hash` / `program_name` 写入指定任务节点 `params`。
@@ -95,6 +105,15 @@ pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) 
         node.params.insert(
             "program_hash".into(),
             ParamValue::I64(binding.program_hash as i64),
+        );
+        let body = serde_json::to_string(&binding.program).expect("UCF program serializes");
+        node.params.insert(
+            "program".into(),
+            ParamValue::Program {
+                version: binding.program.version,
+                hash: binding.program_hash,
+                body,
+            },
         );
         node.params.insert(
             "program_name".into(),

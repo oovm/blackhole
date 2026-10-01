@@ -1,4 +1,4 @@
-//! 单帧渲染 UCF 图：与 `规划设计/blackhole-基于UCF的黑洞渲染架构与实施计划.md` 对齐。
+//! 单帧渲染 UCF 图。
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ucf_ir::{Domain, Graph, GraphBuilder};
@@ -77,6 +77,11 @@ mod tests {
             node.params.get("program_name"),
             Some(ParamValue::Str(name)) if name == "orbit_step_once"
         ));
+        let ParamValue::Program { hash, body, .. } = node.params.get("program").expect("program body") else {
+            panic!("trace task must carry a structured UCF program");
+        };
+        let program: ton_ucf_frontend::Program = serde_json::from_str(body).expect("program json");
+        assert_eq!(*hash, ton_ucf_frontend::program_hash(&program));
     }
 
     #[test]
@@ -85,7 +90,7 @@ mod tests {
         let node = g.tasks.nodes.iter().find(|n| n.id.0 == 12).expect("trace");
         assert!(matches!(
             node.params.get("program_name"),
-            Some(ParamValue::Str(name)) if name == "geodesic_radial_infall_steps"
+            Some(ParamValue::Str(name)) if name == "schwarzschild_geodesic_rk4_chunk"
         ));
     }
 
