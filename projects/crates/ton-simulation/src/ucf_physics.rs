@@ -285,6 +285,30 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_rays(mass: f64, rays: &[(Vec3
     schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass, &states, step, escape_radius, max_steps)
 }
 
+/// 生成 UCF Vulkan 测地线终止诊断帧。
+///
+/// 颜色只用于验证执行分类：黑色为捕获，白色为逃逸，红色为预算耗尽。
+/// 该输出不是 Beauty，也不允许被后处理路径复用。
+pub fn schwarzschild_geodesic_diagnostic_ucf_vulkan(bh: BlackHole, camera: Camera, width: u32, height: u32, step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Framebuffer> {
+    let uv = (0..height).flat_map(|y| (0..width).map(move |x| {
+        let aspect = width as f64 / height.max(1) as f64;
+        (((x as f64 + 0.5) / width.max(1) as f64 * 2.0 - 1.0) * aspect, 1.0 - (y as f64 + 0.5) / height.max(1) as f64 * 2.0)
+    })).collect::<Vec<_>>();
+    let directions = camera_ray_ucf_vulkan_batch(camera, &uv)?;
+    let rays = directions.into_iter().map(|direction| (camera.position, direction)).collect::<Vec<_>>();
+    let states = schwarzschild_geodesic_integrate_ucf_vulkan_rays(bh.mass, &rays, step, escape_radius, max_steps)?;
+    let mut frame = Framebuffer::new(width, height);
+    frame.encoding = ton_renderer::FramebufferEncoding::Display;
+    for (index, (_, status)) in states.into_iter().enumerate() {
+        frame.pixels[index] = match status {
+            1 => Rgb::BLACK,
+            2 => Rgb::WHITE,
+            _ => Rgb::new(1.0, 0.0, 0.0),
+        };
+    }
+    Ok(frame)
+}
+
 /// 由原生 Vulkan UCF backend 推进一个完整球坐标 Schwarzschild RK4 步。
 pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalState, step: f64) -> TonResult<SphericalState> {
     let program = schwarzschild_geodesic_rk4_step();
