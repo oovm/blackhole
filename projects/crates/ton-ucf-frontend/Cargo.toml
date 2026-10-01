@@ -1,0 +1,11 @@
+[package]
+name = "ton-ucf-frontend"
+description = "TON 领域前端：将黑洞算法构建为通用 UCF 程序"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+ucf-program = { path = "../../../../ucf.rs/projects/crates/ucf-program" }
