@@ -399,6 +399,20 @@ mod tests {
     }
 
     #[test]
+    fn vulkan_geodesic_diagnostic_frame_is_nonempty_when_available() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let frame = match schwarzschild_geodesic_diagnostic_ucf_vulkan(bh, camera, 8, 5, 0.04, 100.0, 64) {
+            Ok(frame) => frame,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan geodesic diagnostic frame: {error}"),
+        };
+        assert_eq!((frame.width, frame.height), (8, 5));
+        assert_eq!(frame.pixels.len(), 40);
+        assert!(frame.pixels.iter().any(|pixel| *pixel != Rgb::BLACK));
+    }
+
+    #[test]
     fn vulkan_geodesic_program_matches_cpu_and_reference_when_available() {
         let state = SphericalState { t: 0.0, r: 10.0, theta: 1.1, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.02, uphi: 0.01 };
         let cpu = schwarzschild_geodesic_rk4_step_ucf_cpu(1.0, state, 0.01).unwrap();
