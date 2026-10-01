@@ -501,7 +501,8 @@ pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
     });
     let mass = builder.load_uniform(0);
     let step = builder.load_uniform(1);
-    builder.bounded_for(max_steps, |builder, _| {
+    let horizon = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
+    builder.bounded_while(b(&builder, BinOp::Gt, Expr::LoadLocal(state[1]), horizon), max_steps, |builder| {
         let values: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(state[index]));
         let half_step = b(builder, BinOp::Mul, step.clone(), builder.const_f32(0.5));
         let add_scaled = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], slope: &[Expr; 8], scale: Expr| {
