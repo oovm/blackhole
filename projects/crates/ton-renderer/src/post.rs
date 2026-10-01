@@ -31,6 +31,30 @@ fn luminance(c: Rgb) -> f64 {
     0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 }
 
+/// 阈值亮部提取（native 参考，与 UCF `post_bloom_extract` 语义一致）。
+pub fn extract_bright_pass(pixels: &[Rgb], threshold: f64) -> Vec<Rgb> {
+    pixels
+        .iter()
+        .map(|px| {
+            let l = luminance(*px);
+            if l > threshold {
+                let scale = (l - threshold) / l.max(1.0e-9);
+                px.scale(scale)
+            } else {
+                Rgb::BLACK
+            }
+        })
+        .collect()
+}
+
+/// 将已提取的亮部场经多尺度模糊后线性加回帧缓冲。
+pub fn composite_bloom_from_bright(fb: &mut Framebuffer, bright: &[Rgb], intensity: f64) {
+    let bloom = multi_scale_bloom(bright, fb.width, fb.height);
+    for (dst, add) in fb.pixels.iter_mut().zip(bloom.iter()) {
+        *dst = dst.add(add.scale(intensity));
+    }
+}
+
 /// 多尺度 HDR 泛光：阈值提取 → 1×/2×/4× 盒模糊合成 → 线性加回（不截断）。
 pub fn bloom_pass(fb: &mut Framebuffer, threshold: f64, intensity: f64) {
     let w = fb.width;
@@ -38,18 +62,8 @@ pub fn bloom_pass(fb: &mut Framebuffer, threshold: f64, intensity: f64) {
     if w == 0 || h == 0 {
         return;
     }
-    let mut bright = vec![Rgb::BLACK; fb.pixels.len()];
-    for (i, px) in fb.pixels.iter().enumerate() {
-        let l = luminance(*px);
-        if l > threshold {
-            let scale = (l - threshold) / l.max(1.0e-9);
-            bright[i] = px.scale(scale);
-        }
-    }
-    let bloom = multi_scale_bloom(&bright, w, h);
-    for (dst, add) in fb.pixels.iter_mut().zip(bloom.iter()) {
-        *dst = dst.add(add.scale(intensity));
-    }
+    let bright = extract_bright_pass(&fb.pixels, threshold);
+    composite_bloom_from_bright(fb, &bright, intensity);
 }
 
 fn multi_scale_bloom(src: &[Rgb], width: u32, height: u32) -> Vec<Rgb> {

@@ -1,6 +1,9 @@
 //! UCF 帧图 CPU 参考执行：按任务链顺序校验 `op` 标签并驱动后处理。
 
-use ton_renderer::{apply_tone_map, bloom_pass, Framebuffer, Graph};
+use ton_renderer::{
+    apply_tone_map_ucf, bloom_pass_ucf, Framebuffer, Graph, DEFAULT_BLOOM_INTENSITY,
+    DEFAULT_BLOOM_THRESHOLD,
+};
 use ton_types::{DiskModelKind, TonError, TonResult};
 use ucf_types::ParamValue;
 
@@ -46,8 +49,8 @@ fn task_chain(bloom: bool) -> &'static [u64] {
 fn apply_post_ops(frame: &mut Framebuffer, ops: &[String]) {
     for op in ops {
         match op.as_str() {
-            "ton_bloom" => bloom_pass(frame, 0.85, 0.35),
-            "ton_tone_map" => apply_tone_map(frame),
+            "ton_bloom" => bloom_pass_ucf(frame, DEFAULT_BLOOM_THRESHOLD, DEFAULT_BLOOM_INTENSITY),
+            "ton_tone_map" => apply_tone_map_ucf(frame),
             _ => {}
         }
     }
