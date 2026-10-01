@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_radial_rk4_step as reference_radial_rk4_step, R
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -67,6 +67,24 @@ fn camera_uniforms(camera: Camera) -> BTreeMap<String, ParamValue> {
         (camera.fov_y * 0.5).tan(),
     ];
     values.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value))).collect()
+}
+
+/// 由 UCF CPU Interpreter 从 UV 和相机参数生成归一化相机射线。
+pub fn camera_ray_ucf_cpu_batch(camera: Camera, uv: &[(f64, f64)]) -> TonResult<Vec<Vec3>> {
+    if uv.is_empty() { return Ok(Vec::new()); }
+    let input = uv.iter().flat_map(|(u, v)| [Value::F32(*u as f32), Value::F32(*v as f32)]).collect::<Vec<_>>();
+    let uniforms = camera_uniforms(camera).into_iter().filter_map(|(key, value)| {
+        let slot = key.strip_prefix("uniform_")?.parse::<u32>().ok()?;
+        match value {
+            ParamValue::F64(value) => Some((slot, Value::F32(value as f32))),
+            _ => None,
+        }
+    }).collect::<Vec<_>>();
+    let output_seed = vec![Value::F32(0.0); uv.len() * 3];
+    let report = CpuBackend::new().execute_program_with_buffers(&camera_ray_batch(), uv.len() as u32, uniforms, [(1, input), (2, output_seed)]).map_err(TonError::Domain)?;
+    let output = report.buffers.get(&2).ok_or_else(|| TonError::Domain("UCF camera output buffer missing".into()))?;
+    if output.len() < uv.len() * 3 { return Err(TonError::Domain("UCF camera output is short".into())); }
+    output.chunks_exact(3).take(uv.len()).map(|v| Ok(Vec3::new(v[0].as_f64().map_err(|e| TonError::Domain(e.to_string()))?, v[1].as_f64().map_err(|e| TonError::Domain(e.to_string()))?, v[2].as_f64().map_err(|e| TonError::Domain(e.to_string()))?))).collect()
 }
 
 /// 由 UCF Vulkan backend 从 UV 和相机参数生成归一化相机射线。
@@ -201,6 +219,20 @@ mod tests {
             let reference = camera.ray_direction(u, v);
             assert!((value.x - reference.x).abs() < 2.0e-5);
             assert!((value.y - reference.y).abs() < 2.0e-5, "u={u} v={v} actual={value:?} reference={reference:?}");
+            assert!((value.z - reference.z).abs() < 2.0e-5);
+        }
+    }
+
+    #[test]
+    fn cpu_camera_program_matches_reference() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let uv = [(-0.7, 0.5), (0.0, 0.0), (0.8, -0.4)];
+        let actual = camera_ray_ucf_cpu_batch(camera, &uv).unwrap();
+        for ((u, v), value) in uv.into_iter().zip(actual) {
+            let reference = camera.ray_direction(u, v);
+            assert!((value.x - reference.x).abs() < 2.0e-5);
+            assert!((value.y - reference.y).abs() < 2.0e-5);
             assert!((value.z - reference.z).abs() < 2.0e-5);
         }
     }
