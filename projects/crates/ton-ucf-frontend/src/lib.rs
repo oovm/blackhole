@@ -507,7 +507,18 @@ pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
     let mass = builder.load_uniform(0);
     let step = builder.load_uniform(1);
     let horizon = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
-    let status = builder.let_value(ucf_program::Ty::f32(), builder.const_f32(0.0));
+    let mut initial_finite = builder.unary(UnOp::IsFinite, Expr::LoadLocal(state[0]));
+    for index in 1..8 {
+        initial_finite = builder.select(
+            initial_finite,
+            builder.unary(UnOp::IsFinite, Expr::LoadLocal(state[index])),
+            Expr::ConstBool(false),
+        );
+    }
+    let status = builder.let_value(
+        ucf_program::Ty::f32(),
+        builder.select(initial_finite, builder.const_f32(0.0), builder.const_f32(4.0)),
+    );
     let active = |builder: &StructuredFunctionBuilder| {
         builder.select(
             builder.binary(BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0)),
@@ -719,5 +730,19 @@ mod integration_tests {
         assert_eq!(output.len(), 10);
         assert_eq!(output[8], Value::F32(3.0));
         assert!((output[1].as_f64().expect("radius") - 9.972).abs() < 0.1);
+    }
+
+    #[test]
+    fn structured_geodesic_integration_reports_non_finite_initial_state() {
+        let program = schwarzschild_geodesic_rk4_integrate(4);
+        let mut state = vec![Value::F32(0.0); 10];
+        state[1] = Value::F32(f32::NAN);
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(1.0));
+        interpreter.with_uniform(1, Value::F32(0.01));
+        interpreter.with_uniform(2, Value::F32(100.0));
+        interpreter.with_buffer(0, state);
+        interpreter.run_parallel(&program, 1).expect("non-finite state execution");
+        assert_eq!(interpreter.buffer(0).expect("state output")[8], Value::F32(4.0));
     }
 }
