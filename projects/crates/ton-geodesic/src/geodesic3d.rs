@@ -41,6 +41,16 @@ pub struct SphericalState {
     pub uphi: f64,
 }
 
+/// 从笛卡尔相机射线构造 Schwarzschild 球坐标零测地线初态。
+///
+/// 该函数是 TON 物理参考与 UCF 前端共享的初值契约。UCF 只接收返回的
+/// 通用标量状态，不知道射线或黑洞领域类型。
+pub fn schwarzschild_geodesic_initial_state(mass: f64, origin: Vec3, direction: Vec3) -> Option<SphericalState> {
+    let sph = SphericalCoords::from_cartesian(origin);
+    let u = schwarzschild_null_four_velocity(mass, origin, direction)?;
+    Some(SphericalState { t: 0.0, r: sph.r, theta: sph.theta, phi: sph.phi, ut: u[0], ur: u[1], utheta: u[2], uphi: u[3] })
+}
+
 /// 使用独立 Rust 参考实现推进一个完整球坐标 RK4 步。
 pub fn schwarzschild_geodesic_rk4_step(mass: f64, state: SphericalState, dlambda: f64) -> SphericalState {
     let state = GeodesicState {
@@ -667,6 +677,16 @@ mod tests {
         assert!((far - base).abs() < 1e-12);
         assert!(mid < base * 0.8);
         assert!(near < base * 0.2);
+    }
+
+    #[test]
+    fn initial_state_matches_null_velocity_contract() {
+        let origin = Vec3::new(0.0, 0.0, 20.0);
+        let direction = Vec3::new(0.0, 0.0, -1.0);
+        let state = schwarzschild_geodesic_initial_state(1.0, origin, direction).expect("valid null initial state");
+        assert!((state.r - 20.0).abs() < 1.0e-9);
+        assert!(state.ut.is_finite());
+        assert!(state.ur < 0.0);
     }
 
     #[test]
