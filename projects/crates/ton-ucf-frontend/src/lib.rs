@@ -6,6 +6,7 @@
 pub use ucf_program::{
     program_hash, validate_program, BinOp, CpuExecResult, CpuInterpreter, Expr, Function,
     FunctionBuilder, ProgramBuilder,
+    StructuredFunctionBuilder,
     ParallelDim, ParallelInstance, Program, ProgramError, ScalarTy, Stmt, Ty, UnOp, ValidateError,
     Value,
 };
@@ -432,6 +433,105 @@ pub fn schwarzschild_geodesic_rk4_step() -> Program {
     ProgramBuilder::new().entry(builder).expect("valid geodesic builder").finish().expect("valid geodesic program")
 }
 
+/// 构建在单个 UCF 实例内执行有界 RK4 积分的 Schwarzschild 程序。
+///
+/// 状态资源布局为九个 `f32`：前八个元素是
+/// `[t, r, theta, phi, ut, ur, utheta, uphi]`，第九个元素是终止码。
+/// uniform `0` 是质量，`1` 是步长，`2` 是逃逸半径。终止码为
+/// `1=captured`、`2=escaped`、`3=budget_exhausted`。
+pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
+    fn b(builder: &StructuredFunctionBuilder, op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
+        builder.binary(op, lhs, rhs)
+    }
+    fn u(builder: &StructuredFunctionBuilder, op: UnOp, arg: Expr) -> Expr {
+        builder.unary(op, arg)
+    }
+    fn derivative(builder: &StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr) -> [Expr; 8] {
+        let r = values[1].clone();
+        let theta = values[2].clone();
+        let ut = values[4].clone();
+        let ur = values[5].clone();
+        let utheta = values[6].clone();
+        let uphi = values[7].clone();
+        let one = builder.const_f32(1.0);
+        let two = builder.const_f32(2.0);
+        let r2 = b(builder, BinOp::Mul, r.clone(), r.clone());
+        let inv_r = b(builder, BinOp::Div, one.clone(), r.clone());
+        let inv_r2 = b(builder, BinOp::Div, one.clone(), r2);
+        let two_mass = b(builder, BinOp::Mul, two.clone(), mass.clone());
+        let compactness = b(builder, BinOp::Mul, two_mass, inv_r.clone());
+        let f = b(builder, BinOp::Sub, one.clone(), compactness);
+        let fp = b(builder, BinOp::Mul, builder.binary(BinOp::Mul, builder.const_f32(2.0), mass.clone()), inv_r2.clone());
+        let two_f = b(builder, BinOp::Mul, two.clone(), f.clone());
+        let gamma_t_tr = b(builder, BinOp::Div, fp.clone(), two_f);
+        let du_t = u(builder, UnOp::Neg, b(builder, BinOp::Mul, two.clone(), b(builder, BinOp::Mul, gamma_t_tr, b(builder, BinOp::Mul, ut.clone(), ur.clone()))));
+        let gamma_r_tt = b(builder, BinOp::Mul, f.clone(), b(builder, BinOp::Mul, mass.clone(), inv_r2.clone()));
+        let gamma_r_rr = u(builder, UnOp::Neg, b(builder, BinOp::Div, fp, b(builder, BinOp::Mul, builder.const_f32(2.0), f.clone())));
+        let sin_theta = u(builder, UnOp::Sin, theta.clone());
+        let cos_theta = u(builder, UnOp::Cos, theta);
+        let sin2 = b(builder, BinOp::Mul, sin_theta.clone(), sin_theta.clone());
+        let fr = b(builder, BinOp::Mul, f, r);
+        let gamma_r_tt_theta = u(builder, UnOp::Neg, fr.clone());
+        let gamma_r_pp = u(builder, UnOp::Neg, b(builder, BinOp::Mul, fr, sin2));
+        let ur2 = b(builder, BinOp::Mul, ur.clone(), ur.clone());
+        let utheta2 = b(builder, BinOp::Mul, utheta.clone(), utheta.clone());
+        let uphi2 = b(builder, BinOp::Mul, uphi.clone(), uphi.clone());
+        let ut2 = b(builder, BinOp::Mul, ut.clone(), ut.clone());
+        let radial = b(builder, BinOp::Add,
+            b(builder, BinOp::Add, b(builder, BinOp::Mul, gamma_r_tt, ut2), b(builder, BinOp::Mul, gamma_r_rr, ur2)),
+            b(builder, BinOp::Add, b(builder, BinOp::Mul, gamma_r_tt_theta, utheta2), b(builder, BinOp::Mul, gamma_r_pp, uphi2.clone())));
+        let du_r = u(builder, UnOp::Neg, radial);
+        let gamma_theta_rtheta = inv_r;
+        let gamma_theta_pp = u(builder, UnOp::Neg, b(builder, BinOp::Mul, sin_theta.clone(), cos_theta));
+        let angular = b(builder, BinOp::Add,
+            b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), gamma_theta_rtheta), b(builder, BinOp::Mul, ur.clone(), utheta.clone())),
+            b(builder, BinOp::Mul, gamma_theta_pp, uphi2));
+        let du_theta = u(builder, UnOp::Neg, angular);
+        let phi = b(builder, BinOp::Add,
+            b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), builder.binary(BinOp::Div, builder.const_f32(1.0), values[1].clone())), b(builder, BinOp::Mul, ur.clone(), uphi.clone())),
+            b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), b(builder, BinOp::Div, u(builder, UnOp::Cos, values[2].clone()), u(builder, UnOp::Sin, values[2].clone()))), b(builder, BinOp::Mul, utheta.clone(), uphi.clone())));
+        [ut, ur, utheta, uphi, du_t, du_r, du_theta, u(builder, UnOp::Neg, phi)]
+    }
+    let mut builder = StructuredFunctionBuilder::new("schwarzschild_geodesic_rk4_integrate");
+    let gid = builder.global_id();
+    let base = b(&builder, BinOp::Mul, gid, builder.const_u32(9));
+    let state: [u32; 8] = std::array::from_fn(|offset| {
+        let index = b(&builder, BinOp::Add, base.clone(), builder.const_u32(offset as u32));
+        builder.let_value(ucf_program::Ty::f32(), builder.load_buffer(0, index))
+    });
+    let mass = builder.load_uniform(0);
+    let step = builder.load_uniform(1);
+    builder.bounded_for(max_steps, |builder, _| {
+        let values: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(state[index]));
+        let half_step = b(builder, BinOp::Mul, step.clone(), builder.const_f32(0.5));
+        let add_scaled = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], slope: &[Expr; 8], scale: Expr| {
+            std::array::from_fn(|index| b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, slope[index].clone(), scale.clone())))
+        };
+        let k1 = derivative(builder, &values, &mass);
+        let mid1 = add_scaled(builder, &values, &k1, half_step.clone());
+        let k2 = derivative(builder, &mid1, &mass);
+        let mid2 = add_scaled(builder, &values, &k2, half_step);
+        let k3 = derivative(builder, &mid2, &mass);
+        let end = add_scaled(builder, &values, &k3, step.clone());
+        let k4 = derivative(builder, &end, &mass);
+        for index in 0..8 {
+            let weighted = b(builder, BinOp::Add, b(builder, BinOp::Add, k1[index].clone(), b(builder, BinOp::Mul, k2[index].clone(), builder.const_f32(2.0))), b(builder, BinOp::Add, b(builder, BinOp::Mul, k3[index].clone(), builder.const_f32(2.0)), k4[index].clone()));
+            let next = b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, step.clone(), b(builder, BinOp::Div, weighted, builder.const_f32(6.0))));
+            builder.store_local(state[index], next);
+        }
+    });
+    let r = Expr::LoadLocal(state[1]);
+    let rs = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
+    let captured = b(&builder, BinOp::Le, r.clone(), b(&builder, BinOp::Mul, rs, builder.const_f32(1.0001)));
+    let escaped = b(&builder, BinOp::Ge, r, builder.load_uniform(2));
+    let status = builder.select(captured, builder.const_f32(1.0), builder.select(escaped, builder.const_f32(2.0), builder.const_f32(3.0)));
+    for offset in 0..8usize {
+        builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(offset as u32)), Expr::LoadLocal(state[offset]));
+    }
+    builder.store_buffer(0, b(&builder, BinOp::Add, base, builder.const_u32(8)), status);
+    ProgramBuilder::new().structured_entry(builder, ucf_program::Ty::f32(), Expr::LoadLocal(state[0])).expect("valid structured integration builder").finish().expect("valid structured integration program")
+}
+
 /// 构建针孔相机射线程序。
 pub fn generate_camera_ray() -> Program {
     let mut builder = FunctionBuilder::new("generate_camera_ray");
@@ -552,4 +652,36 @@ pub fn ray_batch_steps() -> Program {
 /// 构建通用有界累加程序。
 pub fn orbit_loop_accumulate() -> Program {
     f("orbit_loop_accumulate", vec![Stmt::Let { id: 0, ty: Ty::f64(), init: c(0.0) }, Stmt::For { iter: 1, limit: 64, body: vec![Stmt::StoreLocal { id: 0, value: bin(BinOp::Add, Expr::LoadLocal(0), Expr::LoadLocal(1)) }] }, Stmt::Return(Expr::LoadLocal(0))], vec![(0, Ty::f64())], Ty::f64())
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn structured_geodesic_integration_writes_state_and_status() {
+        let program = schwarzschild_geodesic_rk4_integrate(4);
+        let state = vec![
+            Value::F32(0.0),
+            Value::F32(10.0),
+            Value::F32(1.1),
+            Value::F32(0.3),
+            Value::F32(1.2),
+            Value::F32(-0.7),
+            Value::F32(0.02),
+            Value::F32(0.01),
+            Value::F32(0.0),
+        ];
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(1.0));
+        interpreter.with_uniform(1, Value::F32(0.01));
+        interpreter.with_uniform(2, Value::F32(100.0));
+        interpreter.with_buffer(0, state);
+        let result = interpreter.run_parallel(&program, 1).expect("structured integration CPU execution");
+        assert!(result[0].value.as_f64().expect("return value").is_finite());
+        let output = interpreter.buffer(0).expect("state output");
+        assert_eq!(output.len(), 9);
+        assert_eq!(output[8], Value::F32(3.0));
+        assert!((output[1].as_f64().expect("radius") - 9.972).abs() < 0.1);
+    }
 }
