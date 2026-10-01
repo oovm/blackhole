@@ -147,7 +147,14 @@ pub fn schwarzschild_capture_silhouette_ucf_cpu(bh: BlackHole, camera: Camera, w
 }
 
 pub fn schwarzschild_capture_silhouette_ucf_vulkan(bh: BlackHole, camera: Camera, width: u32, height: u32) -> TonResult<Framebuffer> {
-    let rays = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| (camera.position, pixel_ray(x, y, width, height, camera))).collect::<Vec<_>>();
+    let uv = (0..height).flat_map(|y| (0..width).map(move |x| {
+        let aspect = width as f64 / height as f64;
+        let u = ((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * aspect;
+        let v = 1.0 - (y as f64 + 0.5) / height as f64 * 2.0;
+        (u, v)
+    })).collect::<Vec<_>>();
+    let directions = camera_ray_ucf_vulkan_batch(camera, &uv)?;
+    let rays = directions.into_iter().map(|direction| (camera.position, direction)).collect::<Vec<_>>();
     let impacts = schwarzschild_impact_ucf_vulkan_batch(bh.mass, &rays)?;
     let captured = schwarzschild_capture_classify_ucf_vulkan_batch(bh, &impacts)?;
     let mut frame = Framebuffer::new(width, height); frame.encoding = ton_renderer::FramebufferEncoding::Display;
