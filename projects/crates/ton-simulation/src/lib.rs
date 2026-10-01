@@ -23,4 +23,5 @@ pub use ucf_physics::{
     schwarzschild_geodesic_integrate_ucf_cpu,
     schwarzschild_geodesic_integrate_ucf_vulkan,
     schwarzschild_geodesic_integrate_ucf_vulkan_batch,
+    schwarzschild_geodesic_integrate_ucf_cpu_rays, schwarzschild_geodesic_integrate_ucf_vulkan_rays,
 };
