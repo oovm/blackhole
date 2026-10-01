@@ -2,8 +2,8 @@
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ucf_program::{
-    disk_shade_novikov, geodesic_radial_infall_steps, orbit_step_once, post_bloom_extract,
-    program_hash, tone_map_aces, vector_math_normalize,
+    disk_shade_novikov, generate_camera_ray, geodesic_radial_infall_steps, orbit_step_once,
+    post_bloom_extract, program_hash, tone_map_aces, vector_math_normalize,
 };
 use ucf_types::ParamValue;
 
@@ -64,6 +64,12 @@ pub fn shade_kernel(disk: DiskModelKind) -> KernelBinding {
     }
 }
 
+/// 相机射线生成任务程序绑定。
+pub fn generate_rays_kernel() -> KernelBinding {
+    let p = generate_camera_ray();
+    KernelBinding::from_program_name_hash("generate_camera_ray", program_hash(&p))
+}
+
 /// 色调映射任务程序绑定（ACES 拟合）。
 pub fn tone_map_kernel() -> KernelBinding {
     let p = tone_map_aces();
@@ -90,13 +96,14 @@ pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) 
     }
 }
 
-/// 帧图构建后标注 trace / shade / 后处理的程序绑定。
+/// 帧图构建后标注 generate_rays / trace / shade / 后处理的程序绑定。
 pub fn annotate_frame_programs(
     graph: &mut Graph,
     integrator: IntegratorKind,
     disk: DiskModelKind,
     bloom: bool,
 ) {
+    attach_binding(graph, 11, &generate_rays_kernel());
     let trace = trace_kernel(integrator);
     attach_binding(graph, 12, &trace.binding);
     let shade = shade_kernel(disk);

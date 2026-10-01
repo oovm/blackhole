@@ -172,8 +172,8 @@ impl Scene {
         self.render_frame_with_histogram_opts(false)
     }
 
-    /// 渲染线性 HDR 帧；`use_ucf_shade` 为真时 Novikov 盘面走 UCF 解释器。
-    pub fn render_frame_with_histogram_opts(&self, use_ucf_shade: bool) -> RenderOutput {
+    /// 渲染线性 HDR 帧；`use_ucf_kernels` 为真时射线生成与 Novikov 盘面走 UCF 解释器。
+    pub fn render_frame_with_histogram_opts(&self, use_ucf_kernels: bool) -> RenderOutput {
         Renderer::new(RenderConfig {
             width: self.width,
             height: self.height,
@@ -186,7 +186,8 @@ impl Scene {
             mode: self.render_mode,
             exposure: DEFAULT_EXPOSURE,
             overlay_analytic_shadow: self.overlay_analytic_shadow,
-            use_ucf_shade,
+            use_ucf_shade: use_ucf_kernels,
+            use_ucf_rays: use_ucf_kernels,
         })
         .render_with_histogram()
     }

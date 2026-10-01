@@ -7,6 +7,7 @@ use ton_types::{BlackHole, Camera, DiskFrame, DiskModelKind, IntegratorKind, Rgb
 
 use crate::framebuffer::{Framebuffer, FramebufferEncoding};
 use crate::post::DEFAULT_EXPOSURE;
+use crate::rays_ucf::CameraRayUcf;
 use crate::shade_ucf::DiskShadeUcf;
 use crate::shadow_overlay::draw_analytic_shadow_ring;
 use crate::sky::sky_color;
@@ -41,6 +42,8 @@ pub struct RenderConfig {
     pub overlay_analytic_shadow: bool,
     /// Beauty 路径对 Novikov-Thorne 盘面走 UCF `disk_shade_novikov` 解释器。
     pub use_ucf_shade: bool,
+    /// Beauty 路径像素射线走 UCF `generate_camera_ray` 解释器。
+    pub use_ucf_rays: bool,
 }
 
 impl RenderConfig {
@@ -65,6 +68,7 @@ impl Default for RenderConfig {
             exposure: DEFAULT_EXPOSURE,
             overlay_analytic_shadow: false,
             use_ucf_shade: false,
+            use_ucf_rays: false,
         }
     }
 }
@@ -137,13 +141,11 @@ impl Renderer {
         let bh = self.config.black_hole;
         let trace_cfg = self.trace_config_with_disk();
         let exposure = self.config.exposure;
-        let mut ucf_shade = self
-            .config
-            .use_ucf_shade
-            .then(DiskShadeUcf::new);
+        let mut ucf_shade = self.config.use_ucf_shade.then(DiskShadeUcf::new);
+        let mut ucf_rays = self.config.use_ucf_rays.then(CameraRayUcf::new);
         for y in 0..h {
             for x in 0..w {
-                let dir = self.pixel_ray_dir(x, y, w, h, cam);
+                let dir = self.pixel_ray_dir(x, y, w, h, cam, ucf_rays.as_mut());
                 let outcome = trace_ray_radiance_outcome(
                     self.config.integrator,
                     bh,
@@ -185,9 +187,10 @@ impl Renderer {
             }
             DiagnosticColorMode::TerminationMap => self.trace_config_with_disk(),
         };
+        let mut ucf_rays = self.config.use_ucf_rays.then(CameraRayUcf::new);
         for y in 0..h {
             for x in 0..w {
-                let dir = self.pixel_ray_dir(x, y, w, h, cam);
+                let dir = self.pixel_ray_dir(x, y, w, h, cam, ucf_rays.as_mut());
                 let diag = trace_ray_diagnostic(
                     self.config.integrator,
                     bh,
@@ -215,11 +218,24 @@ impl Renderer {
         }
     }
 
-    fn pixel_ray_dir(&self, x: u32, y: u32, w: u32, h: u32, cam: Camera) -> Vec3 {
+    fn pixel_ray_dir(
+        &self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        cam: Camera,
+        ucf_rays: Option<&mut CameraRayUcf>,
+    ) -> Vec3 {
         let u = (x as f64 / w as f64) * 2.0 - 1.0;
         let v = 1.0 - (y as f64 / h as f64) * 2.0;
         let aspect = w as f64 / h as f64;
-        cam.ray_direction(u * aspect, v)
+        let u_scaled = u * aspect;
+        if let Some(rays) = ucf_rays {
+            rays.direction(cam, u_scaled, v)
+        } else {
+            cam.ray_direction(u_scaled, v)
+        }
     }
 
     fn emit_disk(&self, hit: DiskHit, ucf_shade: Option<&mut DiskShadeUcf>) -> DiskEmission {

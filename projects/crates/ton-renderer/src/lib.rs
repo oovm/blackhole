@@ -7,6 +7,7 @@ mod framebuffer;
 mod kernel;
 mod post;
 mod post_ucf;
+mod rays_ucf;
 mod renderer;
 mod shade_ucf;
 mod shadow_overlay;
@@ -24,6 +25,7 @@ pub use post_ucf::{
     DEFAULT_BLOOM_THRESHOLD,
 };
 pub use shade_ucf::{sample_disk_radiance_ucf, DiskShadeUcf};
+pub use rays_ucf::{camera_ray_direction_ucf, CameraRayUcf};
 pub use renderer::{
     default_camera, default_integrator, RenderConfig, RenderMode, RenderOutput, Renderer,
 };

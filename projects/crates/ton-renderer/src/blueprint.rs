@@ -170,6 +170,23 @@ mod tests {
     }
 
     #[test]
+    fn generate_rays_task_carries_program_hash() {
+        let g = build_frame_graph(
+            IntegratorKind::Geodesic3d,
+            DiskModelKind::NovikovThorneThin,
+        );
+        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 11).expect("rays");
+        assert!(matches!(
+            node.params.get("program_name"),
+            Some(ParamValue::Str(name)) if name == "generate_camera_ray"
+        ));
+        assert!(matches!(
+            node.params.get("program_hash"),
+            Some(ParamValue::I64(h)) if *h != 0
+        ));
+    }
+
+    #[test]
     fn tone_map_task_carries_program_hash() {
         let g = build_frame_graph(
             IntegratorKind::Geodesic3d,

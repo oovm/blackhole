@@ -98,6 +98,18 @@ pub fn execute_frame_graph_cpu(
         ));
     }
 
+    let rays_node = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|n| n.id.0 == 11)
+        .ok_or_else(|| TonError::Domain("missing generate_rays task 11".into()))?;
+    if !rays_node.params.contains_key("program_hash") {
+        return Err(TonError::Domain(
+            "generate_rays task missing program_hash (KernelBinding)".into(),
+        ));
+    }
+
     let shade_node = graph
         .tasks
         .nodes
