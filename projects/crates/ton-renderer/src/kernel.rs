@@ -2,8 +2,8 @@
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ucf_program::{
-    disk_shade_novikov, generate_camera_ray, geodesic_radial_infall_steps, orbit_step_once,
-    post_bloom_extract, program_hash, tone_map_aces, vector_math_normalize,
+    disk_shade_novikov, generate_camera_ray, geodesic_capture_classify, geodesic_radial_infall_steps,
+    orbit_step_once, post_bloom_extract, program_hash, tone_map_aces, vector_math_normalize,
 };
 use ucf_types::ParamValue;
 
@@ -40,6 +40,7 @@ pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
             ("orbit_step_once", program_hash(&p))
         }
         IntegratorKind::Geodesic3d | IntegratorKind::SemiClassicalRayMarch => {
+            // 完整 3D 测地线仍由宿主数值积分；图上绑定径向切片 + 捕获分类由 diagnostics 路径使用。
             let p = geodesic_radial_infall_steps();
             ("geodesic_radial_infall_steps", program_hash(&p))
         }
@@ -48,6 +49,12 @@ pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
         op: integrator.ucf_op_name().to_string(),
         binding: KernelBinding::from_program_name_hash(name, hash),
     }
+}
+
+/// 解析捕获分类程序绑定（史瓦西 `b < b_c`）。
+pub fn capture_classify_kernel() -> KernelBinding {
+    let p = geodesic_capture_classify();
+    KernelBinding::from_program_name_hash("geodesic_capture_classify", program_hash(&p))
 }
 
 /// 盘面着色任务程序绑定（Novikov-Thorne 薄盘走 `disk_shade_novikov`，其余仍用占位切片）。

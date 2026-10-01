@@ -176,14 +176,37 @@ mod tests {
             DiskModelKind::NovikovThorneThin,
         );
         let node = g.tasks.nodes.iter().find(|n| n.id.0 == 11).expect("rays");
+        let expected = crate::kernel::generate_rays_kernel();
         assert!(matches!(
             node.params.get("program_name"),
-            Some(ParamValue::Str(name)) if name == "generate_camera_ray"
+            Some(ParamValue::Str(name)) if name.as_str() == expected.program_name
         ));
         assert!(matches!(
             node.params.get("program_hash"),
-            Some(ParamValue::I64(h)) if *h != 0
+            Some(ParamValue::I64(h)) if *h == expected.program_hash as i64
         ));
+    }
+
+    #[test]
+    fn tone_map_and_shade_hashes_match_prelude_programs() {
+        use crate::kernel::{shade_kernel, tone_map_kernel};
+        let g = build_frame_graph(
+            IntegratorKind::Geodesic3d,
+            DiskModelKind::NovikovThorneThin,
+        );
+        let shade = shade_kernel(DiskModelKind::NovikovThorneThin);
+        let tone = tone_map_kernel();
+        let shade_node = g.tasks.nodes.iter().find(|n| n.id.0 == 13).expect("shade");
+        let tone_node = g.tasks.nodes.iter().find(|n| n.id.0 == 14).expect("tone");
+        assert!(matches!(
+            shade_node.params.get("program_hash"),
+            Some(ParamValue::I64(h)) if *h == shade.program_hash as i64
+        ));
+        assert!(matches!(
+            tone_node.params.get("program_hash"),
+            Some(ParamValue::I64(h)) if *h == tone.program_hash as i64
+        ));
+        let _ = crate::kernel::capture_classify_kernel();
     }
 
     #[test]

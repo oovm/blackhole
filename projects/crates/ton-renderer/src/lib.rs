@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod blueprint;
+mod capture_ucf;
 mod framebuffer;
 mod kernel;
 mod post;
@@ -13,6 +14,7 @@ mod shade_ucf;
 mod shadow_overlay;
 mod sky;
 
+pub use capture_ucf::{analytic_captured_ucf, CaptureClassifyUcf};
 pub use blueprint::{build_frame_graph, build_frame_graph_with_post, trace_kernel_for};
 pub use kernel::{attach_binding, KernelBinding, KernelInstance};
 pub use framebuffer::{Framebuffer, FramebufferEncoding};
