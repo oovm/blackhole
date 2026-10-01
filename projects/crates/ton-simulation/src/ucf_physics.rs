@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_geodesic_initial_state, schwarzschild_geodesic_
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -217,21 +217,35 @@ pub fn schwarzschild_geodesic_integrate_ucf_cpu(mass: f64, state: SphericalState
 /// 由一次 CPU UCF dispatch 并行推进多条相机射线。
 pub fn schwarzschild_geodesic_integrate_ucf_cpu_rays(mass: f64, rays: &[(Vec3, Vec3)], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
     if rays.is_empty() { return Ok(Vec::new()); }
-    let states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
-    let input = rays.iter().zip(states.iter()).flat_map(|((origin, direction), state)| {
-        let bound = schwarzschild_geodesic_impact_parameter(mass, *origin, *direction)
-            .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false);
-        [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0, bound as u8 as f64]
-            .into_iter().map(|value| Value::F32(value as f32))
-    }).collect::<Vec<_>>();
-    let report = CpuBackend::new().execute_program_with_buffers(&schwarzschild_geodesic_rk4_integrate(max_steps), states.len() as u32, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32)), (2, Value::F32(escape_radius as f32))], [(0, input)]).map_err(TonError::Domain)?;
-    let output = report.buffers.get(&0).ok_or_else(|| TonError::Domain("CPU integrated geodesic batch output is missing".into()))?;
-    if output.len() < states.len() * 10 { return Err(TonError::Domain("CPU integrated geodesic batch output is short".into())); }
-    Ok(states.iter().enumerate().map(|(index, _)| {
-        let base = index * 10;
-        let value = |offset: usize| output[base + offset].as_f64().map_err(|error| TonError::Domain(error.to_string()));
-        Ok((SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? }, value(8)? as u32))
-    }).collect::<TonResult<Vec<_>>>()?)
+    let bound_flags = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_impact_parameter(mass, *origin, *direction)
+        .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false)).collect::<Vec<_>>();
+    let mut states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
+    let chunk = schwarzschild_geodesic_rk4_chunk(16);
+    let mut statuses = vec![0u32; states.len()];
+    for _ in 0..max_steps.div_ceil(16) {
+        let input = states.iter().zip(bound_flags.iter()).flat_map(|(state, bound)| {
+            [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0, *bound as u8 as f64]
+                .into_iter().map(|value| Value::F32(value as f32))
+        }).collect::<Vec<_>>();
+        let report = CpuBackend::new().execute_program_with_buffers(&chunk, states.len() as u32, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32)), (2, Value::F32(escape_radius as f32))], [(0, input)]).map_err(TonError::Domain)?;
+        let output = report.buffers.get(&0).ok_or_else(|| TonError::Domain("CPU integrated geodesic chunk output is missing".into()))?;
+        if output.len() < states.len() * 10 { return Err(TonError::Domain("CPU integrated geodesic chunk output is short".into())); }
+        let mut next_states = Vec::with_capacity(states.len());
+        let mut next_statuses = Vec::with_capacity(states.len());
+        for index in 0..states.len() {
+            let base = index * 10;
+            let value = |offset: usize| output[base + offset].as_f64().map_err(|error| TonError::Domain(error.to_string()));
+            next_states.push(SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? });
+            next_statuses.push(value(8)? as u32);
+        }
+        states = next_states;
+        statuses = next_statuses;
+        if statuses.iter().all(|status| *status != 0) { break; }
+    }
+    for status in &mut statuses {
+        if *status == 0 { *status = 3; }
+    }
+    Ok(states.into_iter().zip(statuses).collect())
 }
 
 /// 由原生 Vulkan UCF backend 在单个 dispatch 中完成有界多步积分。
@@ -258,13 +272,13 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan(mass: f64, state: SphericalSt
 
 /// 由一次 Vulkan dispatch 并行推进多个实例，每个实例占九个 `f32`。
 pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass: f64, states: &[SphericalState], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
-    schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_flags(mass, states, &vec![false; states.len()], step, escape_radius, max_steps)
+    let program = schwarzschild_geodesic_rk4_integrate(max_steps);
+    schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_program(mass, states, &vec![false; states.len()], step, escape_radius, &program)
 }
 
-fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_flags(mass: f64, states: &[SphericalState], bound_flags: &[bool], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
+fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_program(mass: f64, states: &[SphericalState], bound_flags: &[bool], step: f64, escape_radius: f64, program: &ucf_program::Program) -> TonResult<Vec<(SphericalState, u32)>> {
     if states.is_empty() { return Ok(Vec::new()); }
     let count = u32::try_from(states.len()).map_err(|_| TonError::Domain("geodesic batch exceeds u32 capacity".into()))?;
-    let program = schwarzschild_geodesic_rk4_integrate(max_steps);
     let task = dispatch_task(33, &program, count, ResourceId(15), Some(ResourceId(16)), BTreeMap::from([
         ("uniform_0".into(), ParamValue::F64(mass)),
         ("uniform_1".into(), ParamValue::F64(step)),
@@ -293,7 +307,23 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_rays(mass: f64, rays: &[(Vec3
     let states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
     let bound_flags = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_impact_parameter(mass, *origin, *direction)
         .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false)).collect::<Vec<_>>();
-    schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_flags(mass, &states, &bound_flags, step, escape_radius, max_steps)
+    let chunk = schwarzschild_geodesic_rk4_chunk(16);
+    let mut states = states;
+    let mut statuses = vec![0u32; states.len()];
+    for _ in 0..max_steps.div_ceil(16) {
+        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_program(mass, &states, &bound_flags, step, escape_radius, &chunk)?;
+        states = results.iter().map(|(state, _)| *state).collect();
+        statuses = results.iter().map(|(_, status)| *status).collect();
+        if statuses.iter().all(|status| *status != 0) {
+            break;
+        }
+    }
+    for status in &mut statuses {
+        if *status == 0 {
+            *status = 3;
+        }
+    }
+    Ok(states.into_iter().zip(statuses).collect())
 }
 
 /// 生成 UCF Vulkan 测地线终止诊断帧。
@@ -407,6 +437,24 @@ mod tests {
         let output = schwarzschild_geodesic_integrate_ucf_cpu_rays(1.0, &rays, 0.01, 100.0, 4).unwrap();
         assert_eq!(output.len(), rays.len());
         assert!(output.iter().all(|(state, status)| state.r.is_finite() && *status == 3));
+    }
+
+    #[test]
+    fn vulkan_ray_chunks_match_cpu_chunks_when_available() {
+        let rays = vec![
+            (Vec3::new(0.0, 0.0, 20.0), Vec3::new(0.0, 0.0, -1.0)),
+            (Vec3::new(0.0, 0.0, 20.0), Vec3::new(0.2, 0.0, -1.0).normalize()),
+        ];
+        let cpu = schwarzschild_geodesic_integrate_ucf_cpu_rays(1.0, &rays, 0.01, 100.0, 32).unwrap();
+        let gpu = match schwarzschild_geodesic_integrate_ucf_vulkan_rays(1.0, &rays, 0.01, 100.0, 32) {
+            Ok(value) => value,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan chunked geodesic rays: {error}"),
+        };
+        for ((cpu_state, cpu_status), (gpu_state, gpu_status)) in cpu.into_iter().zip(gpu) {
+            assert!((cpu_state.r - gpu_state.r).abs() < 3.0e-3);
+            assert_eq!(cpu_status, gpu_status);
+        }
     }
 
     #[test]

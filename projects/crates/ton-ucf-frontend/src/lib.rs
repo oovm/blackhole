@@ -441,6 +441,16 @@ pub fn schwarzschild_geodesic_rk4_step() -> Program {
 /// uniform `0` 是质量，`1` 是步长，`2` 是逃逸半径。终止码为
 /// `1=captured`、`2=escaped`、`3=budget_exhausted`、`4=non_finite`。
 pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
+    schwarzschild_geodesic_rk4_integrate_mode(max_steps, true)
+}
+
+/// 构建一个有界积分 chunk。未达到物理终止条件时返回状态码 `0=running`，
+/// 由外部任务图决定是否提交下一个 chunk。
+pub fn schwarzschild_geodesic_rk4_chunk(max_steps: u32) -> Program {
+    schwarzschild_geodesic_rk4_integrate_mode(max_steps, false)
+}
+
+fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhaustion: bool) -> Program {
     fn b(builder: &StructuredFunctionBuilder, op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
         builder.binary(op, lhs, rhs)
     }
@@ -565,11 +575,20 @@ pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
         b(&builder, BinOp::Ge, r, builder.load_uniform(2)),
         Expr::ConstBool(false),
     );
-    let final_status = builder.select(
+    let terminal_status = builder.select(
         b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(4.0)),
         builder.const_f32(4.0),
-        builder.select(captured, builder.const_f32(1.0), builder.select(escaped, builder.const_f32(2.0), builder.const_f32(3.0))),
+        builder.select(captured, builder.const_f32(1.0), builder.select(escaped, builder.const_f32(2.0), builder.const_f32(0.0))),
     );
+    let final_status = if report_budget_exhaustion {
+        builder.select(
+            b(&builder, BinOp::Eq, terminal_status.clone(), builder.const_f32(0.0)),
+            builder.const_f32(3.0),
+            terminal_status,
+        )
+    } else {
+        terminal_status
+    };
     for offset in 0..8usize {
         builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(offset as u32)), Expr::LoadLocal(state[offset]));
     }
@@ -744,5 +763,22 @@ mod integration_tests {
         interpreter.with_buffer(0, state);
         interpreter.run_parallel(&program, 1).expect("non-finite state execution");
         assert_eq!(interpreter.buffer(0).expect("state output")[8], Value::F32(4.0));
+    }
+
+    #[test]
+    fn geodesic_chunk_keeps_running_state_distinct_from_budget_failure() {
+        let program = schwarzschild_geodesic_rk4_chunk(1);
+        let state = vec![
+            Value::F32(0.0), Value::F32(10.0), Value::F32(1.1), Value::F32(0.3),
+            Value::F32(1.2), Value::F32(-0.7), Value::F32(0.02), Value::F32(0.01),
+            Value::F32(0.0), Value::F32(0.0),
+        ];
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(1.0));
+        interpreter.with_uniform(1, Value::F32(0.01));
+        interpreter.with_uniform(2, Value::F32(100.0));
+        interpreter.with_buffer(0, state);
+        interpreter.run_parallel(&program, 1).expect("chunk execution");
+        assert_eq!(interpreter.buffer(0).expect("state output")[8], Value::F32(0.0));
     }
 }
