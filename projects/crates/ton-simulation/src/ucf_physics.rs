@@ -214,6 +214,28 @@ pub fn schwarzschild_geodesic_integrate_ucf_cpu(mass: f64, state: SphericalState
     Ok((SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? }, status))
 }
 
+/// 由原生 Vulkan UCF backend 在单个 dispatch 中完成有界多步积分。
+pub fn schwarzschild_geodesic_integrate_ucf_vulkan(mass: f64, state: SphericalState, step: f64, escape_radius: f64, max_steps: u32) -> TonResult<(SphericalState, u32)> {
+    let program = schwarzschild_geodesic_rk4_integrate(max_steps);
+    let task = dispatch_task(32, &program, 1, ResourceId(13), Some(ResourceId(14)), BTreeMap::from([
+        ("uniform_0".into(), ParamValue::F64(mass)),
+        ("uniform_1".into(), ParamValue::F64(step)),
+        ("uniform_2".into(), ParamValue::F64(escape_radius)),
+    ]))?;
+    let graph = Graph { resources: ResourceGraph { nodes: vec![
+        ResourceNode { id: ResourceId(13), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(36) },
+        ResourceNode { id: ResourceId(14), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(36) },
+    ] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan integrated geodesic graph: {e}")))?;
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
+    backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan integrated geodesic graph: {e}")))?;
+    backend.write_f32(ResourceId(14), &[state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0].into_iter().map(|value| value as f32).collect::<Vec<_>>()).map_err(|e| TonError::Domain(format!("upload integrated geodesic state: {e}")))?;
+    backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan integrated geodesic graph: {e}")))?;
+    let output = backend.read_f32(ResourceId(14)).map_err(|e| TonError::Domain(format!("read integrated geodesic state: {e}")))?;
+    if output.len() < 9 { return Err(TonError::Domain("Vulkan integrated geodesic state output is short".into())); }
+    Ok((SphericalState { t: output[0] as f64, r: output[1] as f64, theta: output[2] as f64, phi: output[3] as f64, ut: output[4] as f64, ur: output[5] as f64, utheta: output[6] as f64, uphi: output[7] as f64 }, output[8] as u32))
+}
+
 /// 由原生 Vulkan UCF backend 推进一个完整球坐标 Schwarzschild RK4 步。
 pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalState, step: f64) -> TonResult<SphericalState> {
     let program = schwarzschild_geodesic_rk4_step();
@@ -244,6 +266,33 @@ mod tests {
         let actual = [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi];
         let expected = [expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi];
         for (actual, expected) in actual.into_iter().zip(expected) { assert!((actual - expected).abs() < 3.0e-4, "actual={actual}, expected={expected}"); }
+    }
+
+    #[test]
+    fn cpu_integrated_program_matches_repeated_reference_steps() {
+        let state = SphericalState { t: 0.0, r: 10.0, theta: 1.1, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.02, uphi: 0.01 };
+        let (actual, status) = schwarzschild_geodesic_integrate_ucf_cpu(1.0, state, 0.01, 100.0, 4).unwrap();
+        let mut expected = state;
+        for _ in 0..4 { expected = reference_geodesic_rk4_step(1.0, expected, 0.01); }
+        let actual = [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi];
+        let expected = [expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi];
+        for (actual, expected) in actual.into_iter().zip(expected) { assert!((actual - expected).abs() < 2.0e-3, "actual={actual}, expected={expected}"); }
+        assert_eq!(status, 3);
+    }
+
+    #[test]
+    fn vulkan_integrated_program_matches_cpu_when_available() {
+        let state = SphericalState { t: 0.0, r: 10.0, theta: 1.1, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.02, uphi: 0.01 };
+        let cpu = schwarzschild_geodesic_integrate_ucf_cpu(1.0, state, 0.01, 100.0, 4).unwrap();
+        let gpu = match schwarzschild_geodesic_integrate_ucf_vulkan(1.0, state, 0.01, 100.0, 4) {
+            Ok(value) => value,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan integrated geodesic program: {error}"),
+        };
+        let a = [cpu.0.t, cpu.0.r, cpu.0.theta, cpu.0.phi, cpu.0.ut, cpu.0.ur, cpu.0.utheta, cpu.0.uphi];
+        let b = [gpu.0.t, gpu.0.r, gpu.0.theta, gpu.0.phi, gpu.0.ut, gpu.0.ur, gpu.0.utheta, gpu.0.uphi];
+        for (actual, expected) in a.into_iter().zip(b) { assert!((actual - expected).abs() < 2.0e-3, "actual={actual}, expected={expected}"); }
+        assert_eq!(gpu.1, cpu.1);
     }
 
     #[test]

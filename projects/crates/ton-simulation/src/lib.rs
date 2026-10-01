@@ -21,4 +21,5 @@ pub use ucf_physics::{
     schwarzschild_radial_rk4_step_ucf_cpu, schwarzschild_radial_rk4_step_ucf_vulkan,
     schwarzschild_radial_rk4_steps_ucf_cpu, schwarzschild_radial_rk4_steps_ucf_vulkan,
     schwarzschild_geodesic_integrate_ucf_cpu,
+    schwarzschild_geodesic_integrate_ucf_vulkan,
 };
