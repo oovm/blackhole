@@ -307,6 +307,131 @@ pub fn schwarzschild_radial_rk4_step() -> Program {
     ProgramBuilder::new().entry(builder).expect("TON RK4 frontend must build a valid program").finish().expect("TON RK4 program must validate")
 }
 
+/// 构建完整球坐标 Schwarzschild 零测地线的 RK4 单步程序。
+///
+/// 状态 buffer 的每个实例占八个 `f32`，布局为
+/// `[t, r, theta, phi, ut, ur, utheta, uphi]`。uniform `0` 是质量，
+/// uniform `1` 是仿射步长。该程序只使用 UCF 通用算术和三角原语。
+pub fn schwarzschild_geodesic_rk4_step() -> Program {
+    fn binary(builder: &mut FunctionBuilder, op: BinOp, lhs: ucf_program::ValueId, rhs: ucf_program::ValueId) -> ucf_program::ValueId {
+        builder.emit_binary(op, lhs, rhs).expect("valid f32 arithmetic")
+    }
+    fn unary(builder: &mut FunctionBuilder, op: UnOp, arg: ucf_program::ValueId) -> ucf_program::ValueId {
+        builder.emit_unary(op, arg, Ty::f32()).expect("valid f32 arithmetic")
+    }
+
+    let mut builder = FunctionBuilder::new("schwarzschild_geodesic_rk4_step");
+    let gid = builder.emit_global_id().expect("entry block is open");
+    let stride = builder.emit_const_u32(8).expect("entry block is open");
+    let base = builder.emit_mul_u32(gid, stride).expect("u32 indices");
+    let state = (0..8).map(|offset| {
+        let offset = builder.emit_const_u32(offset).expect("entry block is open");
+        let index = builder.emit_add_u32(base, offset).expect("u32 indices");
+        builder.emit_load_buffer(0, index, Ty::f32()).expect("state buffer is f32")
+    }).collect::<Vec<_>>();
+    let mass = builder.emit_load_uniform(0, Ty::f32()).expect("mass uniform");
+    let step = builder.emit_load_uniform(1, Ty::f32()).expect("step uniform");
+
+    let deriv = |builder: &mut FunctionBuilder, values: &[ucf_program::ValueId]| {
+        let r = values[1];
+        let theta = values[2];
+        let ut = values[4];
+        let ur = values[5];
+        let utheta = values[6];
+        let uphi = values[7];
+        let one = builder.emit_const_f32(1.0).expect("f32 constant");
+        let two = builder.emit_const_f32(2.0).expect("f32 constant");
+        let r2 = binary(builder, BinOp::Mul, r, r);
+        let inv_r = binary(builder, BinOp::Div, one, r);
+        let inv_r2 = binary(builder, BinOp::Div, one, r2);
+        let two_mass = binary(builder, BinOp::Mul, two, mass);
+        let compactness = binary(builder, BinOp::Mul, two_mass, inv_r);
+        let f = binary(builder, BinOp::Sub, one, compactness);
+        let fp = binary(builder, BinOp::Mul, two_mass, inv_r2);
+        let two_f = binary(builder, BinOp::Mul, two, f);
+        let gamma_t_tr = binary(builder, BinOp::Div, fp, two_f);
+        let ut_ur = binary(builder, BinOp::Mul, ut, ur);
+        let gamma_ut_ur = binary(builder, BinOp::Mul, gamma_t_tr, ut_ur);
+        let two_gamma_ut_ur = binary(builder, BinOp::Mul, two, gamma_ut_ur);
+        let du_t = unary(builder, UnOp::Neg, two_gamma_ut_ur);
+        let m_inv_r2 = binary(builder, BinOp::Mul, mass, inv_r2);
+        let gamma_r_tt = binary(builder, BinOp::Mul, f, m_inv_r2);
+        let fp_two_f = binary(builder, BinOp::Div, fp, two_f);
+        let gamma_r_rr = unary(builder, UnOp::Neg, fp_two_f);
+        let sin_theta = unary(builder, UnOp::Sin, theta);
+        let cos_theta = unary(builder, UnOp::Cos, theta);
+        let sin2 = binary(builder, BinOp::Mul, sin_theta, sin_theta);
+        let f_r = binary(builder, BinOp::Mul, f, r);
+        let gamma_r_tt_theta = unary(builder, UnOp::Neg, f_r);
+        let f_r_sin2 = binary(builder, BinOp::Mul, f_r, sin2);
+        let gamma_r_pp = unary(builder, UnOp::Neg, f_r_sin2);
+        let ur2 = binary(builder, BinOp::Mul, ur, ur);
+        let utheta2 = binary(builder, BinOp::Mul, utheta, utheta);
+        let uphi2 = binary(builder, BinOp::Mul, uphi, uphi);
+        let ut2 = binary(builder, BinOp::Mul, ut, ut);
+        let term_tt = binary(builder, BinOp::Mul, gamma_r_tt, ut2);
+        let term_rr = binary(builder, BinOp::Mul, gamma_r_rr, ur2);
+        let term_theta = binary(builder, BinOp::Mul, gamma_r_tt_theta, utheta2);
+        let term_phi = binary(builder, BinOp::Mul, gamma_r_pp, uphi2);
+        let radial_a = binary(builder, BinOp::Add, term_tt, term_rr);
+        let radial_b = binary(builder, BinOp::Add, term_theta, term_phi);
+        let radial_terms = binary(builder, BinOp::Add, radial_a, radial_b);
+        let du_r = unary(builder, UnOp::Neg, radial_terms);
+        let gamma_theta_rtheta = inv_r;
+        let sin_cos = binary(builder, BinOp::Mul, sin_theta, cos_theta);
+        let gamma_theta_pp = unary(builder, UnOp::Neg, sin_cos);
+        let two_gamma_theta = binary(builder, BinOp::Mul, two, gamma_theta_rtheta);
+        let ur_utheta = binary(builder, BinOp::Mul, ur, utheta);
+        let angular_a = binary(builder, BinOp::Mul, two_gamma_theta, ur_utheta);
+        let angular_b = binary(builder, BinOp::Mul, gamma_theta_pp, uphi2);
+        let angular_terms = binary(builder, BinOp::Add, angular_a, angular_b);
+        let du_theta = unary(builder, UnOp::Neg, angular_terms);
+        let cot = binary(builder, BinOp::Div, cos_theta, sin_theta);
+        let two_inv_r = binary(builder, BinOp::Mul, two, inv_r);
+        let ur_uphi = binary(builder, BinOp::Mul, ur, uphi);
+        let phi_a = binary(builder, BinOp::Mul, two_inv_r, ur_uphi);
+        let two_cot = binary(builder, BinOp::Mul, two, cot);
+        let utheta_uphi = binary(builder, BinOp::Mul, utheta, uphi);
+        let phi_b = binary(builder, BinOp::Mul, two_cot, utheta_uphi);
+        let phi_terms = binary(builder, BinOp::Add, phi_a, phi_b);
+        let du_phi = unary(builder, UnOp::Neg, phi_terms);
+        [ut, ur, utheta, uphi, du_t, du_r, du_theta, du_phi]
+    };
+    let state: [ucf_program::ValueId; 8] = state.try_into().expect("eight state values");
+    let half = builder.emit_const_f32(0.5).expect("f32 constant");
+    let half_step = binary(&mut builder, BinOp::Mul, step, half);
+    let add_scaled = |builder: &mut FunctionBuilder, values: &[ucf_program::ValueId; 8], slope: &[ucf_program::ValueId; 8], scale| {
+        std::array::from_fn(|index| {
+            let delta = binary(builder, BinOp::Mul, slope[index], scale);
+            binary(builder, BinOp::Add, values[index], delta)
+        })
+    };
+    let k1: [ucf_program::ValueId; 8] = deriv(&mut builder, &state);
+    let mid1: [ucf_program::ValueId; 8] = add_scaled(&mut builder, &state, &k1, half_step);
+    let k2: [ucf_program::ValueId; 8] = deriv(&mut builder, &mid1);
+    let mid2: [ucf_program::ValueId; 8] = add_scaled(&mut builder, &state, &k2, half_step);
+    let k3: [ucf_program::ValueId; 8] = deriv(&mut builder, &mid2);
+    let end: [ucf_program::ValueId; 8] = add_scaled(&mut builder, &state, &k3, step);
+    let k4: [ucf_program::ValueId; 8] = deriv(&mut builder, &end);
+    let two = builder.emit_const_f32(2.0).expect("f32 constant");
+    let six = builder.emit_const_f32(6.0).expect("f32 constant");
+    for index in 0..8 {
+        let two_k2 = binary(&mut builder, BinOp::Mul, k2[index], two);
+        let two_k3 = binary(&mut builder, BinOp::Mul, k3[index], two);
+        let sum = binary(&mut builder, BinOp::Add, k1[index], two_k2);
+        let sum = binary(&mut builder, BinOp::Add, sum, two_k3);
+        let sum = binary(&mut builder, BinOp::Add, sum, k4[index]);
+        let average = binary(&mut builder, BinOp::Div, sum, six);
+        let delta = binary(&mut builder, BinOp::Mul, step, average);
+        let next = binary(&mut builder, BinOp::Add, state[index], delta);
+        let offset = builder.emit_const_u32(index as u32).expect("state index");
+        let index = builder.emit_add_u32(base, offset).expect("state index");
+        builder.emit_store_buffer(0, index, next).expect("state buffer is writable");
+    }
+    builder.return_value(state[0]).expect("open block");
+    ProgramBuilder::new().entry(builder).expect("valid geodesic builder").finish().expect("valid geodesic program")
+}
+
 /// 构建针孔相机射线程序。
 pub fn generate_camera_ray() -> Program {
     let mut builder = FunctionBuilder::new("generate_camera_ray");

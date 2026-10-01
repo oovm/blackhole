@@ -2,11 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use ton_geodesic::{schwarzschild_radial_rk4_step as reference_radial_rk4_step, RadialState};
+use ton_geodesic::{schwarzschild_geodesic_rk4_step as reference_geodesic_rk4_step, schwarzschild_radial_rk4_step as reference_radial_rk4_step, RadialState, SphericalState};
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_step, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -189,12 +189,66 @@ pub fn schwarzschild_radial_rk4_step_ucf_vulkan(mass: f64, state: RadialState, s
 
 pub fn schwarzschild_radial_rk4_steps_ucf_vulkan(mass: f64, mut state: RadialState, step: f64, count: u32) -> TonResult<RadialState> { for _ in 0..count { state = schwarzschild_radial_rk4_step_ucf_vulkan(mass, state, step)?; } Ok(state) }
 
+/// 由 UCF CPU Interpreter 推进一个完整球坐标 Schwarzschild RK4 步。
+pub fn schwarzschild_geodesic_rk4_step_ucf_cpu(mass: f64, state: SphericalState, step: f64) -> TonResult<SphericalState> {
+    let values = [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi].into_iter().map(|value| Value::F32(value as f32)).collect::<Vec<_>>();
+    let report = CpuBackend::new().execute_program_with_buffers(&schwarzschild_geodesic_rk4_step(), 1, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32))], [(0, values)]).map_err(TonError::Domain)?;
+    let output = report.buffers.get(&0).ok_or_else(|| TonError::Domain("UCF geodesic state buffer missing".into()))?;
+    if output.len() < 8 { return Err(TonError::Domain("UCF geodesic state output is short".into())); }
+    let value = |index: usize| output[index].as_f64().map_err(|error| TonError::Domain(error.to_string()));
+    Ok(SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? })
+}
+
+/// 由原生 Vulkan UCF backend 推进一个完整球坐标 Schwarzschild RK4 步。
+pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalState, step: f64) -> TonResult<SphericalState> {
+    let program = schwarzschild_geodesic_rk4_step();
+    let task = dispatch_task(31, &program, 1, ResourceId(12), Some(ResourceId(10)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(mass)), ("uniform_1".into(), ParamValue::F64(step))]))?;
+    let graph = Graph { resources: ResourceGraph { nodes: vec![ResourceNode { id: ResourceId(12), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(4) }, ResourceNode { id: ResourceId(10), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(32) }] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan geodesic graph: {e}")))?;
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
+    backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan geodesic graph: {e}")))?;
+    backend.write_f32(ResourceId(10), &[state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi].into_iter().map(|value| value as f32).collect::<Vec<_>>()).map_err(|e| TonError::Domain(format!("upload geodesic state: {e}")))?;
+    backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan geodesic graph: {e}")))?;
+    let output = backend.read_f32(ResourceId(10)).map_err(|e| TonError::Domain(format!("read geodesic state: {e}")))?;
+    if output.len() < 8 { return Err(TonError::Domain("Vulkan geodesic state output is short".into())); }
+    Ok(SphericalState { t: output[0] as f64, r: output[1] as f64, theta: output[2] as f64, phi: output[3] as f64, ut: output[4] as f64, ur: output[5] as f64, utheta: output[6] as f64, uphi: output[7] as f64 })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ton_metric::schwarzschild_geodesic_impact_parameter;
     #[test]
     fn reference_radial_step_is_available() { let state = RadialState { t: 0.0, r: 10.0, ut: 1.0, ur: -0.8 }; assert!((schwarzschild_radial_rk4_step_ucf_cpu(1.0, state, 0.01).unwrap().r - reference_radial_rk4_step(1.0, state, 0.01).r).abs() < 2e-6); }
+
+    #[test]
+    fn cpu_geodesic_program_matches_reference() {
+        let state = SphericalState { t: 0.0, r: 10.0, theta: 1.1, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.02, uphi: 0.01 };
+        let actual = schwarzschild_geodesic_rk4_step_ucf_cpu(1.0, state, 0.01).unwrap();
+        let expected = reference_geodesic_rk4_step(1.0, state, 0.01);
+        let actual = [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi];
+        let expected = [expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi];
+        for (actual, expected) in actual.into_iter().zip(expected) { assert!((actual - expected).abs() < 3.0e-4, "actual={actual}, expected={expected}"); }
+    }
+
+    #[test]
+    fn vulkan_geodesic_program_matches_cpu_and_reference_when_available() {
+        let state = SphericalState { t: 0.0, r: 10.0, theta: 1.1, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.02, uphi: 0.01 };
+        let cpu = schwarzschild_geodesic_rk4_step_ucf_cpu(1.0, state, 0.01).unwrap();
+        let gpu = match schwarzschild_geodesic_rk4_step_ucf_vulkan(1.0, state, 0.01) {
+            Ok(value) => value,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan geodesic program: {error}"),
+        };
+        let reference = reference_geodesic_rk4_step(1.0, state, 0.01);
+        let cpu = [cpu.t, cpu.r, cpu.theta, cpu.phi, cpu.ut, cpu.ur, cpu.utheta, cpu.uphi];
+        let gpu = [gpu.t, gpu.r, gpu.theta, gpu.phi, gpu.ut, gpu.ur, gpu.utheta, gpu.uphi];
+        let reference = [reference.t, reference.r, reference.theta, reference.phi, reference.ut, reference.ur, reference.utheta, reference.uphi];
+        for ((cpu, gpu), reference) in cpu.into_iter().zip(gpu).zip(reference) {
+            assert!((gpu - cpu).abs() < 3.0e-4, "cpu={cpu}, gpu={gpu}");
+            assert!((gpu - reference).abs() < 3.0e-4, "gpu={gpu}, reference={reference}");
+        }
+    }
     #[test]
     fn cpu_silhouette_matches_analytic() { let bh = BlackHole::schwarzschild(1.0); let camera = Camera::cinematic(bh); let frame = schwarzschild_capture_silhouette_ucf_cpu(bh, camera, 8, 5).unwrap(); for y in 0..5 { for x in 0..8 { let expected = schwarzschild_geodesic_analytic_captured(bh, camera.position, pixel_ray(x, y, 8, 5, camera)); assert_eq!(frame.pixels[y as usize * 8 + x as usize] == Rgb::BLACK, expected); } } }
 

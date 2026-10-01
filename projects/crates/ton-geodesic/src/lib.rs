@@ -19,6 +19,7 @@ pub use diagnostic_dispatch::trace_ray_diagnostic;
 pub use geodesic3d::{
     adaptive_geodesic_step_size, trace_geodesic_3d, trace_geodesic_3d_diagnostic,
     trace_geodesic_3d_radiance, trace_geodesic_3d_radiance_outcome,
+    schwarzschild_geodesic_rk4_step, schwarzschild_radial_rk4_step, RadialState, SphericalState,
 };
 pub use radiance::RadianceTraceOutcome;
 pub use radiance_dispatch::trace_ray_radiance_outcome;

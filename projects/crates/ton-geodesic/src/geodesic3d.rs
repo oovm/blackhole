@@ -20,6 +20,80 @@ struct GeodesicState {
     u: [f64; 4],
 }
 
+/// Schwarzschild 球坐标零测地线的八标量状态。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SphericalState {
+    /// 坐标时间。
+    pub t: f64,
+    /// Schwarzschild 半径。
+    pub r: f64,
+    /// 极角。
+    pub theta: f64,
+    /// 方位角。
+    pub phi: f64,
+    /// 时间分量。
+    pub ut: f64,
+    /// 径向分量。
+    pub ur: f64,
+    /// 极角分量。
+    pub utheta: f64,
+    /// 方位角分量。
+    pub uphi: f64,
+}
+
+/// 使用独立 Rust 参考实现推进一个完整球坐标 RK4 步。
+pub fn schwarzschild_geodesic_rk4_step(mass: f64, state: SphericalState, dlambda: f64) -> SphericalState {
+    let state = GeodesicState {
+        t: state.t,
+        r: state.r,
+        theta: state.theta,
+        phi: state.phi,
+        u: [state.ut, state.ur, state.utheta, state.uphi],
+    };
+    let state = rk4_geodesic_step(mass, state, dlambda);
+    SphericalState {
+        t: state.t,
+        r: state.r,
+        theta: state.theta,
+        phi: state.phi,
+        ut: state.u[0],
+        ur: state.u[1],
+        utheta: state.u[2],
+        uphi: state.u[3],
+    }
+}
+
+/// 径向 Schwarzschild 零测地线的四标量状态。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadialState {
+    /// 坐标时间。
+    pub t: f64,
+    /// Schwarzschild 半径。
+    pub r: f64,
+    /// `u^t` 分量。
+    pub ut: f64,
+    /// `u^r` 分量。
+    pub ur: f64,
+}
+
+/// 使用 TON 的独立 Rust 参考实现推进一个径向 RK4 步。
+pub fn schwarzschild_radial_rk4_step(mass: f64, state: RadialState, dlambda: f64) -> RadialState {
+    let to_internal = |state: RadialState| GeodesicState {
+        t: state.t,
+        r: state.r,
+        theta: std::f64::consts::FRAC_PI_2,
+        phi: 0.0,
+        u: [state.ut, state.ur, 0.0, 0.0],
+    };
+    let from_internal = |state: GeodesicState| RadialState {
+        t: state.t,
+        r: state.r,
+        ut: state.u[0],
+        ur: state.u[1],
+    };
+    from_internal(rk4_geodesic_step(mass, to_internal(state), dlambda))
+}
+
 impl GeodesicState {
     fn cartesian(&self) -> Vec3 {
         SphericalCoords {
