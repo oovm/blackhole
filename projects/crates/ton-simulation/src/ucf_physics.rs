@@ -139,6 +139,116 @@ fn pixel_ray(x: u32, y: u32, w: u32, h: u32, camera: Camera) -> Vec3 {
     camera.ray_direction(u, v)
 }
 
+/// Schwarzschild 光线分类的 UCF 执行报告。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SchwarzschildClassificationReport {
+    /// 参与分类的像素数量。
+    pub total: u32,
+    /// 解析参考判定为捕获的像素数量。
+    pub analytic_captured: u32,
+    /// UCF 程序判定为捕获的像素数量。
+    pub captured: u32,
+    /// UCF 程序判定为逃逸的像素数量。
+    pub escaped: u32,
+    /// UCF 程序耗尽步数预算的像素数量。
+    pub budget_exhausted: u32,
+    /// UCF 程序检测到非有限状态的像素数量。
+    pub non_finite: u32,
+    /// UCF 程序和解析参考分类一致的像素数量。
+    pub agreement: u32,
+}
+
+fn classification_report(
+    expected: &[bool],
+    results: &[(SphericalState, u32)],
+) -> SchwarzschildClassificationReport {
+    let mut report = SchwarzschildClassificationReport {
+        total: results.len() as u32,
+        ..SchwarzschildClassificationReport::default()
+    };
+    for (expected_captured, (_, status)) in expected.iter().zip(results) {
+        if *expected_captured {
+            report.analytic_captured += 1;
+        }
+        match status {
+            1 => report.captured += 1,
+            2 => report.escaped += 1,
+            3 => report.budget_exhausted += 1,
+            4 => report.non_finite += 1,
+            _ => {}
+        }
+        let actual_captured = *status == 1;
+        if actual_captured == *expected_captured {
+            report.agreement += 1;
+        }
+    }
+    report
+}
+
+fn classification_rays(
+    bh: BlackHole,
+    camera: Camera,
+    width: u32,
+    height: u32,
+) -> (Vec<(Vec3, Vec3)>, Vec<bool>) {
+    let mut rays = Vec::with_capacity((width * height) as usize);
+    let mut expected = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let direction = pixel_ray(x, y, width, height, camera);
+            expected.push(schwarzschild_geodesic_analytic_captured(
+                bh,
+                camera.position,
+                direction,
+            ));
+            rays.push((camera.position, direction));
+        }
+    }
+    (rays, expected)
+}
+
+/// 对小图执行 UCF CPU 测地线，并返回解析参考对照报告。
+pub fn schwarzschild_classification_ucf_cpu(
+    bh: BlackHole,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    step: f64,
+    escape_radius: f64,
+    max_steps: u32,
+) -> TonResult<SchwarzschildClassificationReport> {
+    let (rays, expected) = classification_rays(bh, camera, width, height);
+    let results = schwarzschild_geodesic_integrate_ucf_cpu_rays(
+        bh.mass,
+        &rays,
+        step,
+        escape_radius,
+        max_steps,
+    )?;
+    Ok(classification_report(&expected, &results))
+}
+
+/// 对小图执行 UCF Vulkan 测地线，并返回解析参考对照报告。
+pub fn schwarzschild_classification_ucf_vulkan(
+    bh: BlackHole,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    step: f64,
+    escape_radius: f64,
+    max_steps: u32,
+) -> TonResult<SchwarzschildClassificationReport> {
+    let (rays, expected) = classification_rays(bh, camera, width, height);
+    let results = schwarzschild_geodesic_integrate_ucf_vulkan_rays(
+        bh.mass,
+        &rays,
+        step,
+        escape_radius,
+        max_steps,
+    )?;
+    Ok(classification_report(&expected, &results))
+}
+
 pub fn schwarzschild_capture_silhouette_ucf_cpu(bh: BlackHole, camera: Camera, width: u32, height: u32) -> TonResult<Framebuffer> {
     let mut frame = Framebuffer::new(width, height);
     frame.encoding = ton_renderer::FramebufferEncoding::Display;
@@ -221,13 +331,14 @@ pub fn schwarzschild_geodesic_integrate_ucf_cpu_rays(mass: f64, rays: &[(Vec3, V
         .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false)).collect::<Vec<_>>();
     let mut states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
     let chunk = schwarzschild_geodesic_rk4_chunk(16);
+    let backend = CpuBackend::new();
     let mut statuses = vec![0u32; states.len()];
     for _ in 0..max_steps.div_ceil(16) {
         let input = states.iter().zip(bound_flags.iter()).flat_map(|(state, bound)| {
             [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0, *bound as u8 as f64]
                 .into_iter().map(|value| Value::F32(value as f32))
         }).collect::<Vec<_>>();
-        let report = CpuBackend::new().execute_program_with_buffers(&chunk, states.len() as u32, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32)), (2, Value::F32(escape_radius as f32))], [(0, input)]).map_err(TonError::Domain)?;
+        let report = backend.execute_program_with_buffers(&chunk, states.len() as u32, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32)), (2, Value::F32(escape_radius as f32))], [(0, input)]).map_err(TonError::Domain)?;
         let output = report.buffers.get(&0).ok_or_else(|| TonError::Domain("CPU integrated geodesic chunk output is missing".into()))?;
         if output.len() < states.len() * 10 { return Err(TonError::Domain("CPU integrated geodesic chunk output is short".into())); }
         let mut next_states = Vec::with_capacity(states.len());
@@ -491,6 +602,47 @@ mod tests {
     }
     #[test]
     fn cpu_silhouette_matches_analytic() { let bh = BlackHole::schwarzschild(1.0); let camera = Camera::cinematic(bh); let frame = schwarzschild_capture_silhouette_ucf_cpu(bh, camera, 8, 5).unwrap(); for y in 0..5 { for x in 0..8 { let expected = schwarzschild_geodesic_analytic_captured(bh, camera.position, pixel_ray(x, y, 8, 5, camera)); assert_eq!(frame.pixels[y as usize * 8 + x as usize] == Rgb::BLACK, expected); } } }
+
+    #[test]
+    fn cpu_classification_report_exposes_terminal_histogram() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let report = schwarzschild_classification_ucf_cpu(
+            bh,
+            Camera::cinematic(bh),
+            2,
+            2,
+            0.04,
+            100.0,
+            16,
+        )
+        .expect("CPU UCF classification report");
+        assert_eq!(report.total, 4);
+        assert_eq!(
+            report.captured + report.escaped + report.budget_exhausted + report.non_finite,
+            report.total
+        );
+        assert!(report.agreement <= report.total);
+    }
+
+    #[test]
+    fn vulkan_classification_report_matches_cpu_when_available() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let cpu = schwarzschild_classification_ucf_cpu(bh, camera, 2, 2, 0.04, 100.0, 16)
+            .expect("CPU UCF classification report");
+        let gpu = match schwarzschild_classification_ucf_vulkan(bh, camera, 2, 2, 0.04, 100.0, 16) {
+            Ok(report) => report,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan UCF classification report: {error}"),
+        };
+        assert_eq!(gpu.total, cpu.total);
+        assert_eq!(gpu.analytic_captured, cpu.analytic_captured);
+        assert_eq!(gpu.captured, cpu.captured);
+        assert_eq!(gpu.escaped, cpu.escaped);
+        assert_eq!(gpu.budget_exhausted, cpu.budget_exhausted);
+        assert_eq!(gpu.non_finite, cpu.non_finite);
+        assert_eq!(gpu.agreement, cpu.agreement);
+    }
 
     #[test]
     fn cpu_impact_program_matches_reference() {

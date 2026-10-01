@@ -13,6 +13,8 @@ pub use scene::{Scene, SceneBuilder};
 pub use ton_renderer::RenderMode;
 pub use ucf_cpu::{execute_frame_graph_cpu, CpuGraphExecution};
 pub use ucf_physics::{
+    schwarzschild_classification_ucf_cpu, schwarzschild_classification_ucf_vulkan,
+    SchwarzschildClassificationReport,
     schwarzschild_capture_classify_ucf_cpu, schwarzschild_capture_classify_ucf_cpu_batch,
     schwarzschild_capture_classify_ucf_vulkan_batch,
     schwarzschild_impact_ucf_cpu_batch, schwarzschild_impact_ucf_vulkan_batch,
