@@ -236,6 +236,34 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan(mass: f64, state: SphericalSt
     Ok((SphericalState { t: output[0] as f64, r: output[1] as f64, theta: output[2] as f64, phi: output[3] as f64, ut: output[4] as f64, ur: output[5] as f64, utheta: output[6] as f64, uphi: output[7] as f64 }, output[8] as u32))
 }
 
+/// 由一次 Vulkan dispatch 并行推进多个实例，每个实例占九个 `f32`。
+pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass: f64, states: &[SphericalState], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
+    if states.is_empty() { return Ok(Vec::new()); }
+    let count = u32::try_from(states.len()).map_err(|_| TonError::Domain("geodesic batch exceeds u32 capacity".into()))?;
+    let program = schwarzschild_geodesic_rk4_integrate(max_steps);
+    let task = dispatch_task(33, &program, count, ResourceId(15), Some(ResourceId(16)), BTreeMap::from([
+        ("uniform_0".into(), ParamValue::F64(mass)),
+        ("uniform_1".into(), ParamValue::F64(step)),
+        ("uniform_2".into(), ParamValue::F64(escape_radius)),
+    ]))?;
+    let graph = Graph { resources: ResourceGraph { nodes: vec![
+        ResourceNode { id: ResourceId(15), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) },
+        ResourceNode { id: ResourceId(16), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(u64::from(count) * 9 * 4) },
+    ] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan integrated geodesic batch graph: {e}")))?;
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
+    backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan integrated geodesic batch graph: {e}")))?;
+    let input = states.iter().flat_map(|state| [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0]).map(|value| value as f32).collect::<Vec<_>>();
+    backend.write_f32(ResourceId(16), &input).map_err(|e| TonError::Domain(format!("upload integrated geodesic batch: {e}")))?;
+    backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan integrated geodesic batch: {e}")))?;
+    let output = backend.read_f32(ResourceId(16)).map_err(|e| TonError::Domain(format!("read integrated geodesic batch: {e}")))?;
+    if output.len() < states.len() * 9 { return Err(TonError::Domain("Vulkan integrated geodesic batch output is short".into())); }
+    Ok(states.iter().enumerate().map(|(index, _)| {
+        let base = index * 9;
+        (SphericalState { t: output[base] as f64, r: output[base + 1] as f64, theta: output[base + 2] as f64, phi: output[base + 3] as f64, ut: output[base + 4] as f64, ur: output[base + 5] as f64, utheta: output[base + 6] as f64, uphi: output[base + 7] as f64 }, output[base + 8] as u32)
+    }).collect())
+}
+
 /// 由原生 Vulkan UCF backend 推进一个完整球坐标 Schwarzschild RK4 步。
 pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalState, step: f64) -> TonResult<SphericalState> {
     let program = schwarzschild_geodesic_rk4_step();
@@ -293,6 +321,25 @@ mod tests {
         let b = [gpu.0.t, gpu.0.r, gpu.0.theta, gpu.0.phi, gpu.0.ut, gpu.0.ur, gpu.0.utheta, gpu.0.uphi];
         for (actual, expected) in a.into_iter().zip(b) { assert!((actual - expected).abs() < 2.0e-3, "actual={actual}, expected={expected}"); }
         assert_eq!(gpu.1, cpu.1);
+    }
+
+    #[test]
+    fn vulkan_integrated_batch_matches_cpu_when_available() {
+        let states = vec![
+            SphericalState { t: 0.0, r: 10.0, theta: 1.1, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.02, uphi: 0.01 },
+            SphericalState { t: 0.0, r: 12.0, theta: 1.0, phi: 0.2, ut: 1.0, ur: -0.4, utheta: 0.01, uphi: 0.02 },
+        ];
+        let gpu = match schwarzschild_geodesic_integrate_ucf_vulkan_batch(1.0, &states, 0.01, 100.0, 4) {
+            Ok(value) => value,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan integrated geodesic batch: {error}"),
+        };
+        assert_eq!(gpu.len(), states.len());
+        for (state, (actual, status)) in states.iter().zip(gpu) {
+            let (expected, expected_status) = schwarzschild_geodesic_integrate_ucf_cpu(1.0, *state, 0.01, 100.0, 4).unwrap();
+            assert!((actual.r - expected.r).abs() < 2.0e-3);
+            assert_eq!(status, expected_status);
+        }
     }
 
     #[test]
