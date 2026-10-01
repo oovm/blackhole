@@ -436,9 +436,10 @@ pub fn schwarzschild_geodesic_rk4_step() -> Program {
 /// 构建在单个 UCF 实例内执行有界 RK4 积分的 Schwarzschild 程序。
 ///
 /// 状态资源布局为九个 `f32`：前八个元素是
-/// `[t, r, theta, phi, ut, ur, utheta, uphi]`，第九个元素是终止码。
+/// `[t, r, theta, phi, ut, ur, utheta, uphi]`，第九个元素是终止码，
+/// 第十个元素是束缚入射标记。非零表示不能仅凭到达逃逸半径判定逃逸。
 /// uniform `0` 是质量，`1` 是步长，`2` 是逃逸半径。终止码为
-/// `1=captured`、`2=escaped`、`3=budget_exhausted`。
+/// `1=captured`、`2=escaped`、`3=budget_exhausted`、`4=non_finite`。
 pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
     fn b(builder: &StructuredFunctionBuilder, op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
         builder.binary(op, lhs, rhs)
@@ -494,15 +495,27 @@ pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
     }
     let mut builder = StructuredFunctionBuilder::new("schwarzschild_geodesic_rk4_integrate");
     let gid = builder.global_id();
-    let base = b(&builder, BinOp::Mul, gid, builder.const_u32(9));
+    let base = b(&builder, BinOp::Mul, gid, builder.const_u32(10));
     let state: [u32; 8] = std::array::from_fn(|offset| {
         let index = b(&builder, BinOp::Add, base.clone(), builder.const_u32(offset as u32));
         builder.let_value(ucf_program::Ty::f32(), builder.load_buffer(0, index))
     });
+    let bound_infall = builder.let_value(
+        ucf_program::Ty::f32(),
+        builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(9))),
+    );
     let mass = builder.load_uniform(0);
     let step = builder.load_uniform(1);
     let horizon = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
-    builder.bounded_while(b(&builder, BinOp::Gt, Expr::LoadLocal(state[1]), horizon), max_steps, |builder| {
+    let status = builder.let_value(ucf_program::Ty::f32(), builder.const_f32(0.0));
+    let active = |builder: &StructuredFunctionBuilder| {
+        builder.select(
+            builder.binary(BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0)),
+            builder.binary(BinOp::Gt, Expr::LoadLocal(state[1]), horizon.clone()),
+            Expr::ConstBool(false),
+        )
+    };
+    builder.bounded_while(active(&builder), max_steps, |builder| {
         let values: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(state[index]));
         let half_step = b(builder, BinOp::Mul, step.clone(), builder.const_f32(0.5));
         let add_scaled = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], slope: &[Expr; 8], scale: Expr| {
@@ -520,16 +533,37 @@ pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
             let next = b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, step.clone(), b(builder, BinOp::Div, weighted, builder.const_f32(6.0))));
             builder.store_local(state[index], next);
         }
+        let mut finite = builder.unary(UnOp::IsFinite, Expr::LoadLocal(state[0]));
+        for index in 1..8 {
+            finite = builder.select(
+                finite,
+                builder.unary(UnOp::IsFinite, Expr::LoadLocal(state[index])),
+                Expr::ConstBool(false),
+            );
+        }
+        builder.store_local(
+            status,
+            builder.select(finite, Expr::LoadLocal(status), builder.const_f32(4.0)),
+        );
     });
     let r = Expr::LoadLocal(state[1]);
     let rs = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
     let captured = b(&builder, BinOp::Le, r.clone(), b(&builder, BinOp::Mul, rs, builder.const_f32(1.0001)));
-    let escaped = b(&builder, BinOp::Ge, r, builder.load_uniform(2));
-    let status = builder.select(captured, builder.const_f32(1.0), builder.select(escaped, builder.const_f32(2.0), builder.const_f32(3.0)));
+    let escaped = builder.select(
+        b(&builder, BinOp::Eq, Expr::LoadLocal(bound_infall), builder.const_f32(0.0)),
+        b(&builder, BinOp::Ge, r, builder.load_uniform(2)),
+        Expr::ConstBool(false),
+    );
+    let final_status = builder.select(
+        b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(4.0)),
+        builder.const_f32(4.0),
+        builder.select(captured, builder.const_f32(1.0), builder.select(escaped, builder.const_f32(2.0), builder.const_f32(3.0))),
+    );
     for offset in 0..8usize {
         builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(offset as u32)), Expr::LoadLocal(state[offset]));
     }
-    builder.store_buffer(0, b(&builder, BinOp::Add, base, builder.const_u32(8)), status);
+    builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(8)), final_status);
+    builder.store_buffer(0, b(&builder, BinOp::Add, base, builder.const_u32(9)), Expr::LoadLocal(bound_infall));
     ProgramBuilder::new().structured_entry(builder, ucf_program::Ty::f32(), Expr::LoadLocal(state[0])).expect("valid structured integration builder").finish().expect("valid structured integration program")
 }
 
@@ -672,6 +706,7 @@ mod integration_tests {
             Value::F32(0.02),
             Value::F32(0.01),
             Value::F32(0.0),
+            Value::F32(0.0),
         ];
         let mut interpreter = CpuInterpreter::new();
         interpreter.with_uniform(0, Value::F32(1.0));
@@ -681,7 +716,7 @@ mod integration_tests {
         let result = interpreter.run_parallel(&program, 1).expect("structured integration CPU execution");
         assert!(result[0].value.as_f64().expect("return value").is_finite());
         let output = interpreter.buffer(0).expect("state output");
-        assert_eq!(output.len(), 9);
+        assert_eq!(output.len(), 10);
         assert_eq!(output[8], Value::F32(3.0));
         assert!((output[1].as_f64().expect("radius") - 9.972).abs() < 0.1);
     }

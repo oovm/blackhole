@@ -202,13 +202,13 @@ pub fn schwarzschild_geodesic_rk4_step_ucf_cpu(mass: f64, state: SphericalState,
 /// 由单个 UCF 程序在 CPU 解释器中完成有界多步积分。
 pub fn schwarzschild_geodesic_integrate_ucf_cpu(mass: f64, state: SphericalState, step: f64, escape_radius: f64, max_steps: u32) -> TonResult<(SphericalState, u32)> {
     let program = schwarzschild_geodesic_rk4_integrate(max_steps);
-    let values = [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0]
+    let values = [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0, 0.0]
         .into_iter().map(|value| Value::F32(value as f32)).collect::<Vec<_>>();
     let report = CpuBackend::new()
         .execute_program_with_buffers(&program, 1, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32)), (2, Value::F32(escape_radius as f32))], [(0, values)])
         .map_err(TonError::Domain)?;
     let output = report.buffers.get(&0).ok_or_else(|| TonError::Domain("UCF integrated geodesic state buffer missing".into()))?;
-    if output.len() < 9 { return Err(TonError::Domain("UCF integrated geodesic state output is short".into())); }
+    if output.len() < 10 { return Err(TonError::Domain("UCF integrated geodesic state output is short".into())); }
     let value = |index: usize| output[index].as_f64().map_err(|error| TonError::Domain(error.to_string()));
     let status = value(8)? as u32;
     Ok((SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? }, status))
@@ -218,12 +218,17 @@ pub fn schwarzschild_geodesic_integrate_ucf_cpu(mass: f64, state: SphericalState
 pub fn schwarzschild_geodesic_integrate_ucf_cpu_rays(mass: f64, rays: &[(Vec3, Vec3)], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
     if rays.is_empty() { return Ok(Vec::new()); }
     let states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
-    let input = states.iter().flat_map(|state| [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0].into_iter().map(|value| Value::F32(value as f32))).collect::<Vec<_>>();
+    let input = rays.iter().zip(states.iter()).flat_map(|((origin, direction), state)| {
+        let bound = schwarzschild_geodesic_impact_parameter(mass, *origin, *direction)
+            .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false);
+        [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0, bound as u8 as f64]
+            .into_iter().map(|value| Value::F32(value as f32))
+    }).collect::<Vec<_>>();
     let report = CpuBackend::new().execute_program_with_buffers(&schwarzschild_geodesic_rk4_integrate(max_steps), states.len() as u32, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32)), (2, Value::F32(escape_radius as f32))], [(0, input)]).map_err(TonError::Domain)?;
     let output = report.buffers.get(&0).ok_or_else(|| TonError::Domain("CPU integrated geodesic batch output is missing".into()))?;
-    if output.len() < states.len() * 9 { return Err(TonError::Domain("CPU integrated geodesic batch output is short".into())); }
+    if output.len() < states.len() * 10 { return Err(TonError::Domain("CPU integrated geodesic batch output is short".into())); }
     Ok(states.iter().enumerate().map(|(index, _)| {
-        let base = index * 9;
+        let base = index * 10;
         let value = |offset: usize| output[base + offset].as_f64().map_err(|error| TonError::Domain(error.to_string()));
         Ok((SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? }, value(8)? as u32))
     }).collect::<TonResult<Vec<_>>>()?)
@@ -239,20 +244,24 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan(mass: f64, state: SphericalSt
     ]))?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![
         ResourceNode { id: ResourceId(13), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(36) },
-        ResourceNode { id: ResourceId(14), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(36) },
+        ResourceNode { id: ResourceId(14), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(40) },
     ] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan integrated geodesic graph: {e}")))?;
     let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
     backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan integrated geodesic graph: {e}")))?;
-    backend.write_f32(ResourceId(14), &[state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0].into_iter().map(|value| value as f32).collect::<Vec<_>>()).map_err(|e| TonError::Domain(format!("upload integrated geodesic state: {e}")))?;
+    backend.write_f32(ResourceId(14), &[state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0, 0.0].into_iter().map(|value| value as f32).collect::<Vec<_>>()).map_err(|e| TonError::Domain(format!("upload integrated geodesic state: {e}")))?;
     backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan integrated geodesic graph: {e}")))?;
     let output = backend.read_f32(ResourceId(14)).map_err(|e| TonError::Domain(format!("read integrated geodesic state: {e}")))?;
-    if output.len() < 9 { return Err(TonError::Domain("Vulkan integrated geodesic state output is short".into())); }
+    if output.len() < 10 { return Err(TonError::Domain("Vulkan integrated geodesic state output is short".into())); }
     Ok((SphericalState { t: output[0] as f64, r: output[1] as f64, theta: output[2] as f64, phi: output[3] as f64, ut: output[4] as f64, ur: output[5] as f64, utheta: output[6] as f64, uphi: output[7] as f64 }, output[8] as u32))
 }
 
 /// 由一次 Vulkan dispatch 并行推进多个实例，每个实例占九个 `f32`。
 pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass: f64, states: &[SphericalState], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
+    schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_flags(mass, states, &vec![false; states.len()], step, escape_radius, max_steps)
+}
+
+fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_flags(mass: f64, states: &[SphericalState], bound_flags: &[bool], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
     if states.is_empty() { return Ok(Vec::new()); }
     let count = u32::try_from(states.len()).map_err(|_| TonError::Domain("geodesic batch exceeds u32 capacity".into()))?;
     let program = schwarzschild_geodesic_rk4_integrate(max_steps);
@@ -263,18 +272,18 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass: f64, states: &[Sp
     ]))?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![
         ResourceNode { id: ResourceId(15), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) },
-        ResourceNode { id: ResourceId(16), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(u64::from(count) * 9 * 4) },
+        ResourceNode { id: ResourceId(16), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(u64::from(count) * 10 * 4) },
     ] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan integrated geodesic batch graph: {e}")))?;
     let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
     backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan integrated geodesic batch graph: {e}")))?;
-    let input = states.iter().flat_map(|state| [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0]).map(|value| value as f32).collect::<Vec<_>>();
+    let input = states.iter().zip(bound_flags.iter()).flat_map(|(state, bound)| [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0, *bound as u8 as f64]).map(|value| value as f32).collect::<Vec<_>>();
     backend.write_f32(ResourceId(16), &input).map_err(|e| TonError::Domain(format!("upload integrated geodesic batch: {e}")))?;
     backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan integrated geodesic batch: {e}")))?;
     let output = backend.read_f32(ResourceId(16)).map_err(|e| TonError::Domain(format!("read integrated geodesic batch: {e}")))?;
-    if output.len() < states.len() * 9 { return Err(TonError::Domain("Vulkan integrated geodesic batch output is short".into())); }
+    if output.len() < states.len() * 10 { return Err(TonError::Domain("Vulkan integrated geodesic batch output is short".into())); }
     Ok(states.iter().enumerate().map(|(index, _)| {
-        let base = index * 9;
+        let base = index * 10;
         (SphericalState { t: output[base] as f64, r: output[base + 1] as f64, theta: output[base + 2] as f64, phi: output[base + 3] as f64, ut: output[base + 4] as f64, ur: output[base + 5] as f64, utheta: output[base + 6] as f64, uphi: output[base + 7] as f64 }, output[base + 8] as u32)
     }).collect())
 }
@@ -282,7 +291,9 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass: f64, states: &[Sp
 /// 由 Vulkan UCF batch dispatch 并行推进多条相机射线。
 pub fn schwarzschild_geodesic_integrate_ucf_vulkan_rays(mass: f64, rays: &[(Vec3, Vec3)], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
     let states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
-    schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass, &states, step, escape_radius, max_steps)
+    let bound_flags = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_impact_parameter(mass, *origin, *direction)
+        .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false)).collect::<Vec<_>>();
+    schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_flags(mass, &states, &bound_flags, step, escape_radius, max_steps)
 }
 
 /// 生成 UCF Vulkan 测地线终止诊断帧。
