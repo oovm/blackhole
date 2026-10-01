@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_geodesic_rk4_step as reference_geodesic_rk4_ste
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_step, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -197,6 +197,21 @@ pub fn schwarzschild_geodesic_rk4_step_ucf_cpu(mass: f64, state: SphericalState,
     if output.len() < 8 { return Err(TonError::Domain("UCF geodesic state output is short".into())); }
     let value = |index: usize| output[index].as_f64().map_err(|error| TonError::Domain(error.to_string()));
     Ok(SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? })
+}
+
+/// 由单个 UCF 程序在 CPU 解释器中完成有界多步积分。
+pub fn schwarzschild_geodesic_integrate_ucf_cpu(mass: f64, state: SphericalState, step: f64, escape_radius: f64, max_steps: u32) -> TonResult<(SphericalState, u32)> {
+    let program = schwarzschild_geodesic_rk4_integrate(max_steps);
+    let values = [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.0]
+        .into_iter().map(|value| Value::F32(value as f32)).collect::<Vec<_>>();
+    let report = CpuBackend::new()
+        .execute_program_with_buffers(&program, 1, [(0, Value::F32(mass as f32)), (1, Value::F32(step as f32)), (2, Value::F32(escape_radius as f32))], [(0, values)])
+        .map_err(TonError::Domain)?;
+    let output = report.buffers.get(&0).ok_or_else(|| TonError::Domain("UCF integrated geodesic state buffer missing".into()))?;
+    if output.len() < 9 { return Err(TonError::Domain("UCF integrated geodesic state output is short".into())); }
+    let value = |index: usize| output[index].as_f64().map_err(|error| TonError::Domain(error.to_string()));
+    let status = value(8)? as u32;
+    Ok((SphericalState { t: value(0)?, r: value(1)?, theta: value(2)?, phi: value(3)?, ut: value(4)?, ur: value(5)?, utheta: value(6)?, uphi: value(7)? }, status))
 }
 
 /// 由原生 Vulkan UCF backend 推进一个完整球坐标 Schwarzschild RK4 步。
