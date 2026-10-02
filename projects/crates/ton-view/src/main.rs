@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use image::{ImageBuffer, Rgba};
-use ton_simulation::{capture_convergence_samples, RenderMode, Scene};
+use ton_simulation::{capture_convergence_samples, RenderMode, Scene, DEFAULT_SPECTRAL_EXPOSURE};
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, Vec3};
 
 fn main() -> ExitCode {
@@ -100,7 +100,7 @@ fn main() -> ExitCode {
         let mut renderer = ton_simulation::SchwarzschildSpectralGpuBuilder::new(mass)
             .maximum_step(step_size).maximum_steps(max_steps.unwrap_or(32768))
             .peak_temperature(parse_f64_arg(&args, "--peak-kelvin", 6500.0))
-            .exposure(parse_f64_arg(&args, "--exposure", 1.0e-10))
+            .exposure(parse_f64_arg(&args, "--exposure", DEFAULT_SPECTRAL_EXPOSURE))
             .bloom(bloom);
         if graybody {
             let pattern = ton_disk::GraybodyDiskPattern::builder().contrast(0.62).arms(3).pitch(8.0).radial_frequency(18.0)

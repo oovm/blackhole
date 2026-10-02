@@ -9,6 +9,9 @@ use ucf_scheduler::Backend;
 use ucf_types::{Access, Domain, ParamValue, ResourceId, ResourceKind, ResourceNode};
 use crate::{F64GpuTraceBatch, SchwarzschildF64GpuTraceBuilder};
 
+/// 光谱 Beauty 路径的默认曝光，来自 320×180 Vulkan 实图扫描基线。
+pub const DEFAULT_SPECTRAL_EXPOSURE: f64 = 5.0e-10;
+
 fn execute_stage(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Program, input: &[f32],
     input_stride: u32, output_stride: u32, base: u64, uniforms: &[f64], table: Option<&[f32]>,
 ) -> TonResult<Vec<f32>> {
@@ -76,8 +79,8 @@ pub struct SchwarzschildSpectralGpuBuilder {
 }
 
 impl SchwarzschildSpectralGpuBuilder {
-    /// 默认峰值 6500K、曝光 1e-10、最大步长 0.02M。
-    pub fn new(mass: f64) -> Self { Self { mass, peak_kelvin: 6500.0, exposure: 1.0e-10, step: 0.02 * mass, maximum_steps: 32768, wavelength_step_nm: 5,
+    /// 默认峰值 6500K、曝光 5e-10、最大步长 0.02M。
+    pub fn new(mass: f64) -> Self { Self { mass, peak_kelvin: 6500.0, exposure: DEFAULT_SPECTRAL_EXPOSURE, step: 0.02 * mass, maximum_steps: 32768, wavelength_step_nm: 5,
         pattern: ton_disk::GraybodyDiskPattern::builder().build().expect("default graybody pattern must be valid"), bloom: false } }
     /// 设置物理发射温度峰值。
     pub fn peak_temperature(mut self, value: f64) -> Self { self.peak_kelvin = value; self }

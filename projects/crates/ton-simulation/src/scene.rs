@@ -240,7 +240,7 @@ impl Scene {
         }
         self.disk.as_ref().ok_or_else(|| TonError::Domain("spectral GPU entry requires an accretion disk".into()))?;
         let frame = SchwarzschildSpectralGpuBuilder::new(self.black_hole.mass)
-            .exposure(3.0e-9)
+            .exposure(crate::DEFAULT_SPECTRAL_EXPOSURE)
             .bloom(self.post_bloom)
             .execute(self.camera, self.width, self.height)?;
         Ok(frame.framebuffer)
