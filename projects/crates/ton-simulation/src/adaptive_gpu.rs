@@ -310,6 +310,50 @@ mod tests {
     use ton_types::Vec3;
 
     #[test]
+    fn cartesian_f64_native_rk4_matches_independent_reference_on_critical_ray() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let (horizontal, vertical) = (((9.5 / 16.0) * 2.0 - 1.0) * 16.0 / 9.0, 1.0 - (1.5 / 9.0) * 2.0);
+        let initial = SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(horizontal, vertical)).unwrap();
+        let angular = initial.angular_momentum();
+        let angular = angular.dot(angular);
+        let input = [initial.t, initial.position.x, initial.position.y, initial.position.z,
+            initial.energy, initial.velocity.x, initial.velocity.y, initial.velocity.z, angular];
+        let (steps, step) = (1024u32, 0.04f64);
+        let program = ton_ucf_frontend::SchwarzschildCartesianF64Rk4Builder::new().maximum_steps(steps).build().unwrap();
+        let task = crate::ucf_physics::dispatch_task(75, &program, 1, ResourceId(63), 2, 1, Some(ResourceId(61)),
+            BTreeMap::from([("buffer_2".into(), ParamValue::I64(62)),
+                ("uniform_0".into(), ParamValue::F64(1.0)), ("uniform_1".into(), ParamValue::F64(step))])).unwrap();
+        let graph = Graph { resources: ResourceGraph { nodes: [(61, 9, Access::Read), (62, 9, Access::Write), (63, 1, Access::Write)]
+            .into_iter().map(|(id, stride, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
+                domain: Domain::Vram, access, byte_size: Some(stride * 8) }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+        graph.validate().unwrap();
+        let mut backend = VulkanBackend::new().unwrap();
+        backend.prepare(&graph).unwrap(); backend.write_f64(ResourceId(61), &input).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        let actual = backend.read_f64(ResourceId(62)).unwrap();
+        assert_eq!(actual[8], 0.0);
+        let mut reference = initial;
+        for _ in 0..steps { reference = ton_geodesic::schwarzschild_cartesian_conserved_null_rk4_step(1.0, reference, angular, step).unwrap(); }
+        let expected = [reference.t, reference.position.x, reference.position.y, reference.position.z,
+            reference.energy, reference.velocity.x, reference.velocity.y, reference.velocity.z];
+        let mut maximum_error = 0.0f64;
+        for (actual, expected) in actual[..8].iter().zip(expected) {
+            maximum_error = maximum_error.max((actual - expected).abs());
+            assert!((actual - expected).abs() < 1.0e-9, "actual={actual}, reference={expected}");
+        }
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        cpu.with_uniform(0, ton_ucf_frontend::Value::F64(1.0)); cpu.with_uniform(1, ton_ucf_frontend::Value::F64(step));
+        cpu.with_buffer(1, input.into_iter().map(ton_ucf_frontend::Value::F64).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F64(0.0); 9]);
+        cpu.run_parallel(&program, 1).unwrap();
+        for (actual, expected) in actual.iter().zip(cpu.buffer(2).unwrap()) {
+            assert!((actual - expected.as_f64().unwrap()).abs() < 1.0e-10);
+        }
+        eprintln!("native F64 critical ray: steps={steps}, max_state_error={maximum_error}, reference_null={}", reference.null_residual(1.0));
+    }
+
+    #[test]
     fn blackbody_spectrum_vulkan_matches_independent_si_reference() {
         let inputs = [[6000.0f32, 500.0, 1.0], [6000.0, 500.0, 0.7], [6000.0, 500.0, 2.0],
             [10000.0, 700.0, 1.0], [6000.0, 0.000001, 1.0], [1.0, 1000000.0, 1.0],
