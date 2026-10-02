@@ -10,6 +10,8 @@ pub use events::SchwarzschildEventLocalizationBuilder;
 mod adaptive_trace;
 mod null_energy;
 mod cartesian_null;
+mod cartesian_initial;
+pub use cartesian_initial::SchwarzschildCartesianInitialStateBuilder;
 pub use cartesian_null::SchwarzschildCartesianAdaptiveChunkBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use ton_geodesic::{SphericalState, SchwarzschildCartesianNullState};
-use ton_types::{TonError, TonResult};
+use ton_types::{Camera, TonError, TonResult, Vec3};
 use ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Graph, ResourceGraph, TaskGraph};
@@ -158,6 +158,50 @@ impl SchwarzschildGpuTraceBuilder {
             record
         }).collect();
         self.execute_packed(&mut backend, records, GpuTraceStateLayout::CartesianNullEnergy)
+    }
+
+    /// GPU 相机程序、GPU 笛卡尔初态程序与融合追踪，不调用任何 Rust 物理参考函数。
+    /// 当前阶段之间显式 readback 并重新上传，不声称资源始终驻留 GPU。
+    pub fn execute_camera(self, camera: Camera, width: u32, height: u32) -> TonResult<GpuTraceBatch> {
+        self.validate()?;
+        let count = width.checked_mul(height).filter(|count| *count > 0)
+            .ok_or_else(|| TonError::Domain("adaptive camera resolution is zero or exceeds u32 capacity".into()))?;
+        let uv = (0..height).flat_map(|y| (0..width).map(move |x|
+            (((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * width as f64 / height as f64,
+                1.0 - (y as f64 + 0.5) / height as f64 * 2.0))).collect::<Vec<_>>();
+        let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create adaptive camera backend: {error}")))?;
+        let directions = crate::ucf_physics::camera_ray_ucf_vulkan_batch_with_backend(&mut backend, camera, &uv)?;
+        if directions.len() != count as usize { return Err(TonError::Domain("adaptive camera output length mismatch".into())); }
+        let rays = directions.iter().map(|direction| (camera.position, *direction)).collect::<Vec<_>>();
+        let (records, initial_hash) = self.initialize_rays(&mut backend, &rays)?;
+        let mut result = self.execute_packed(&mut backend, records, GpuTraceStateLayout::CartesianNullEnergy)?;
+        let camera_hash = ton_ucf_frontend::program_hash(&ton_ucf_frontend::camera_ray_batch());
+        result.executed_program_hashes.splice(0..0, [camera_hash, initial_hash]);
+        Ok(result)
+    }
+
+    fn initialize_rays(self, backend: &mut VulkanBackend, rays: &[(Vec3, Vec3)]) -> TonResult<(Vec<[f32; 29]>, u64)> {
+        let count = u32::try_from(rays.len()).map_err(|_| TonError::Domain("adaptive initial batch exceeds u32 capacity".into()))?;
+        let program = ton_ucf_frontend::SchwarzschildCartesianInitialStateBuilder::new().build()
+            .map_err(|error| TonError::Domain(format!("build Cartesian initial program: {error}")))?;
+        let params = BTreeMap::from([("uniform_0".into(), ParamValue::F64(self.mass as f64)),
+            ("uniform_1".into(), ParamValue::F64(self.initial_step as f64)), ("buffer_2".into(), ParamValue::I64(32))]);
+        let task = crate::ucf_physics::dispatch_task(72, &program, count, ResourceId(33), 2, 1, Some(ResourceId(31)), params)?;
+        let graph = Graph { resources: ResourceGraph { nodes: [(31, 6, Access::Read), (32, 29, Access::Write), (33, 1, Access::Write)]
+            .into_iter().map(|(id, stride, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
+                domain: Domain::Vram, access, byte_size: Some(u64::from(count) * stride * 4) }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+        graph.validate().map_err(|error| TonError::Domain(format!("validate Cartesian initial graph: {error}")))?;
+        backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare Cartesian initial graph: {error}")))?;
+        let input = rays.iter().flat_map(|(origin, direction)| [origin.x, origin.y, origin.z,
+            direction.x, direction.y, direction.z].map(|value| value as f32)).collect::<Vec<_>>();
+        backend.write_f32(ResourceId(31), &input).map_err(|error| TonError::Domain(format!("upload Cartesian rays: {error}")))?;
+        backend.run_prepared(&graph).map_err(|error| TonError::Domain(format!("execute Cartesian initial graph: {error}")))?;
+        let output = backend.read_f32(ResourceId(32)).map_err(|error| TonError::Domain(format!("read Cartesian initial states: {error}")))?;
+        if output.len() != rays.len() * 29 || output.iter().any(|value| !value.is_finite()) {
+            return Err(TonError::Domain("Cartesian initial output has invalid length or nonfinite values".into()));
+        }
+        Ok((output.chunks_exact(29).map(|values| values.try_into().unwrap()).collect(), ton_ucf_frontend::program_hash(&program)))
     }
 
     fn execute_packed(self, backend: &mut VulkanBackend, mut records: Vec<[f32; 29]>, state_layout: GpuTraceStateLayout) -> TonResult<GpuTraceBatch> {
@@ -669,5 +713,109 @@ mod tests {
         eprintln!("Cartesian fused GPU frame {width}x{height}: captured={captured}, escaped={}, maxima={maxima:?}, dispatches={}",
             states.len() - captured, result.executed_program_hashes.len());
         assert!(captured > 0 && captured < states.len());
+    }
+
+    #[test]
+    fn cartesian_initial_cpu_and_gpu_match_independent_ray_reference() {
+        let rays = [(Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -3.0)),
+            (Vec3::new(12.0, 3.0, 5.0), Vec3::new(-1.0, 0.2, -0.1)),
+            (Vec3::new(5.0, -2.0, -10.0), Vec3::new(1.0, 0.4, 0.1)),
+            (Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.0, 0.0, -1.0)),
+            (Vec3::new(10.0, 0.0, 0.0), Vec3::ZERO)];
+        let program = ton_ucf_frontend::SchwarzschildCartesianInitialStateBuilder::new().build().unwrap();
+        let encoded = serde_json::to_string(&program).unwrap();
+        let decoded: ton_ucf_frontend::Program = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(ton_ucf_frontend::program_hash(&program), ton_ucf_frontend::program_hash(&decoded));
+        let input = rays.iter().flat_map(|(origin, direction)| [origin.x, origin.y, origin.z,
+            direction.x, direction.y, direction.z].map(|value| ton_ucf_frontend::Value::F32(value as f32))).collect::<Vec<_>>();
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        cpu.with_uniform(0, ton_ucf_frontend::Value::F32(1.0));
+        cpu.with_uniform(1, ton_ucf_frontend::Value::F32(0.08));
+        cpu.with_buffer(1, input);
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); rays.len() * 29]);
+        cpu.run_parallel(&decoded, rays.len() as u32).unwrap();
+        let cpu = cpu.buffer(2).unwrap().iter().map(|value| {
+            let ton_ucf_frontend::Value::F32(value) = value else { panic!("initial program lost F32 type"); };
+            *value
+        }).collect::<Vec<_>>();
+        let mut backend = VulkanBackend::new().unwrap();
+        let (gpu, hash) = SchwarzschildGpuTraceBuilder::new(1.0).initialize_rays(&mut backend, &rays).unwrap();
+        assert_eq!(hash, ton_ucf_frontend::program_hash(&decoded));
+        for (index, ((origin, direction), native)) in rays.iter().zip(&gpu).enumerate() {
+            for record in [&cpu[index * 29..(index + 1) * 29], native.as_slice()] {
+                match SchwarzschildCartesianNullState::from_ray(1.0, *origin, *direction) {
+                    Ok(reference) => {
+                        assert_eq!(record[8], 0.0);
+                        for (actual, expected) in record[..8].iter().zip([reference.t, reference.position.x, reference.position.y,
+                            reference.position.z, reference.energy, reference.velocity.x, reference.velocity.y, reference.velocity.z]) {
+                            assert!((*actual as f64 - expected).abs() < 16.0 * f32::EPSILON as f64 * expected.abs().max(1.0));
+                        }
+                        let state = SchwarzschildCartesianNullState { t: record[0] as f64,
+                            position: Vec3::new(record[1] as f64, record[2] as f64, record[3] as f64), energy: record[4] as f64,
+                            velocity: Vec3::new(record[5] as f64, record[6] as f64, record[7] as f64) };
+                        assert!(state.null_residual(1.0) < 1.0e-6);
+                    }
+                    Err(_) => { assert_eq!(record[8], 5.0); assert!(record.iter().all(|value| value.is_finite())); }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cartesian_gpu_camera_chain_small_frame_matches_independent_trace() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let (width, height) = (16, 9);
+        let result = SchwarzschildGpuTraceBuilder::new(1.0).execute_camera(camera, width, height).unwrap();
+        result.require_renderable().unwrap();
+        assert_eq!(result.state_layout, GpuTraceStateLayout::CartesianNullEnergy);
+        assert_eq!(result.executed_program_hashes[0], ton_ucf_frontend::program_hash(&ton_ucf_frontend::camera_ray_batch()));
+        assert_eq!(result.executed_program_hashes[1], ton_ucf_frontend::program_hash(&ton_ucf_frontend::SchwarzschildCartesianInitialStateBuilder::new().build().unwrap()));
+        let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).events(events).build().unwrap();
+        let mut captured = 0;
+        let mut crossings = 0;
+        for (index, (record, termination)) in result.records.iter().zip(&result.terminations).enumerate() {
+            let u = (((index % width as usize) as f64 + 0.5) / width as f64 * 2.0 - 1.0) * width as f64 / height as f64;
+            let v = 1.0 - ((index / width as usize) as f64 + 0.5) / height as f64 * 2.0;
+            let initial = SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
+            let reference = ton_geodesic::schwarzschild_cartesian_adaptive_trace(initial, config).unwrap();
+            let expected = match reference.termination {
+                ton_geodesic::AdaptiveTraceTermination::Captured => { captured += 1; GpuTraceTermination::Captured },
+                ton_geodesic::AdaptiveTraceTermination::Escaped => GpuTraceTermination::Escaped,
+                other => panic!("pixel={index}, reference={other:?}"),
+            };
+            assert_eq!(*termination, expected, "pixel={index}");
+            assert_eq!(record[13], reference.disk_events.len() as f32, "pixel={index}, gpu_record={:?}, reference_events={}", record, reference.disk_events.len());
+            if let Some(first) = reference.disk_events.first() {
+                assert!((record[14] as f64 - first.event.state.position.length()).abs() < 5.0e-3, "pixel={index}, gpu_radius={}, ref_radius={}, record={record:?}", record[14], first.event.state.position.length());
+                assert!((record[15] as f64 - first.affine_parameter).abs() < 5.0e-3, "pixel={index}");
+            }
+            crossings += reference.disk_events.len();
+        }
+        eprintln!("GPU camera chain {width}x{height}: captured={captured}, disk_crossings={crossings}");
+        assert!(captured > 0 && captured < result.records.len() && crossings > 0);
+    }
+
+    #[test]
+    fn cartesian_gpu_camera_chain_large_frame_passes_analytic_and_invariant_gates() {
+        let bh = ton_types::BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let (width, height) = (128, 72);
+        let result = SchwarzschildGpuTraceBuilder::new(1.0).execute_camera(camera, width, height).unwrap();
+        result.require_renderable().unwrap();
+        let mut captured = 0;
+        let mut maxima = [0.0f32; 3];
+        for (index, (record, termination)) in result.records.iter().zip(&result.terminations).enumerate() {
+            let u = (((index % width as usize) as f64 + 0.5) / width as f64 * 2.0 - 1.0) * width as f64 / height as f64;
+            let v = 1.0 - ((index / width as usize) as f64 + 0.5) / height as f64 * 2.0;
+            let expected = if ton_metric::schwarzschild_geodesic_analytic_captured(bh, camera.position, camera.ray_direction(u, v)) {
+                captured += 1;
+                GpuTraceTermination::Captured
+            } else { GpuTraceTermination::Escaped };
+            assert_eq!(*termination, expected, "pixel={index}");
+            for component in 0..3 { maxima[component] = maxima[component].max(record[16 + component]); }
+        }
+        eprintln!("GPU camera chain {width}x{height}: captured={captured}, escaped={}, maxima={maxima:?}, executed_programs={}",
+            result.records.len() - captured, result.executed_program_hashes.len());
     }
 }

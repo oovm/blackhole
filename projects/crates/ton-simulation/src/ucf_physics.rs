@@ -111,7 +111,7 @@ pub fn camera_ray_ucf_vulkan_batch(camera: Camera, uv: &[(f64, f64)]) -> TonResu
     camera_ray_ucf_vulkan_batch_with_backend(&mut backend, camera, uv)
 }
 
-fn camera_ray_ucf_vulkan_batch_with_backend(
+pub(crate) fn camera_ray_ucf_vulkan_batch_with_backend(
     backend: &mut VulkanBackend,
     camera: Camera,
     uv: &[(f64, f64)],
