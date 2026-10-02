@@ -107,6 +107,16 @@ pub fn camera_ray_ucf_cpu_batch(camera: Camera, uv: &[(f64, f64)]) -> TonResult<
 /// 由 UCF Vulkan backend 从 UV 和相机参数生成归一化相机射线。
 pub fn camera_ray_ucf_vulkan_batch(camera: Camera, uv: &[(f64, f64)]) -> TonResult<Vec<Vec3>> {
     if uv.is_empty() { return Ok(Vec::new()); }
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
+    camera_ray_ucf_vulkan_batch_with_backend(&mut backend, camera, uv)
+}
+
+fn camera_ray_ucf_vulkan_batch_with_backend(
+    backend: &mut VulkanBackend,
+    camera: Camera,
+    uv: &[(f64, f64)],
+) -> TonResult<Vec<Vec3>> {
+    if uv.is_empty() { return Ok(Vec::new()); }
     let count = u32::try_from(uv.len()).map_err(|_| TonError::Domain("UV batch exceeds u32 capacity".into()))?;
     let program = ton_ucf_frontend::camera_ray_batch();
     let mut params = camera_uniforms(camera);
@@ -116,7 +126,6 @@ pub fn camera_ray_ucf_vulkan_batch(camera: Camera, uv: &[(f64, f64)]) -> TonResu
     let task = dispatch_task(22, &program, count, ResourceId(10), 2, 1, Some(ResourceId(11)), params)?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![ResourceNode { id: ResourceId(10), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) }, ResourceNode { id: ResourceId(11), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 2 * 4) }, ResourceNode { id: ResourceId(12), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 3 * 4) }] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan camera graph: {e}")))?;
-    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
     backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan camera graph: {e}")))?;
     let input = uv.iter().flat_map(|(u, v)| [*u as f32, *v as f32]).collect::<Vec<_>>();
     backend.write_f32(ResourceId(11), &input).map_err(|e| TonError::Domain(format!("upload UV: {e}")))?;
@@ -205,6 +214,17 @@ pub fn schwarzschild_initial_state_ucf_vulkan_batch_with_flags(
     critical_impact: f64,
     rays: &[(Vec3, Vec3)],
 ) -> TonResult<(Vec<SphericalState>, Vec<bool>)> {
+    if rays.is_empty() { return Ok((Vec::new(), Vec::new())); }
+    let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create Vulkan initial state backend: {error}")))?;
+    schwarzschild_initial_state_ucf_vulkan_batch_with_flags_backend(&mut backend, mass, critical_impact, rays)
+}
+
+fn schwarzschild_initial_state_ucf_vulkan_batch_with_flags_backend(
+    backend: &mut VulkanBackend,
+    mass: f64,
+    critical_impact: f64,
+    rays: &[(Vec3, Vec3)],
+) -> TonResult<(Vec<SphericalState>, Vec<bool>)> {
     if rays.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -237,7 +257,6 @@ pub fn schwarzschild_initial_state_ucf_vulkan_batch_with_flags(
         tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
     };
     graph.validate().map_err(|error| TonError::Domain(format!("Vulkan initial state graph: {error}")))?;
-    let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create Vulkan backend: {error}")))?;
     backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare Vulkan initial state graph: {error}")))?;
     backend.write_f32(ResourceId(1), &input).map_err(|error| TonError::Domain(format!("upload initial state rays: {error}")))?;
     backend.run_prepared(&graph).map_err(|error| TonError::Domain(format!("execute Vulkan initial state graph: {error}")))?;
@@ -953,13 +972,15 @@ pub fn schwarzschild_beauty_ucf_vulkan(
         .collect::<Vec<_>>();
     let count = u32::try_from(uv.len())
         .map_err(|_| TonError::Domain("Vulkan Beauty pixel count exceeds u32 capacity".into()))?;
-    let directions = camera_ray_ucf_vulkan_batch(camera, &uv)?;
+    let mut beauty_backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan Beauty backend: {e}")))?;
+    let directions = camera_ray_ucf_vulkan_batch_with_backend(&mut beauty_backend, camera, &uv)?;
     let rays = directions
         .iter()
         .copied()
         .map(|direction| (camera.position, direction))
         .collect::<Vec<_>>();
-    let (mut states, bound_flags) = schwarzschild_initial_state_ucf_vulkan_batch_with_flags(
+    let (mut states, bound_flags) = schwarzschild_initial_state_ucf_vulkan_batch_with_flags_backend(
+        &mut beauty_backend,
         bh.mass,
         bh.critical_impact_parameter(),
         &rays,
@@ -968,12 +989,11 @@ pub fn schwarzschild_beauty_ucf_vulkan(
     let mut disk_radii = vec![0.0; states.len()];
     let mut disk_dopplers = vec![1.0; states.len()];
     let mut statuses = vec![0u32; states.len()];
-    let mut geodesic_backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan Beauty geodesic backend: {e}")))?;
     let mut completed_steps = 0u32;
     while completed_steps < max_steps && statuses.iter().any(|status| *status == 0) {
         let chunk_steps = (max_steps - completed_steps).min(VULKAN_GEODESIC_CHUNK_STEPS);
         let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
-            &mut geodesic_backend,
+            &mut beauty_backend,
             bh.mass,
             &states,
             &bound_flags,
@@ -1031,20 +1051,16 @@ pub fn schwarzschild_beauty_ucf_vulkan(
             ]
         })
         .collect::<Vec<_>>();
-    let radiance = disk_radiance_ucf_vulkan_from_geodesic_state(
-        &state_buffer,
-        count,
-        inner_radius,
-        outer_radius,
-        bh.mass,
-        accretion_rate,
-    )?;
     let direction_buffer = directions
         .iter()
         .flat_map(|direction| [direction.x as f32, direction.y as f32, direction.z as f32])
         .collect::<Vec<_>>();
-    let composite = compose_sky_ucf_vulkan_batch(&direction_buffer, &state_buffer, &radiance, count)?;
-    let display = tone_map_ucf_vulkan_batch(&composite, count)?;
+    let post_graph = beauty_post_graph(count, inner_radius, outer_radius, bh.mass, accretion_rate)?;
+    beauty_backend.prepare(&post_graph).map_err(|e| TonError::Domain(format!("prepare Vulkan Beauty post graph: {e}")))?;
+    beauty_backend.write_f32(ResourceId(18), &state_buffer).map_err(|e| TonError::Domain(format!("upload Vulkan Beauty terminal states: {e}")))?;
+    beauty_backend.write_f32(ResourceId(22), &direction_buffer).map_err(|e| TonError::Domain(format!("upload Vulkan Beauty directions: {e}")))?;
+    beauty_backend.run_prepared(&post_graph).map_err(|e| TonError::Domain(format!("execute Vulkan Beauty post graph: {e}")))?;
+    let display = beauty_backend.read_f32(ResourceId(20)).map_err(|e| TonError::Domain(format!("read Vulkan Beauty display: {e}")))?;
     let expected = uv.len().saturating_mul(3);
     if display.len() != expected {
         return Err(TonError::Domain("Vulkan Beauty display buffer has invalid length".into()));
@@ -1062,6 +1078,40 @@ pub fn schwarzschild_beauty_ucf_vulkan(
         pixels,
         encoding: ton_renderer::FramebufferEncoding::Display,
     })
+}
+
+fn beauty_post_graph(count: u32, inner_radius: f64, outer_radius: f64, mass: f64, accretion_rate: f64) -> TonResult<Graph> {
+    let emission = dispatch_task(
+        35, &disk_shade_novikov_from_geodesic_batch(), count, ResourceId(19), 2, 1, Some(ResourceId(18)),
+        BTreeMap::from([
+            ("uniform_0".into(), ParamValue::F64(inner_radius)),
+            ("uniform_1".into(), ParamValue::F64(outer_radius)),
+            ("uniform_2".into(), ParamValue::F64(mass)),
+            ("uniform_3".into(), ParamValue::F64(accretion_rate)),
+        ]),
+    )?;
+    let composite = dispatch_task(
+        37, &compose_sky_batch(), count, ResourceId(25), 4, 1, Some(ResourceId(22)),
+        BTreeMap::from([
+            ("buffer_2".into(), ParamValue::I64(18)),
+            ("buffer_3".into(), ParamValue::I64(19)),
+        ]),
+    )?;
+    let tone_map = dispatch_task(36, &tone_map_aces_batch(), count, ResourceId(20), 2, 1, Some(ResourceId(25)), BTreeMap::new())?;
+    let graph = Graph {
+        resources: ResourceGraph {
+            nodes: [(18, 14, Access::Read), (22, 3, Access::Read), (19, 3, Access::ReadWrite), (25, 3, Access::ReadWrite), (20, 3, Access::Write)]
+                .into_iter()
+                .map(|(id, stride, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access,
+                    byte_size: Some(u64::from(count) * stride * 4),
+                })
+                .collect(),
+        },
+        tasks: TaskGraph { nodes: vec![emission, composite, tone_map], edges: ucf_ir::chain_edges(&[35, 37, 36]) },
+    };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan Beauty post graph: {e}")))?;
+    Ok(graph)
 }
 
 /// 从相机射线开始，依次执行 Vulkan 初态 Program 与 Vulkan 有界测地线 chunk。
@@ -1170,6 +1220,40 @@ pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vulkan_resident_beauty_post_matches_separate_stages_when_available() {
+        let mut backend = match VulkanBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => { eprintln!("Vulkan unavailable: {error}"); return; }
+        };
+        let count = 3;
+        let mut states = vec![0.0f32; count as usize * 14];
+        states[8] = 1.0;
+        states[14 + 8] = 2.0;
+        states[28 + 8] = 2.0;
+        states[28 + 10] = 1.0;
+        states[28 + 11] = 8.0;
+        states[28 + 12] = 1.1;
+        let directions = vec![0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        let radiance = disk_radiance_ucf_vulkan_from_geodesic_state(&states, count, 6.0, 30.0, 1.0, 1.0).unwrap();
+        let hdr = compose_sky_ucf_vulkan_batch(&directions, &states, &radiance, count).unwrap();
+        let expected = tone_map_ucf_vulkan_batch(&hdr, count).unwrap();
+        let graph = beauty_post_graph(count, 6.0, 30.0, 1.0, 1.0).unwrap();
+        assert_eq!(graph.tasks.topological_order().unwrap(), vec![TaskId(35), TaskId(37), TaskId(36)]);
+        backend.prepare(&graph).unwrap();
+        backend.write_f32(ResourceId(18), &states).unwrap();
+        backend.write_f32(ResourceId(22), &directions).unwrap();
+        for _ in 0..2 {
+            backend.run_prepared(&graph).unwrap();
+            let actual = backend.read_f32(ResourceId(20)).unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert!(actual.is_finite());
+                assert!((actual - expected).abs() < 1.0e-5, "actual={actual}, expected={expected}");
+            }
+        }
+    }
     use ton_metric::schwarzschild_geodesic_impact_parameter;
     #[test]
     fn reference_radial_step_is_available() { let state = RadialState { t: 0.0, r: 10.0, ut: 1.0, ur: -0.8 }; assert!((schwarzschild_radial_rk4_step_ucf_cpu(1.0, state, 0.01).unwrap().r - reference_radial_rk4_step(1.0, state, 0.01).r).abs() < 2e-6); }
