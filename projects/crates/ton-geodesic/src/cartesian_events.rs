@@ -1,7 +1,7 @@
 //! 笛卡尔接受步的球面与赤道平面交点参考。
 
 use ton_types::{TonError, TonResult};
-use crate::{schwarzschild_cartesian_null_rk4_step, CartesianAdaptiveRk4Step,
+use crate::{schwarzschild_cartesian_null_rk4_step, schwarzschild_cartesian_conserved_null_rk4_step, CartesianAdaptiveRk4Step,
     SchwarzschildCartesianNullState, SchwarzschildEventConfig, SchwarzschildStepEventKind};
 
 /// 未经投影的笛卡尔事件状态。
@@ -38,8 +38,12 @@ fn locate(start: SchwarzschildCartesianNullState, accepted: CartesianAdaptiveRk4
     for _ in 0..config.maximum_bisections() {
         let fraction = (lower + upper) * 0.5;
         let half_step = accepted.step_used * fraction * 0.5;
-        let half = schwarzschild_cartesian_null_rk4_step(config.mass(), start, half_step)?;
-        let state = schwarzschild_cartesian_null_rk4_step(config.mass(), half, half_step)?;
+        let advance = |state| match accepted.conserved_angular_squared {
+            Some(angular) => schwarzschild_cartesian_conserved_null_rk4_step(config.mass(), state, angular, half_step),
+            None => schwarzschild_cartesian_null_rk4_step(config.mass(), state, half_step),
+        };
+        let half = advance(start)?;
+        let state = advance(half)?;
         let value = surface(state, kind, config);
         if !value.is_finite() { return Err(TonError::Domain("nonfinite Cartesian event surface".into())); }
         if value.abs() <= config.surface_tolerance() {

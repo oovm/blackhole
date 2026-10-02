@@ -75,14 +75,15 @@ fn valid_position(mass: f64, position: Vec3) -> bool {
         && position.length() > 2.0 * mass
 }
 
-fn derivative(mass: f64, values: [f64; 8]) -> TonResult<[f64; 8]> {
+fn derivative(mass: f64, values: [f64; 8], conserved_angular: Option<f64>) -> TonResult<[f64; 8]> {
     let state = SchwarzschildCartesianNullState::from_components(values);
     if !valid_position(mass, state.position) || values.iter().any(|value| !value.is_finite()) || state.energy <= 0.0 {
         return Err(TonError::Domain("Cartesian null RK4 stage outside coordinate domain".into()));
     }
     let radius = state.position.length();
     let angular = state.angular_momentum();
-    let coefficient = -3.0 * mass * angular.dot(angular) / radius.powi(5);
+    let angular_squared = conserved_angular.unwrap_or_else(|| angular.dot(angular));
+    let coefficient = -3.0 * mass * angular_squared / radius.powi(5);
     let acceleration = state.position.scale(coefficient);
     Ok([state.energy / ((radius - 2.0 * mass) / radius),
         state.velocity.x, state.velocity.y, state.velocity.z, 0.0,
@@ -96,18 +97,33 @@ fn derivative(mass: f64, values: [f64; 8]) -> TonResult<[f64; 8]> {
 pub fn schwarzschild_cartesian_null_rk4_step(
     mass: f64, state: SchwarzschildCartesianNullState, step: f64,
 ) -> TonResult<SchwarzschildCartesianNullState> {
+    rk4_step(mass, state, step, None)
+}
+
+/// 用初始守恒 L² 作为中心力参数，不覆盖或投影任何状态分量。
+/// 实际角动量仍必须从 `position.cross(velocity)` 独立测量。
+pub fn schwarzschild_cartesian_conserved_null_rk4_step(
+    mass: f64, state: SchwarzschildCartesianNullState, angular_squared: f64, step: f64,
+) -> TonResult<SchwarzschildCartesianNullState> {
+    rk4_step(mass, state, step, Some(angular_squared))
+}
+
+fn rk4_step(mass: f64, state: SchwarzschildCartesianNullState, step: f64, angular: Option<f64>) -> TonResult<SchwarzschildCartesianNullState> {
     if !step.is_finite() || step <= 0.0 {
         return Err(TonError::Domain("invalid Cartesian null RK4 step".into()));
     }
+    if angular.is_some_and(|value| !value.is_finite() || value < 0.0) {
+        return Err(TonError::Domain("invalid conserved angular momentum squared".into()));
+    }
     let initial = state.components();
     let add = |slope: [f64; 8], scale: f64| std::array::from_fn(|index| initial[index] + scale * slope[index]);
-    let k1 = derivative(mass, initial)?;
-    let k2 = derivative(mass, add(k1, step * 0.5))?;
-    let k3 = derivative(mass, add(k2, step * 0.5))?;
-    let k4 = derivative(mass, add(k3, step))?;
+    let k1 = derivative(mass, initial, angular)?;
+    let k2 = derivative(mass, add(k1, step * 0.5), angular)?;
+    let k3 = derivative(mass, add(k2, step * 0.5), angular)?;
+    let k4 = derivative(mass, add(k3, step), angular)?;
     let next = std::array::from_fn(|index| initial[index]
         + step * (k1[index] + 2.0 * k2[index] + 2.0 * k3[index] + k4[index]) / 6.0);
-    derivative(mass, next)?;
+    derivative(mass, next, angular)?;
     Ok(SchwarzschildCartesianNullState::from_components(next))
 }
 
@@ -132,6 +148,38 @@ mod tests {
             assert!(actual.position.sub(expected.position).length() < 1.0e-10);
             assert!(actual.velocity.sub(expected.velocity).length() < 1.0e-10);
             assert!((actual.t - expected.t).abs() < 1.0e-10);
+        }
+    }
+
+    #[test]
+    fn conserved_force_matches_full_metric_without_projecting_state() {
+        let position = Vec3::new(12.0, 3.0, 5.0);
+        let direction = Vec3::new(-1.0, 0.2, -0.1);
+        let initial = SchwarzschildCartesianNullState::from_ray(1.0, position, direction).unwrap();
+        let angular = initial.angular_momentum();
+        let angular_squared = angular.dot(angular);
+        let mut errors = Vec::new();
+        for step in [0.04, 0.02] {
+            let mut actual = initial;
+            let mut expected = schwarzschild_geodesic_initial_state(1.0, position, direction).unwrap();
+            for _ in 0..(2.0 / step) as usize {
+                actual = schwarzschild_cartesian_conserved_null_rk4_step(1.0, actual, angular_squared, step).unwrap();
+                expected = schwarzschild_geodesic_rk4_step(1.0, expected, step);
+            }
+            let converted = SchwarzschildCartesianNullState::from_spherical(1.0, expected).unwrap();
+            let error = actual.position.sub(converted.position).length()
+                + actual.velocity.sub(converted.velocity).length() + (actual.t - converted.t).abs();
+            assert!(error < 1.0e-8, "step={step}, error={error}");
+            assert!(actual.null_residual(1.0) < 1.0e-10);
+            errors.push(error);
+        }
+        assert!(errors[1] < errors[0] * 0.2, "errors={errors:?}");
+        let perturbed = SchwarzschildCartesianNullState { velocity: initial.velocity.scale(1.01), ..initial };
+        let advanced = schwarzschild_cartesian_conserved_null_rk4_step(1.0, perturbed, angular_squared, 0.01).unwrap();
+        assert!(advanced.angular_momentum().sub(angular.scale(1.01)).length() < 1.0e-10);
+        assert!(advanced.angular_momentum().sub(angular).length() > 0.01);
+        for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(schwarzschild_cartesian_conserved_null_rk4_step(1.0, initial, invalid, 0.01).is_err());
         }
     }
 

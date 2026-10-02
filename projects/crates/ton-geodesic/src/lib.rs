@@ -26,7 +26,7 @@ pub use adaptive_rk4::{schwarzschild_adaptive_rk4_step, AdaptiveRk4Config, Adapt
 pub use adaptive_events::{schwarzschild_accepted_step_events, SchwarzschildEventConfig, SchwarzschildEventConfigBuilder, SchwarzschildStepEvent, SchwarzschildStepEventKind};
 pub use adaptive_trace::{schwarzschild_adaptive_trace, AdaptiveTraceDiskEvent, AdaptiveTraceTermination, SchwarzschildAdaptiveTraceConfig, SchwarzschildAdaptiveTraceConfigBuilder, SchwarzschildAdaptiveTraceResult};
 pub use null_energy::{schwarzschild_null_energy_rk4_step, SchwarzschildNullEnergyState};
-pub use cartesian_null::{schwarzschild_cartesian_null_rk4_step, SchwarzschildCartesianNullState};
+pub use cartesian_null::{schwarzschild_cartesian_null_rk4_step, schwarzschild_cartesian_conserved_null_rk4_step, SchwarzschildCartesianNullState};
 pub use cartesian_adaptive::{schwarzschild_cartesian_adaptive_rk4_step, CartesianAdaptiveRk4Step};
 pub use cartesian_events::{schwarzschild_cartesian_accepted_step_events, CartesianStepEvent};
 pub use cartesian_trace::{schwarzschild_cartesian_adaptive_trace, CartesianAdaptiveTraceResult, CartesianTraceDiskEvent};

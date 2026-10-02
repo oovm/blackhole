@@ -1,7 +1,7 @@
 //! 独立笛卡尔自适应追踪：有界积分、事件定位和不变量门禁。
 
 use ton_types::{TonError, TonResult};
-use crate::{schwarzschild_cartesian_adaptive_rk4_step, schwarzschild_cartesian_accepted_step_events,
+use crate::{schwarzschild_cartesian_accepted_step_events,
     AdaptiveTraceTermination, CartesianStepEvent, SchwarzschildAdaptiveTraceConfig,
     SchwarzschildCartesianNullState, SchwarzschildStepEventKind};
 
@@ -73,7 +73,7 @@ pub fn schwarzschild_cartesian_adaptive_trace(initial: SchwarzschildCartesianNul
     }
     let mut requested = config.initial_step();
     for step_index in 0..config.maximum_steps() {
-        let accepted = match schwarzschild_cartesian_adaptive_rk4_step(mass, result.state, requested, config.integration()) {
+        let accepted = match crate::cartesian_adaptive::adaptive_step(mass, result.state, requested, config.integration(), Some(angular_squared)) {
             Ok(accepted) => accepted,
             Err(error) => { result.termination = AdaptiveTraceTermination::IntegrationFailure; result.failure = Some(error.to_string()); return Ok(result); }
         };
