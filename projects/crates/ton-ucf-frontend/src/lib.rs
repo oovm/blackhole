@@ -728,9 +728,19 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
         ),
     );
     let active = |builder: &StructuredFunctionBuilder| {
+        let outside_capture = builder.binary(
+            BinOp::Gt,
+            Expr::LoadLocal(state[1]),
+            b(builder, BinOp::Mul, horizon.clone(), builder.const_f32(1.0001)),
+        );
+        let not_escaped = builder.select(
+            b(builder, BinOp::Eq, Expr::LoadLocal(bound_infall), builder.const_f32(0.0)),
+            b(builder, BinOp::Lt, Expr::LoadLocal(state[1]), builder.load_uniform(2)),
+            Expr::ConstBool(true),
+        );
         builder.select(
             builder.binary(BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0)),
-            builder.binary(BinOp::Gt, Expr::LoadLocal(state[1]), horizon.clone()),
+            builder.select(outside_capture, not_escaped, Expr::ConstBool(false)),
             Expr::ConstBool(false),
         )
     };
@@ -1285,6 +1295,23 @@ mod integration_tests {
         assert_eq!(output[10], Value::F32(1.0));
         let radius = output[11].as_f64().unwrap();
         assert!(radius > 11.8 && radius < 12.0, "crossing radius={radius}");
+    }
+
+    #[test]
+    fn geodesic_chunk_stops_at_capture_and_escape_boundaries() {
+        for (radius, radial_velocity, expected_status) in [(2.0001, -1.0, 1.0), (100.0, 1.0, 2.0)] {
+            let state = [0.0, radius, 1.0, 0.0, 1.0, radial_velocity, 0.0, 0.0, 0.0, 0.0]
+                .into_iter().map(Value::F32).collect::<Vec<_>>();
+            let mut interpreter = CpuInterpreter::new();
+            for (slot, value) in [1.0, 0.1, 100.0].into_iter().enumerate() {
+                interpreter.with_uniform(slot as u32, Value::F32(value));
+            }
+            interpreter.with_buffer(0, state.clone());
+            interpreter.run_parallel(&schwarzschild_geodesic_rk4_chunk(64), 1).unwrap();
+            let output = interpreter.buffer(0).unwrap();
+            assert_eq!(&output[..8], &state[..8]);
+            assert_eq!(output[8], Value::F32(expected_status));
+        }
     }
 
     #[test]

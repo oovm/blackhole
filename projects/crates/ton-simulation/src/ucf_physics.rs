@@ -1237,6 +1237,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vulkan_geodesic_chunk_stops_at_boundaries_when_available() {
+        let states = [2.0001, 100.0].map(|r| SphericalState {
+            t: 0.0, r, theta: 1.0, phi: 0.0, ut: 1.0,
+            ur: if r < 3.0 { -1.0 } else { 1.0 }, utheta: 0.0, uphi: 0.0,
+        });
+        let output = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+            1.0, &states, &[false; 2], &[false; 2], &[0.0; 2], &[1.0; 2],
+            6.0, 40.0, 0.1, 100.0, 64,
+        ).expect("Vulkan boundary termination");
+        for (index, (state, status, _, _, _)) in output.iter().enumerate() {
+            assert_eq!(*status, index as u32 + 1);
+            assert!((state.r - states[index].r).abs() < 1.0e-6);
+            assert_eq!(state.t, 0.0);
+            assert_eq!(state.ur, states[index].ur);
+        }
+    }
+
+    #[test]
     fn vulkan_disk_crossing_matches_reference_step_when_available() {
         let state = SphericalState { t: 0.0, r: 12.0, theta: 1.56, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.22, uphi: 0.01 };
         let expected = reference_geodesic_rk4_step(1.0, state, 0.1);
