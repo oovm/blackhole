@@ -37,6 +37,8 @@ mod radiance_composite;
 pub use radiance_composite::RadianceCompositeBuilder;
 mod bloom_extract;
 pub use bloom_extract::HdrBrightExtractBuilder;
+mod box_blur;
+pub use box_blur::UcfBoxBlur3x3Builder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
