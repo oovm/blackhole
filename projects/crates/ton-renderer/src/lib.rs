@@ -15,7 +15,7 @@ mod shadow_overlay;
 mod sky;
 
 pub use capture_ucf::{analytic_captured_ucf, CaptureClassifyUcf};
-pub use blueprint::{build_frame_graph, build_frame_graph_with_post, trace_kernel_for};
+pub use blueprint::{build_frame_graph, build_frame_graph_for_resolution, build_frame_graph_with_post, trace_kernel_for};
 pub use kernel::{attach_binding, KernelBinding, KernelInstance};
 pub use framebuffer::{Framebuffer, FramebufferEncoding};
 pub use post::{

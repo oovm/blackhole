@@ -1,7 +1,8 @@
 //! 单帧渲染 UCF 图。
 
 use ton_types::{DiskModelKind, IntegratorKind};
-use ucf_ir::{Domain, Graph, GraphBuilder};
+use ucf_ir::{Dispatch, Domain, Graph, GraphBuilder};
+use ucf_types::ParamValue;
 
 use crate::kernel::{annotate_frame_programs, trace_kernel, KernelInstance};
 
@@ -16,7 +17,7 @@ fn disk_shade_op(disk: DiskModelKind) -> &'static str {
 
 /// 构建一帧黑洞渲染的 UCF 任务链（默认无泛光）。
 pub fn build_frame_graph(integrator: IntegratorKind, disk: DiskModelKind) -> Graph {
-    build_frame_graph_with_post(integrator, disk, false)
+    build_frame_graph_for_resolution(integrator, disk, false, 1, 1)
 }
 
 /// 构建一帧黑洞渲染的 UCF 任务链；`bloom` 为真时插入 `ton_bloom` 任务。
@@ -25,6 +26,19 @@ pub fn build_frame_graph_with_post(
     disk: DiskModelKind,
     bloom: bool,
 ) -> Graph {
+    build_frame_graph_for_resolution(integrator, disk, bloom, 1, 1)
+}
+
+/// 按实际帧尺寸构建带资源布局和 dispatch 契约的 UCF 图。
+pub fn build_frame_graph_for_resolution(
+    integrator: IntegratorKind,
+    disk: DiskModelKind,
+    bloom: bool,
+    width: u32,
+    height: u32,
+) -> Graph {
+    let pixel_count = u64::from(width).saturating_mul(u64::from(height));
+    let pixel_count_u32 = width.saturating_mul(height);
     let mut b = GraphBuilder::new();
     b.buffer(1, Domain::Host);
     b.buffer(2, Domain::Host);
@@ -47,6 +61,44 @@ pub fn build_frame_graph_with_post(
         b.chain(&[10, 11, 12, 13, 14, 15]);
     }
     let mut graph = b.build();
+    let resource_sizes = [
+        (1, 256),
+        (2, pixel_count.saturating_mul(2 * 4)),
+        (3, pixel_count.saturating_mul(3 * 4)),
+        (4, pixel_count.saturating_mul(10 * 4)),
+        (5, pixel_count.saturating_mul(3 * 4)),
+        (6, pixel_count.saturating_mul(4)),
+    ];
+    for node in &mut graph.resources.nodes {
+        if let Some((_, byte_size)) = resource_sizes.iter().find(|(id, _)| *id == node.id.0) {
+            node.byte_size = Some(*byte_size);
+        }
+    }
+    let task_resources = [
+        (10, None, Some(1)),
+        (11, Some(2), Some(3)),
+        (12, Some(3), Some(4)),
+        (13, Some(4), Some(5)),
+        (14, Some(5), Some(if bloom { 5 } else { 6 })),
+        (15, Some(if bloom { 5 } else { 6 }), Some(6)),
+        (16, Some(6), Some(6)),
+    ];
+    for task in &mut graph.tasks.nodes {
+        task.dispatch = Dispatch::Explicit {
+            x: pixel_count_u32.max(1),
+            y: 1,
+            z: 1,
+        };
+        if let Some((_, input, output)) = task_resources.iter().find(|(id, _, _)| *id == task.id.0) {
+            if let Some(input) = input {
+                task.params.insert("input_resource".into(), ParamValue::I64(*input));
+            }
+            if let Some(output) = output {
+                task.params.insert("output_resource".into(), ParamValue::I64(*output));
+            }
+        }
+        task.params.insert("dispatch_x".into(), ParamValue::I64(i64::from(pixel_count_u32)));
+    }
     annotate_frame_programs(&mut graph, integrator, disk, bloom);
     graph
 }
@@ -267,5 +319,24 @@ mod tests {
             g.tasks.nodes[5].params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_tone_map"
         ));
+    }
+
+    #[test]
+    fn sized_graph_declares_pixel_dispatch_and_resource_buffers() {
+        let graph = build_frame_graph_for_resolution(
+            IntegratorKind::Geodesic3d,
+            DiskModelKind::NovikovThorneThin,
+            false,
+            16,
+            9,
+        );
+        let rays = graph.tasks.nodes.iter().find(|node| node.id.0 == 11).expect("ray task");
+        assert_eq!(rays.dispatch, Dispatch::Explicit { x: 144, y: 1, z: 1 });
+        assert_eq!(rays.params.get("input_resource"), Some(&ParamValue::I64(2)));
+        assert_eq!(rays.params.get("output_resource"), Some(&ParamValue::I64(3)));
+        assert_eq!(
+            graph.resources.nodes.iter().find(|node| node.id.0 == 3).expect("ray buffer").byte_size,
+            Some(144 * 3 * 4)
+        );
     }
 }

@@ -1,12 +1,16 @@
 use ton_disk::{AccretionDisk, DiskConfig};
 use ton_geodesic::TraceConfig;
 use ton_renderer::{
-    build_frame_graph_with_post, default_camera, default_integrator, Framebuffer, Graph,
+    apply_post_process, build_frame_graph_for_resolution, default_camera, default_integrator, Framebuffer, Graph,
     RenderConfig, RenderMode, RenderOutput, Renderer, DEFAULT_EXPOSURE,
 };
 use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
 
 use crate::ucf_cpu::{execute_frame_graph_cpu, CpuGraphExecution};
+use crate::ucf_physics::{
+    schwarzschild_capture_silhouette_ucf_cpu,
+    schwarzschild_capture_silhouette_ucf_vulkan,
+};
 
 #[derive(Debug, Clone)]
 pub struct Scene {
@@ -48,7 +52,13 @@ impl SceneBuilder {
             width: 640,
             height: 360,
             trace: TraceConfig::default(),
-            integrator: default_integrator(black_hole),
+            // cinematic 相机不是赤道二维轨道的适用域。默认使用可处理倾斜盘面的三维近似路径，
+            // 二维轨道积分器只通过 CLI 显式选择，用于赤道参考测试。
+            integrator: if black_hole.spin.abs() <= f64::EPSILON {
+                IntegratorKind::SemiClassicalRayMarch
+            } else {
+                default_integrator(black_hole)
+            },
             disk_model: DiskModelKind::NovikovThorneThin,
             post_bloom: false,
             render_mode: RenderMode::Beauty,
@@ -154,13 +164,41 @@ impl Scene {
     }
 
     pub fn build_ucf_graph(&self) -> Graph {
-        build_frame_graph_with_post(self.integrator, self.disk_model, self.post_bloom)
+        build_frame_graph_for_resolution(
+            self.integrator,
+            self.disk_model,
+            self.post_bloom,
+            self.width,
+            self.height,
+        )
     }
 
     /// UCF 帧图 CPU 参考路径：校验蓝图 `op` 后渲染一帧。
     pub fn render_frame_ucf_cpu(&self) -> TonResult<(Framebuffer, CpuGraphExecution)> {
         let graph = self.build_ucf_graph();
         execute_frame_graph_cpu(self, &graph)
+    }
+
+    /// 使用 CPU UCF interpreter 生成场景尺寸的捕获/逃逸剪影。
+    pub fn render_capture_silhouette_ucf_cpu(&self) -> TonResult<Framebuffer> {
+        schwarzschild_capture_silhouette_ucf_cpu(
+            self.black_hole,
+            self.camera,
+            self.width,
+            self.height,
+        )
+    }
+
+    /// 使用原生 Vulkan UCF backend 生成场景尺寸的捕获/逃逸剪影。
+    ///
+    /// Vulkan 不可用、程序能力不足或资源绑定失败时直接返回错误，不回退 CPU。
+    pub fn render_capture_silhouette_ucf_vulkan(&self) -> TonResult<Framebuffer> {
+        schwarzschild_capture_silhouette_ucf_vulkan(
+            self.black_hole,
+            self.camera,
+            self.width,
+            self.height,
+        )
     }
 
     pub fn render_frame(&self) -> Framebuffer {
@@ -174,7 +212,7 @@ impl Scene {
 
     /// 渲染线性 HDR 帧；`use_ucf_kernels` 为真时射线生成与 Novikov 盘面走 UCF 解释器。
     pub fn render_frame_with_histogram_opts(&self, use_ucf_kernels: bool) -> RenderOutput {
-        Renderer::new(RenderConfig {
+        let mut output = Renderer::new(RenderConfig {
             width: self.width,
             height: self.height,
             black_hole: self.black_hole,
@@ -189,6 +227,43 @@ impl Scene {
             use_ucf_shade: use_ucf_kernels,
             use_ucf_rays: use_ucf_kernels,
         })
-        .render_with_histogram()
+        .render_with_histogram();
+        if self.post_bloom && self.render_mode == RenderMode::Beauty {
+            apply_post_process(&mut output.framebuffer, true);
+        }
+        output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ton_types::BlackHole;
+
+    #[test]
+    fn scene_exposes_cpu_ucf_silhouette() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_resolution(16, 9)
+            .build();
+        let frame = scene.render_capture_silhouette_ucf_cpu().expect("CPU UCF silhouette");
+        assert_eq!((frame.width, frame.height), (16, 9));
+        assert_eq!(frame.pixels.len(), 16 * 9);
+    }
+
+    #[test]
+    fn scene_cpu_and_vulkan_ucf_silhouettes_match_when_available() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_resolution(16, 9)
+            .build();
+        let cpu = scene.render_capture_silhouette_ucf_cpu().expect("CPU UCF silhouette");
+        let gpu = match scene.render_capture_silhouette_ucf_vulkan() {
+            Ok(value) => value,
+            Err(error) if error.to_string().contains("create Vulkan backend") => {
+                eprintln!("skip scene Vulkan silhouette parity test: {error}");
+                return;
+            }
+            Err(error) => panic!("scene Vulkan UCF silhouette: {error}"),
+        };
+        assert_eq!(cpu.pixels, gpu.pixels);
     }
 }
