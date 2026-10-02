@@ -703,6 +703,7 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
         )
     });
     let disk_radius = detect_disk.then(|| builder.let_value(ucf_program::Ty::f32(), builder.const_f32(0.0)));
+    let disk_doppler = detect_disk.then(|| builder.let_value(ucf_program::Ty::f32(), builder.const_f32(1.0)));
     let mass = builder.load_uniform(0);
     let step = builder.load_uniform(1);
     let horizon = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
@@ -768,7 +769,36 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
             let next_abs = b(builder, BinOp::Max, next_z.clone(), u(builder, UnOp::Neg, next_z));
             let alpha = b(builder, BinOp::Div, previous_abs.clone(), b(builder, BinOp::Add, previous_abs, next_abs));
             let radius_delta = b(builder, BinOp::Sub, Expr::LoadLocal(state[1]), values[1].clone());
-            let crossing_radius = b(builder, BinOp::Add, values[1].clone(), b(builder, BinOp::Mul, alpha, radius_delta));
+            let crossing_radius = b(builder, BinOp::Add, values[1].clone(), b(builder, BinOp::Mul, alpha.clone(), radius_delta));
+            let prev_sin_theta = u(builder, UnOp::Sin, values[2].clone());
+            let prev_cos_theta = u(builder, UnOp::Cos, values[2].clone());
+            let prev_sin_phi = u(builder, UnOp::Sin, values[3].clone());
+            let prev_cos_phi = u(builder, UnOp::Cos, values[3].clone());
+            let dx = b(builder, BinOp::Add,
+                b(builder, BinOp::Mul, values[5].clone(), b(builder, BinOp::Mul, prev_sin_theta.clone(), prev_cos_phi.clone())),
+                b(builder, BinOp::Sub,
+                    b(builder, BinOp::Mul, b(builder, BinOp::Mul, values[1].clone(), values[6].clone()), b(builder, BinOp::Mul, prev_cos_theta.clone(), prev_cos_phi.clone())),
+                    b(builder, BinOp::Mul, b(builder, BinOp::Mul, b(builder, BinOp::Mul, values[1].clone(), prev_sin_theta.clone()), prev_sin_phi.clone()), values[7].clone())));
+            let dy = b(builder, BinOp::Add,
+                b(builder, BinOp::Mul, values[5].clone(), b(builder, BinOp::Mul, prev_sin_theta.clone(), prev_sin_phi.clone())),
+                b(builder, BinOp::Add,
+                    b(builder, BinOp::Mul, b(builder, BinOp::Mul, values[1].clone(), values[6].clone()), b(builder, BinOp::Mul, prev_cos_theta, prev_sin_phi)),
+                    b(builder, BinOp::Mul, b(builder, BinOp::Mul, b(builder, BinOp::Mul, values[1].clone(), prev_sin_theta.clone()), prev_cos_phi.clone()), values[7].clone())));
+            let dz = b(builder, BinOp::Sub,
+                b(builder, BinOp::Mul, values[5].clone(), u(builder, UnOp::Cos, values[2].clone())),
+                b(builder, BinOp::Mul, b(builder, BinOp::Mul, values[1].clone(), u(builder, UnOp::Sin, values[2].clone())), values[6].clone()));
+            let tangent_length = u(builder, UnOp::Sqrt, b(builder, BinOp::Add,
+                b(builder, BinOp::Add, b(builder, BinOp::Mul, dx.clone(), dx.clone()), b(builder, BinOp::Mul, dy.clone(), dy.clone())),
+                b(builder, BinOp::Mul, dz.clone(), dz.clone())));
+            let phi_delta = b(builder, BinOp::Sub, Expr::LoadLocal(state[3]), values[3].clone());
+            let crossing_phi = b(builder, BinOp::Add, values[3].clone(), b(builder, BinOp::Mul, alpha.clone(), phi_delta));
+            let incoming_x = b(builder, BinOp::Div, u(builder, UnOp::Neg, dx), tangent_length.clone());
+            let incoming_y = b(builder, BinOp::Div, u(builder, UnOp::Neg, dy), tangent_length);
+            let cos_view = b(builder, BinOp::Add,
+                b(builder, BinOp::Mul, u(builder, UnOp::Neg, u(builder, UnOp::Sin, crossing_phi.clone())), incoming_x),
+                b(builder, BinOp::Mul, u(builder, UnOp::Cos, crossing_phi), incoming_y));
+            let denominator = b(builder, BinOp::Max, builder.const_f32(0.05), b(builder, BinOp::Sub, builder.const_f32(1.0), b(builder, BinOp::Mul, cos_view, builder.const_f32(0.35))));
+            let computed_doppler = b(builder, BinOp::Min, builder.const_f32(4.0), b(builder, BinOp::Max, builder.const_f32(0.25), b(builder, BinOp::Div, builder.const_f32(1.0), denominator)));
             let in_range = builder.select(
                 b(builder, BinOp::Ge, crossing_radius.clone(), builder.load_uniform(3)),
                 b(builder, BinOp::Le, crossing_radius.clone(), builder.load_uniform(4)),
@@ -782,7 +812,11 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
             );
             builder.store_local(
                 *disk_radius.as_ref().expect("disk radius local"),
-                builder.select(record, crossing_radius, Expr::LoadLocal(*disk_radius.as_ref().expect("disk radius local"))),
+                builder.select(record.clone(), crossing_radius, Expr::LoadLocal(*disk_radius.as_ref().expect("disk radius local"))),
+            );
+            builder.store_local(
+                *disk_doppler.as_ref().expect("disk doppler local"),
+                builder.select(record, computed_doppler, Expr::LoadLocal(*disk_doppler.as_ref().expect("disk doppler local"))),
             );
         }
         let mut finite = builder.unary(UnOp::IsFinite, Expr::LoadLocal(state[0]));
@@ -833,7 +867,7 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
     if detect_disk {
         builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(10)), Expr::LoadLocal(*disk_hit.as_ref().expect("disk hit local")));
         builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(11)), Expr::LoadLocal(*disk_radius.as_ref().expect("disk radius local")));
-        builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(12)), builder.const_f32(1.0));
+        builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(12)), Expr::LoadLocal(*disk_doppler.as_ref().expect("disk doppler local")));
         builder.store_buffer(0, b(&builder, BinOp::Add, base, builder.const_u32(13)), builder.const_f32(0.0));
     }
     ProgramBuilder::new().structured_entry(builder, ucf_program::Ty::f32(), Expr::LoadLocal(state[0])).expect("valid structured integration builder").finish().expect("valid structured integration program")
