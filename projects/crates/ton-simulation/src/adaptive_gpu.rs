@@ -309,6 +309,51 @@ mod tests {
     use super::*;
     use ton_types::Vec3;
 
+    #[test]
+    fn blackbody_spectrum_vulkan_matches_independent_si_reference() {
+        let inputs = [[6000.0f32, 500.0, 1.0], [6000.0, 500.0, 0.7], [6000.0, 500.0, 2.0],
+            [10000.0, 700.0, 1.0], [6000.0, 0.000001, 1.0], [1.0, 1000000.0, 1.0],
+            [0.0, 500.0, 1.0], [6000.0, 500.0, -1.0]];
+        let count = inputs.len() as u32;
+        let program = ton_ucf_frontend::BlackbodySpectrumBuilder::new().build().unwrap();
+        let task = crate::ucf_physics::dispatch_task(74, &program, count, ResourceId(53), 2, 1,
+            Some(ResourceId(51)), BTreeMap::from([("buffer_2".into(), ParamValue::I64(52))])).unwrap();
+        let graph = Graph { resources: ResourceGraph { nodes: [(51, 3, Access::Read), (52, 2, Access::Write), (53, 1, Access::Write)]
+            .into_iter().map(|(id, stride, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
+                domain: Domain::Vram, access, byte_size: Some(u64::from(count) * stride * 4) }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+        graph.validate().unwrap();
+        let mut backend = VulkanBackend::new().unwrap();
+        backend.prepare(&graph).unwrap();
+        backend.write_f32(ResourceId(51), &inputs.iter().flatten().copied().collect::<Vec<_>>()).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        let output = backend.read_f32(ResourceId(52)).unwrap();
+        let returns = backend.read_f32(ResourceId(53)).unwrap();
+        assert_eq!(output.len(), inputs.len() * 2);
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        cpu.with_buffer(1, inputs.iter().flatten().copied().map(ton_ucf_frontend::Value::F32).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); inputs.len() * 2]);
+        cpu.run_parallel(&program, count).unwrap();
+        let cpu = cpu.buffer(2).unwrap();
+        for (index, (input, actual)) in inputs.iter().zip(output.chunks_exact(2)).enumerate() {
+            assert_eq!(actual[1], returns[index]);
+            assert_eq!(actual[1] as f64, cpu[index * 2 + 1].as_f64().unwrap());
+            let expected = ton_geodesic::observed_blackbody_spectral_radiance(input[0] as f64,
+                input[1] as f64 * 1.0e12, input[2] as f64);
+            match expected {
+                Err(_) => assert_eq!(actual, &[0.0, 2.0]),
+                Ok(expected) => {
+                    assert_eq!(actual[1], 1.0);
+                    if expected == 0.0 { assert_eq!(actual[0], 0.0); }
+                    else {
+                        assert!((actual[0] as f64 / expected - 1.0).abs() < 2.0e-5, "input={input:?}, GPU={actual:?}, reference={expected}");
+                        assert!((cpu[index * 2].as_f64().unwrap() / expected - 1.0).abs() < 2.0e-5);
+                    }
+                }
+            }
+        }
+    }
+
     fn initial(angle: f64) -> SphericalState {
         ton_geodesic::schwarzschild_geodesic_initial_state(1.0, Vec3::new(24.0, 0.0, 0.0),
             Vec3::new(-angle.cos(), angle.sin(), 0.0)).unwrap()
