@@ -211,4 +211,38 @@ mod tests {
         }
         assert!(!result.executed_program_hashes.is_empty());
     }
+
+    #[test]
+    fn adaptive_gpu_small_frame_matches_independent_reference() {
+        let camera = ton_types::Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let (width, height) = (16, 9);
+        let uv = (0..height).flat_map(|y| (0..width).map(move |x|
+            (((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * width as f64 / height as f64,
+             1.0 - (y as f64 + 0.5) / height as f64 * 2.0))).collect::<Vec<_>>();
+        let directions = crate::ucf_physics::camera_ray_ucf_vulkan_batch(camera, &uv).unwrap();
+        let rays = directions.iter().map(|direction| (camera.position, *direction)).collect::<Vec<_>>();
+        let states = crate::ucf_physics::schwarzschild_initial_state_ucf_vulkan_batch(1.0,
+            3.0 * 3.0f64.sqrt(), &rays).unwrap();
+        let result = SchwarzschildGpuTraceBuilder::new(1.0).execute(&states).unwrap();
+        let mut captured = 0;
+        let mut escaped = 0;
+        for (index, ((u, v), termination)) in uv.iter().zip(&result.terminations).enumerate() {
+            let reference_state = ton_geodesic::schwarzschild_geodesic_initial_state(1.0,
+                camera.position, camera.ray_direction(*u, *v)).unwrap();
+            let reference = ton_geodesic::schwarzschild_adaptive_trace(reference_state,
+                ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).build().unwrap()).unwrap();
+            let expected = match reference.termination {
+                ton_geodesic::AdaptiveTraceTermination::Captured => { captured += 1; GpuTraceTermination::Captured },
+                ton_geodesic::AdaptiveTraceTermination::Escaped => { escaped += 1; GpuTraceTermination::Escaped },
+                other => panic!("reference pixel={index} termination={other:?}"),
+            };
+            let record = &result.records[index];
+            assert_eq!(*termination, expected, "pixel={index}, record={record:?}");
+            assert!(record[16] < 1.0e-3, "pixel={index}, null={}", record[16]);
+            assert!(record[17] < 1.0e-3, "pixel={index}, energy={}", record[17]);
+            assert!(record[18] < 2.0e-3, "pixel={index}, angular={}", record[18]);
+        }
+        eprintln!("adaptive GPU frame {width}x{height}: captured={captured}, escaped={escaped}, dispatches={}", result.executed_program_hashes.len());
+        assert!(captured > 0 && escaped > 0);
+    }
 }
