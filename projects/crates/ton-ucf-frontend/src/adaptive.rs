@@ -52,10 +52,30 @@ pub(crate) fn snapshot(builder: &mut StructuredFunctionBuilder, values: [Expr; 8
     values.map(|value| Expr::LoadLocal(builder.let_value(Ty::f32(), value)))
 }
 
-pub(crate) fn rk4_model(builder: &mut StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr, step: Expr, null_energy: bool) -> [Expr; 8] {
+#[derive(Clone, Copy)]
+pub(crate) enum IntegrationModel { Spherical, NullEnergy, CartesianNull }
+
+impl From<bool> for IntegrationModel {
+    fn from(null_energy: bool) -> Self { if null_energy { Self::NullEnergy } else { Self::Spherical } }
+}
+
+impl IntegrationModel {
+    fn radius(self, builder: &StructuredFunctionBuilder, state: &[Expr; 8]) -> Expr {
+        match self {
+            Self::CartesianNull => super::cartesian_null::radius(builder, state),
+            _ => state[1].clone(),
+        }
+    }
+}
+
+pub(crate) fn rk4_model(builder: &mut StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr, step: Expr, model: impl Into<IntegrationModel>) -> [Expr; 8] {
+    let model = model.into();
     let derivative = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr| {
-        if null_energy { super::null_energy::derivative(builder, values, mass) }
-        else { schwarzschild_derivative(builder, values, mass) }
+        match model {
+            IntegrationModel::NullEnergy => super::null_energy::derivative(builder, values, mass),
+            IntegrationModel::CartesianNull => super::cartesian_null::derivative(builder, values, mass),
+            IntegrationModel::Spherical => schwarzschild_derivative(builder, values, mass),
+        }
     };
     let half_step = b(builder, BinOp::Mul, step.clone(), builder.const_f32(0.5));
     let k1 = snapshot(builder, derivative(builder, values, mass));
@@ -125,8 +145,9 @@ pub(crate) fn emit_integration(
 
 pub(crate) fn emit_integration_model(
     builder: &mut StructuredFunctionBuilder, initial: [Expr; 8], request: Expr,
-    uniforms: [Expr; 5], maximum_steps: u32, maximum_retries: u32, null_energy: bool,
+    uniforms: [Expr; 5], maximum_steps: u32, maximum_retries: u32, model: impl Into<IntegrationModel>,
 ) -> [Expr; 13] {
+        let model = model.into();
         let [mass, absolute, relative, minimum, maximum] = uniforms;
         let mut valid = Expr::ConstBool(true);
         for value in initial.iter().chain([&request, &mass, &absolute, &relative, &minimum, &maximum]) {
@@ -137,7 +158,7 @@ pub(crate) fn emit_integration_model(
         }
         valid = and(&builder, valid, b(&builder, BinOp::Ge, relative.clone(), builder.const_f32(0.0)));
         valid = and(&builder, valid, b(&builder, BinOp::Ge, maximum.clone(), minimum.clone()));
-        valid = and(&builder, valid, b(&builder, BinOp::Gt, initial[1].clone(), b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())));
+        valid = and(&builder, valid, b(&builder, BinOp::Gt, model.radius(builder, &initial), b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())));
         let status = builder.let_value(Ty::f32(), builder.select(valid, builder.const_f32(0.0), builder.const_f32(4.0)));
         let step = builder.let_value(Ty::f32(), b(&builder, BinOp::Min, maximum.clone(), b(&builder, BinOp::Max, minimum.clone(), request)));
         let used = builder.let_value(Ty::f32(), builder.const_f32(0.0));
@@ -149,15 +170,15 @@ pub(crate) fn emit_integration_model(
         builder.bounded_while(can_advance, maximum_steps, |builder| {
         let initial = snapshot(builder, output.map(Expr::LoadLocal));
         builder.store_local(status, builder.select(
-            b(builder, BinOp::Gt, initial[1].clone(), b(builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())),
+            b(builder, BinOp::Gt, model.radius(builder, &initial), b(builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())),
             builder.const_f32(0.0), builder.const_f32(4.0),
         ));
         let running = b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0));
         builder.bounded_while(running, maximum_retries + 1, |builder| {
             let current_step = Expr::LoadLocal(step);
-            let full = rk4_model(builder, &initial, &mass, current_step.clone(), null_energy);
-            let half = rk4_model(builder, &initial, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)), null_energy);
-            let refined = rk4_model(builder, &half, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)), null_energy);
+            let full = rk4_model(builder, &initial, &mass, current_step.clone(), model);
+            let half = rk4_model(builder, &initial, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)), model);
+            let refined = rk4_model(builder, &half, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)), model);
             let mut ratio = builder.const_f32(0.0);
             let mut finite = Expr::ConstBool(true);
             for index in 0..8 {

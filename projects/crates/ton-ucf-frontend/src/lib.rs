@@ -9,6 +9,8 @@ mod events;
 pub use events::SchwarzschildEventLocalizationBuilder;
 mod adaptive_trace;
 mod null_energy;
+mod cartesian_null;
+pub use cartesian_null::SchwarzschildCartesianAdaptiveChunkBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
