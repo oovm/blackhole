@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 
 mod dispatch;
+mod adaptive_rk4;
 mod diagnostic_dispatch;
 mod geodesic3d;
 mod kerr_equatorial;
@@ -14,6 +15,7 @@ mod termination;
 mod trace;
 
 pub use dispatch::trace_ray;
+pub use adaptive_rk4::{schwarzschild_adaptive_rk4_step, AdaptiveRk4Config, AdaptiveRk4ConfigBuilder, AdaptiveRk4Step};
 pub use radiance_dispatch::{trace_ray_radiance, trace_ray_radiance_result};
 pub use diagnostic_dispatch::trace_ray_diagnostic;
 pub use geodesic3d::{

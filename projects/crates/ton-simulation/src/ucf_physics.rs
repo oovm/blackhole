@@ -1237,6 +1237,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn adaptive_polar_reference_escapes_with_bounded_null_residual() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let u = ((39.5 / 128.0) * 2.0 - 1.0) * (128.0 / 72.0);
+        let v = 1.0 - (0.5 / 72.0) * 2.0;
+        let mut state = schwarzschild_geodesic_initial_state(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
+        let config = ton_geodesic::AdaptiveRk4Config::builder().build().unwrap();
+        let mut step = 0.08;
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut residual = 0.0f64;
+        let mut minimum_step = step;
+        while state.r < 80.0 && accepted < 20_000 {
+            let report = ton_geodesic::schwarzschild_adaptive_rk4_step(1.0, state, step, config).unwrap();
+            assert!(report.error_ratio <= 1.0);
+            state = report.state;
+            step = report.next_step;
+            minimum_step = minimum_step.min(report.step_used);
+            accepted += 1;
+            rejected += report.rejections;
+            let f = 1.0 - 2.0 / state.r;
+            let temporal = f * state.ut * state.ut;
+            let spatial = state.ur * state.ur / f + state.r * state.r *
+                (state.utheta * state.utheta + state.theta.sin().powi(2) * state.uphi * state.uphi);
+            let relative = ((spatial - temporal) / (spatial.abs() + temporal.abs())).abs();
+            assert!(relative.is_finite());
+            residual = residual.max(relative);
+        }
+        eprintln!("adaptive reference accepted={accepted}, rejected={rejected}, minimum_step={minimum_step}, max_null_residual={residual}");
+        assert!(state.r >= 80.0 && accepted < 20_000);
+        assert!(rejected > 0 && minimum_step < 0.005);
+        assert!(residual < 1.0e-3, "adaptive null residual={residual}");
+    }
+
+    #[test]
     fn polar_scattering_reference_converges_under_step_refinement() {
         let bh = BlackHole::schwarzschild(1.0);
         let camera = Camera::cinematic(bh);
