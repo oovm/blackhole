@@ -846,10 +846,15 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
                 Expr::ConstBool(false),
             );
         }
+        let finite = builder.let_value(ucf_program::Ty::Scalar(ucf_program::ScalarTy::Bool), finite);
+        let finite = Expr::LoadLocal(finite);
         builder.store_local(
             status,
-            builder.select(finite, Expr::LoadLocal(status), builder.const_f32(4.0)),
+            builder.select(finite.clone(), Expr::LoadLocal(status), builder.const_f32(4.0)),
         );
+        for index in 0..8 {
+            builder.store_local(state[index], builder.select(finite.clone(), Expr::LoadLocal(state[index]), values[index].clone()));
+        }
     });
     let r = Expr::LoadLocal(state[1]);
     let rs = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
@@ -1312,6 +1317,21 @@ mod integration_tests {
             assert_eq!(&output[..8], &state[..8]);
             assert_eq!(output[8], Value::F32(expected_status));
         }
+    }
+
+    #[test]
+    fn geodesic_chunk_preserves_last_finite_state_on_step_failure() {
+        let state = [0.0, 4.0, 1.0, 0.0, 1.0, -0.5, 0.0, 0.0, 0.0, 0.0]
+            .into_iter().map(Value::F32).collect::<Vec<_>>();
+        let mut interpreter = CpuInterpreter::new();
+        for (slot, value) in [1.0, f32::INFINITY, 100.0].into_iter().enumerate() {
+            interpreter.with_uniform(slot as u32, Value::F32(value));
+        }
+        interpreter.with_buffer(0, state.clone());
+        interpreter.run_parallel(&schwarzschild_geodesic_rk4_chunk(4), 1).unwrap();
+        let output = interpreter.buffer(0).unwrap();
+        assert_eq!(output[8], Value::F32(4.0));
+        assert_eq!(&output[..8], &state[..8]);
     }
 
     #[test]

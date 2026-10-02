@@ -1237,6 +1237,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vulkan_geodesic_failure_preserves_last_finite_state() {
+        let state = SphericalState { t: 0.0, r: 4.0, theta: 1.0, phi: 0.0, ut: 1.0, ur: -0.5, utheta: 0.0, uphi: 0.0 };
+        let output = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+            1.0, &[state], &[false], &[false], &[0.0], &[1.0],
+            6.0, 40.0, f64::INFINITY, 100.0, 4,
+        ).expect("Vulkan numerical failure report");
+        assert_eq!(output[0].1, 4);
+        let actual = output[0].0;
+        assert_eq!(
+            [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi],
+            [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi],
+        );
+    }
+
+    #[test]
     fn vulkan_geodesic_chunk_stops_at_boundaries_when_available() {
         let states = [2.0001, 100.0].map(|r| SphericalState {
             t: 0.0, r, theta: 1.0, phi: 0.0, ut: 1.0,
