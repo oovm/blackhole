@@ -77,7 +77,23 @@ pub fn execute_disk_shade_program_cpu(
     let disk = scene
         .disk
         .ok_or_else(|| TonError::Domain("disk shade CPU program requires a disk configuration".into()))?;
-    let task = program_task(graph, "disk_shade_novikov_batch")?;
+    let task = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.params.get("program_name"),
+                Some(ParamValue::Str(name))
+                    if name == "disk_shade_novikov_batch"
+                        || name == "disk_shade_novikov_from_geodesic_batch"
+            )
+        })
+        .ok_or_else(|| TonError::Domain("UCF disk shade program is missing".into()))?;
+    let state_input = matches!(
+        task.params.get("program_name"),
+        Some(ParamValue::Str(name)) if name == "disk_shade_novikov_from_geodesic_batch"
+    );
     let ParamValue::Program { hash, body, .. } = task
         .params
         .get("program")
@@ -101,10 +117,12 @@ pub fn execute_disk_shade_program_cpu(
         Some(ParamValue::I64(id)) => *id as u32,
         _ => return Err(TonError::Domain("disk shade output resource binding is missing".into())),
     };
-    if input_resource != 7 || output_resource != 8 {
+    let expected_input_resource = if state_input { 4 } else { 7 };
+    if input_resource != expected_input_resource || output_resource != 8 {
         return Err(TonError::Domain("disk shade resource contract is invalid".into()));
     }
-    if task.params.get("input_stride_f32") != Some(&ParamValue::I64(2))
+    let expected_input_stride = if state_input { 14 } else { 2 };
+    if task.params.get("input_stride_f32") != Some(&ParamValue::I64(expected_input_stride))
         || task.params.get("output_stride_f32") != Some(&ParamValue::I64(3))
     {
         return Err(TonError::Domain("disk shade buffer stride contract is invalid".into()));
@@ -116,10 +134,22 @@ pub fn execute_disk_shade_program_cpu(
     if dispatch != samples.len() as u32 {
         return Err(TonError::Domain("disk shade dispatch does not match sample count".into()));
     }
-    let input = samples
-        .iter()
-        .flat_map(|(radius, doppler)| [Value::F32(*radius as f32), Value::F32(*doppler as f32)])
-        .collect::<Vec<_>>();
+    let input = if state_input {
+        samples
+            .iter()
+            .flat_map(|(radius, doppler)| {
+                let mut state = vec![Value::F32(0.0); 14];
+                state[11] = Value::F32(*radius as f32);
+                state[12] = Value::F32(*doppler as f32);
+                state
+            })
+            .collect::<Vec<_>>()
+    } else {
+        samples
+            .iter()
+            .flat_map(|(radius, doppler)| [Value::F32(*radius as f32), Value::F32(*doppler as f32)])
+            .collect::<Vec<_>>()
+    };
     let report = CpuBackend::new()
         .execute_program_with_buffers(
             &program,
@@ -552,6 +582,66 @@ pub fn execute_geodesic_diagnostic_frame_cpu(
     Ok((frame, CpuGraphExecution { executed_ops }))
 }
 
+/// 执行真实 UCF 测地线与 state-backed 盘面着色，返回线性 radiance buffer。
+///
+/// 该入口用于验证物理状态资源到盘面 Program 的连接，不包含 tone map、Bloom
+/// 或显示格式转换，因此不能被当作 Beauty 渲染结果。
+pub fn execute_geodesic_disk_radiance_cpu(
+    scene: &Scene,
+    graph: &Graph,
+) -> TonResult<(Vec<Rgb>, CpuGraphExecution)> {
+    if scene.integrator != IntegratorKind::Geodesic3d
+        || scene.disk_model != DiskModelKind::NovikovThorneThin
+    {
+        return Err(TonError::Domain("UCF disk radiance requires Geodesic3d Novikov graph".into()));
+    }
+    let initial = execute_initial_state_program_cpu(scene, graph)?;
+    let count = initial.states.len();
+    let mut states = initial.states;
+    let bound_infall = initial.bound_infall;
+    let mut disk_hits = vec![false; count];
+    let mut disk_radii = vec![0.0; count];
+    let mut disk_dopplers = vec![1.0; count];
+    let chunk_count = scene.trace.max_steps.div_ceil(16).max(1);
+    let mut executed_ops = vec![
+        "camera_ray_batch".to_string(),
+        "schwarzschild_initial_state_batch".to_string(),
+    ];
+    for _ in 0..chunk_count {
+        let result = execute_geodesic_chunk_program_cpu_with_state(
+            scene,
+            graph,
+            states,
+            bound_infall.clone(),
+            disk_hits,
+            disk_radii,
+            disk_dopplers,
+        )?;
+        states = result.states;
+        disk_hits = result.disk_hits;
+        disk_radii = result.disk_radii;
+        disk_dopplers = result.disk_dopplers;
+        executed_ops.push("schwarzschild_geodesic_rk4_chunk_with_disk".to_string());
+        if result.statuses.iter().all(|status| *status != 0) {
+            break;
+        }
+    }
+    let samples = disk_hits
+        .iter()
+        .zip(disk_radii.iter().zip(&disk_dopplers))
+        .map(|(hit, (radius, doppler))| {
+            if *hit {
+                (*radius, *doppler)
+            } else {
+                (0.0, 1.0)
+            }
+        })
+        .collect::<Vec<_>>();
+    let radiance = execute_disk_shade_program_cpu(scene, graph, &samples)?;
+    executed_ops.push("disk_shade_novikov_from_geodesic_batch".to_string());
+    Ok((radiance, CpuGraphExecution { executed_ops }))
+}
+
 fn task_op(graph: &Graph, task_id: u64) -> TonResult<&str> {
     let node = graph
         .tasks
@@ -644,8 +734,8 @@ mod tests {
         let scene = Scene::builder(BlackHole::schwarzschild(1.0))
             .with_integrator(IntegratorKind::Geodesic3d)
             .with_render_mode(ton_renderer::RenderMode::TerminationMap)
-            .with_resolution(8, 5)
-            .with_max_steps(32)
+            .with_resolution(1, 1)
+            .with_max_steps(16)
             .build();
         let (frame, report) = scene.render_frame_ucf_cpu().expect("real UCF diagnostic frame");
         assert_eq!((frame.width, frame.height), (8, 5));
@@ -755,5 +845,23 @@ mod tests {
             assert!((rgb.g - expected.g).abs() < 2e-4);
             assert!((rgb.b - expected.b).abs() < 2e-4);
         }
+    }
+
+    #[test]
+    fn cpu_graph_connects_geodesic_state_to_disk_radiance_program() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_default_disk()
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_resolution(1, 1)
+            .with_max_steps(1)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let (radiance, report) = execute_geodesic_disk_radiance_cpu(&scene, &graph)
+            .expect("UCF geodesic state must feed UCF disk shade");
+        assert_eq!(radiance.len(), 1);
+        assert_eq!(report.executed_ops[0], "camera_ray_batch");
+        assert!(report.executed_ops.contains(&"disk_shade_novikov_from_geodesic_batch".to_string()));
+        assert!(radiance.iter().all(|color| color.r.is_finite() && color.g.is_finite() && color.b.is_finite()));
     }
 }
