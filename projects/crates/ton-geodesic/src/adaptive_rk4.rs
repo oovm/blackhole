@@ -21,6 +21,9 @@ pub struct AdaptiveRk4ConfigBuilder {
 }
 
 impl AdaptiveRk4Config {
+    pub(crate) fn tolerances(self) -> (f64, f64) { (self.absolute_tolerance, self.relative_tolerance) }
+    pub(crate) fn step_range(self) -> (f64, f64) { (self.minimum_step, self.maximum_step) }
+    pub(crate) fn maximum_retries(self) -> u32 { self.maximum_retries }
     /// 构造容差与步长范围配置。
     pub fn builder() -> AdaptiveRk4ConfigBuilder {
         AdaptiveRk4ConfigBuilder {

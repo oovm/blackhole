@@ -25,6 +25,9 @@ impl SchwarzschildEventConfig {
     pub(crate) fn mass(self) -> f64 { self.mass }
     pub(crate) fn capture_radius(self) -> f64 { self.capture_radius }
     pub(crate) fn escape_radius(self) -> f64 { self.escape_radius }
+    pub(crate) fn disk_radii(self) -> Option<(f64, f64)> { self.disk_radii }
+    pub(crate) fn surface_tolerance(self) -> f64 { self.surface_tolerance }
+    pub(crate) fn maximum_bisections(self) -> u32 { self.maximum_bisections }
 
     /// 捕获面默认位于坐标视界之外，不声称定位到奇异坐标上的事件视界。
     pub fn builder(mass: f64) -> SchwarzschildEventConfigBuilder {

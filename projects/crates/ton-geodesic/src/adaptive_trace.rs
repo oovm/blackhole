@@ -29,6 +29,11 @@ pub struct SchwarzschildAdaptiveTraceConfigBuilder {
 }
 
 impl SchwarzschildAdaptiveTraceConfig {
+    pub(crate) fn mass(self) -> f64 { self.mass }
+    pub(crate) fn integration(self) -> AdaptiveRk4Config { self.integration }
+    pub(crate) fn events(self) -> SchwarzschildEventConfig { self.events }
+    pub(crate) fn initial_step(self) -> f64 { self.initial_step }
+    pub(crate) fn maximum_steps(self) -> u32 { self.maximum_steps }
     /// 默认接受步预算为一万步，默认初始步长为 `0.08M`。
     pub fn builder(mass: f64) -> SchwarzschildAdaptiveTraceConfigBuilder {
         SchwarzschildAdaptiveTraceConfigBuilder {

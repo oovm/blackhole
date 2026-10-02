@@ -59,7 +59,7 @@ impl SchwarzschildCartesianNullState {
         (spatial - temporal).abs() / (spatial.abs() + temporal.abs())
     }
 
-    fn components(self) -> [f64; 8] {
+    pub(crate) fn components(self) -> [f64; 8] {
         [self.t, self.position.x, self.position.y, self.position.z, self.energy,
             self.velocity.x, self.velocity.y, self.velocity.z]
     }
