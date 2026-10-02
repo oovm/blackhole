@@ -2,7 +2,7 @@
 
 use ton_renderer::{
     apply_tone_map_ucf, bloom_pass_ucf, Framebuffer, FramebufferEncoding, Graph, DEFAULT_BLOOM_INTENSITY,
-    DEFAULT_BLOOM_THRESHOLD,
+    DEFAULT_BLOOM_THRESHOLD, sky_color,
 };
 use ton_geodesic::SphericalState;
 use ton_types::{Camera, DiskModelKind, IntegratorKind, Rgb, TonError, TonResult, Vec3};
@@ -589,7 +589,7 @@ pub fn execute_geodesic_diagnostic_frame_cpu(
 pub fn execute_geodesic_disk_radiance_cpu(
     scene: &Scene,
     graph: &Graph,
-) -> TonResult<(Vec<Rgb>, CpuGraphExecution)> {
+) -> TonResult<(Vec<Rgb>, Vec<u32>, CpuGraphExecution)> {
     if scene.integrator != IntegratorKind::Geodesic3d
         || scene.disk_model != DiskModelKind::NovikovThorneThin
     {
@@ -602,6 +602,7 @@ pub fn execute_geodesic_disk_radiance_cpu(
     let mut disk_hits = vec![false; count];
     let mut disk_radii = vec![0.0; count];
     let mut disk_dopplers = vec![1.0; count];
+    let mut statuses = vec![0u32; count];
     let chunk_count = scene.trace.max_steps.div_ceil(16).max(1);
     let mut executed_ops = vec![
         "camera_ray_batch".to_string(),
@@ -621,8 +622,10 @@ pub fn execute_geodesic_disk_radiance_cpu(
         disk_hits = result.disk_hits;
         disk_radii = result.disk_radii;
         disk_dopplers = result.disk_dopplers;
+        statuses = result.statuses;
+        let all_terminal = statuses.iter().all(|status| *status != 0);
         executed_ops.push("schwarzschild_geodesic_rk4_chunk_with_disk".to_string());
-        if result.statuses.iter().all(|status| *status != 0) {
+        if all_terminal {
             break;
         }
     }
@@ -639,7 +642,43 @@ pub fn execute_geodesic_disk_radiance_cpu(
         .collect::<Vec<_>>();
     let radiance = execute_disk_shade_program_cpu(scene, graph, &samples)?;
     executed_ops.push("disk_shade_novikov_from_geodesic_batch".to_string());
-    Ok((radiance, CpuGraphExecution { executed_ops }))
+    for status in &mut statuses {
+        if *status == 0 {
+            *status = 3;
+        }
+    }
+    Ok((radiance, statuses, CpuGraphExecution { executed_ops }))
+}
+
+/// 将 UCF geodesic/radiance 结果组装为 Beauty framebuffer，并执行 UCF 后处理。
+pub fn execute_geodesic_beauty_frame_cpu(
+    scene: &Scene,
+    graph: &Graph,
+) -> TonResult<(Framebuffer, CpuGraphExecution)> {
+    let (radiance, statuses, report) = execute_geodesic_disk_radiance_cpu(scene, graph)?;
+    if statuses.iter().any(|status| *status == 3 || *status == 4) {
+        return Err(TonError::Domain("UCF Beauty frame contains failed geodesic instances".into()));
+    }
+    let mut frame = Framebuffer::new(scene.width, scene.height);
+    for (index, pixel) in frame.pixels.iter_mut().enumerate() {
+        let x = index as u32 % scene.width.max(1);
+        let y = index as u32 / scene.width.max(1);
+        let u = ((x as f64 + 0.5) / scene.width.max(1) as f64 * 2.0 - 1.0)
+            * scene.width.max(1) as f64
+            / scene.height.max(1) as f64;
+        let v = 1.0 - (y as f64 + 0.5) / scene.height.max(1) as f64 * 2.0;
+        let sky = if statuses[index] == 2 {
+            sky_color(scene.camera.ray_direction(u, v))
+        } else {
+            Rgb::BLACK
+        };
+        *pixel = sky.add(radiance[index]).scale(0.82);
+    }
+    if scene.post_bloom {
+        bloom_pass_ucf(&mut frame, DEFAULT_BLOOM_THRESHOLD, DEFAULT_BLOOM_INTENSITY);
+    }
+    apply_tone_map_ucf(&mut frame);
+    Ok((frame, report))
 }
 
 fn task_op(graph: &Graph, task_id: u64) -> TonResult<&str> {
@@ -692,6 +731,12 @@ pub fn execute_frame_graph_cpu(
         .map_err(|e| TonError::Domain(format!("graph validate: {e}")))?;
     if scene.integrator == IntegratorKind::Geodesic3d && scene.render_mode == ton_renderer::RenderMode::TerminationMap {
         return execute_geodesic_diagnostic_frame_cpu(scene, graph);
+    }
+    if scene.integrator == IntegratorKind::Geodesic3d
+        && scene.disk_model == DiskModelKind::NovikovThorneThin
+        && scene.render_mode == ton_renderer::RenderMode::Beauty
+    {
+        return execute_geodesic_beauty_frame_cpu(scene, graph);
     }
     Err(TonError::Domain(
         "UCF CPU frame execution is unavailable until the graph is bound to real UCF programs and resources".into(),
@@ -857,7 +902,7 @@ mod tests {
             .with_max_steps(1)
             .build();
         let graph = scene.build_ucf_graph();
-        let (radiance, report) = execute_geodesic_disk_radiance_cpu(&scene, &graph)
+        let (radiance, _, report) = execute_geodesic_disk_radiance_cpu(&scene, &graph)
             .expect("UCF geodesic state must feed UCF disk shade");
         assert_eq!(radiance.len(), 1);
         assert_eq!(report.executed_ops[0], "camera_ray_batch");

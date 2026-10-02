@@ -11,7 +11,7 @@ pub use convergence::{capture_convergence_samples, CaptureStepSample};
 pub use params::black_hole_for_render;
 pub use scene::{Scene, SceneBuilder};
 pub use ton_renderer::RenderMode;
-pub use ucf_cpu::{execute_camera_program_cpu, execute_disk_shade_program_cpu, execute_frame_graph_cpu, execute_geodesic_chunk_program_cpu, execute_geodesic_diagnostic_frame_cpu, execute_geodesic_disk_radiance_cpu, execute_initial_state_program_cpu, CameraProgramExecution, CpuGraphExecution, GeodesicChunkProgramExecution, InitialStateProgramExecution};
+pub use ucf_cpu::{execute_camera_program_cpu, execute_disk_shade_program_cpu, execute_frame_graph_cpu, execute_geodesic_beauty_frame_cpu, execute_geodesic_chunk_program_cpu, execute_geodesic_diagnostic_frame_cpu, execute_geodesic_disk_radiance_cpu, execute_initial_state_program_cpu, CameraProgramExecution, CpuGraphExecution, GeodesicChunkProgramExecution, InitialStateProgramExecution};
 pub use ucf_physics::{
     schwarzschild_classification_ucf_cpu, schwarzschild_classification_ucf_vulkan,
     SchwarzschildClassificationReport,
