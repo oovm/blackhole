@@ -19,11 +19,24 @@ fn program_param(program: &ucf_program::Program) -> TonResult<ParamValue> {
     Ok(ParamValue::Program { version: program.version, hash: ton_ucf_frontend::program_hash(program), body })
 }
 
-fn dispatch_task(id: u64, program: &ucf_program::Program, count: u32, output: ResourceId, input: Option<ResourceId>, uniforms: BTreeMap<String, ParamValue>) -> TonResult<TaskNode> {
+fn dispatch_task(
+    id: u64,
+    program: &ucf_program::Program,
+    count: u32,
+    output: ResourceId,
+    output_slot: u32,
+    input_slot: u32,
+    input: Option<ResourceId>,
+    uniforms: BTreeMap<String, ParamValue>,
+) -> TonResult<TaskNode> {
     let mut params = uniforms;
     params.insert("program".into(), program_param(program)?);
     params.insert("output".into(), ParamValue::I64(output.0 as i64));
-    if let Some(input) = input { params.insert("buffer_0".into(), ParamValue::I64(input.0 as i64)); }
+    params.insert(format!("buffer_{output_slot}"), ParamValue::I64(output.0 as i64));
+    if let Some(input) = input {
+        params.insert("buffer_0".into(), ParamValue::I64(input.0 as i64));
+        params.insert(format!("buffer_{input_slot}"), ParamValue::I64(input.0 as i64));
+    }
     Ok(TaskNode { id: TaskId(id), kind: TaskKind::Dispatch, shader: ShaderId(id), params, dispatch: Dispatch::Explicit { x: count, y: 1, z: 1 }, objective: Objective::MaxUtilization, priority: Priority::Batch })
 }
 
@@ -45,7 +58,7 @@ pub fn schwarzschild_capture_classify_ucf_vulkan_batch(bh: BlackHole, impacts: &
     if impacts.is_empty() { return Ok(Vec::new()); }
     let count = u32::try_from(impacts.len()).map_err(|_| TonError::Domain("impact batch exceeds u32 capacity".into()))?;
     let program = geodesic_capture_classify_batch();
-    let task = dispatch_task(20, &program, count, ResourceId(10), Some(ResourceId(11)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(bh.critical_impact_parameter())), ("output".into(), ParamValue::I64(10))]))?;
+    let task = dispatch_task(20, &program, count, ResourceId(10), 0, 0, Some(ResourceId(11)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(bh.critical_impact_parameter())), ("output".into(), ParamValue::I64(10))]))?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![ResourceNode { id: ResourceId(10), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) }, ResourceNode { id: ResourceId(11), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 4) }] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan capture graph: {e}")))?;
     let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
@@ -96,7 +109,7 @@ pub fn camera_ray_ucf_vulkan_batch(camera: Camera, uv: &[(f64, f64)]) -> TonResu
     params.insert("output".into(), ParamValue::I64(10));
     params.insert("buffer_1".into(), ParamValue::I64(11));
     params.insert("buffer_2".into(), ParamValue::I64(12));
-    let task = dispatch_task(22, &program, count, ResourceId(10), Some(ResourceId(11)), params)?;
+    let task = dispatch_task(22, &program, count, ResourceId(10), 2, 1, Some(ResourceId(11)), params)?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![ResourceNode { id: ResourceId(10), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) }, ResourceNode { id: ResourceId(11), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 2 * 4) }, ResourceNode { id: ResourceId(12), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 3 * 4) }] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan camera graph: {e}")))?;
     let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
@@ -208,7 +221,7 @@ pub fn schwarzschild_initial_state_ucf_vulkan_batch_with_flags(
         ("buffer_1".into(), ParamValue::I64(1)),
         ("buffer_2".into(), ParamValue::I64(2)),
     ]);
-    let task = dispatch_task(23, &program, count, ResourceId(3), Some(ResourceId(1)), params)?;
+    let task = dispatch_task(23, &program, count, ResourceId(3), 2, 1, Some(ResourceId(1)), params)?;
     let graph = Graph {
         resources: ResourceGraph {
             nodes: vec![
@@ -258,7 +271,7 @@ pub fn schwarzschild_impact_ucf_vulkan_batch(mass: f64, rays: &[(Vec3, Vec3)]) -
     if rays.is_empty() { return Ok(Vec::new()); }
     let count = u32::try_from(rays.len()).map_err(|_| TonError::Domain("ray batch exceeds u32 capacity".into()))?;
     let program = schwarzschild_impact_batch();
-    let task = dispatch_task(21, &program, count, ResourceId(10), Some(ResourceId(11)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(mass))]))?;
+    let task = dispatch_task(21, &program, count, ResourceId(10), 0, 0, Some(ResourceId(11)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(mass))]))?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![ResourceNode { id: ResourceId(10), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) }, ResourceNode { id: ResourceId(11), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 6 * 4) }] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan impact graph: {e}")))?;
     let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
@@ -422,7 +435,7 @@ pub fn schwarzschild_radial_rk4_steps_ucf_cpu(mass: f64, mut state: RadialState,
 
 pub fn schwarzschild_radial_rk4_step_ucf_vulkan(mass: f64, state: RadialState, step: f64) -> TonResult<RadialState> {
     let program = schwarzschild_radial_rk4_step();
-    let task = dispatch_task(30, &program, 1, ResourceId(10), Some(ResourceId(10)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(mass)), ("uniform_1".into(), ParamValue::F64(step))]))?;
+    let task = dispatch_task(30, &program, 1, ResourceId(10), 0, 0, Some(ResourceId(10)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(mass)), ("uniform_1".into(), ParamValue::F64(step))]))?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![ResourceNode { id: ResourceId(10), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(16) }] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan radial graph: {e}")))?;
     let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;
@@ -503,7 +516,7 @@ pub fn schwarzschild_geodesic_integrate_ucf_cpu_rays(mass: f64, rays: &[(Vec3, V
 /// 由原生 Vulkan UCF backend 在单个 dispatch 中完成有界多步积分。
 pub fn schwarzschild_geodesic_integrate_ucf_vulkan(mass: f64, state: SphericalState, step: f64, escape_radius: f64, max_steps: u32) -> TonResult<(SphericalState, u32)> {
     let program = schwarzschild_geodesic_rk4_integrate(max_steps);
-    let task = dispatch_task(32, &program, 1, ResourceId(13), Some(ResourceId(14)), BTreeMap::from([
+    let task = dispatch_task(32, &program, 1, ResourceId(13), 0, 0, Some(ResourceId(14)), BTreeMap::from([
         ("uniform_0".into(), ParamValue::F64(mass)),
         ("uniform_1".into(), ParamValue::F64(step)),
         ("uniform_2".into(), ParamValue::F64(escape_radius)),
@@ -531,7 +544,7 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch(mass: f64, states: &[Sp
 fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_program(mass: f64, states: &[SphericalState], bound_flags: &[bool], step: f64, escape_radius: f64, program: &ucf_program::Program) -> TonResult<Vec<(SphericalState, u32)>> {
     if states.is_empty() { return Ok(Vec::new()); }
     let count = u32::try_from(states.len()).map_err(|_| TonError::Domain("geodesic batch exceeds u32 capacity".into()))?;
-    let task = dispatch_task(33, &program, count, ResourceId(15), Some(ResourceId(16)), BTreeMap::from([
+    let task = dispatch_task(33, &program, count, ResourceId(15), 0, 0, Some(ResourceId(16)), BTreeMap::from([
         ("uniform_0".into(), ParamValue::F64(mass)),
         ("uniform_1".into(), ParamValue::F64(step)),
         ("uniform_2".into(), ParamValue::F64(escape_radius)),
@@ -582,7 +595,7 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
     }
     let count = u32::try_from(states.len()).map_err(|_| TonError::Domain("geodesic disk batch exceeds u32 capacity".into()))?;
     let program = schwarzschild_geodesic_rk4_chunk_with_disk(max_steps);
-    let task = dispatch_task(34, &program, count, ResourceId(17), Some(ResourceId(18)), BTreeMap::from([
+    let task = dispatch_task(34, &program, count, ResourceId(17), 0, 0, Some(ResourceId(18)), BTreeMap::from([
         ("uniform_0".into(), ParamValue::F64(mass)),
         ("uniform_1".into(), ParamValue::F64(step)),
         ("uniform_2".into(), ParamValue::F64(escape_radius)),
@@ -646,7 +659,7 @@ pub fn disk_radiance_ucf_vulkan_from_geodesic_state(
         return Ok(Vec::new());
     }
     let program = disk_shade_novikov_from_geodesic_batch();
-    let task = dispatch_task(35, &program, count, ResourceId(19), Some(ResourceId(18)), BTreeMap::from([
+    let task = dispatch_task(35, &program, count, ResourceId(19), 2, 1, Some(ResourceId(18)), BTreeMap::from([
         ("uniform_0".into(), ParamValue::F64(inner_radius)),
         ("uniform_1".into(), ParamValue::F64(outer_radius)),
         ("uniform_2".into(), ParamValue::F64(mass)),
@@ -791,7 +804,7 @@ pub fn tone_map_ucf_vulkan_batch(hdr: &[f32], count: u32) -> TonResult<Vec<f32>>
         return Ok(Vec::new());
     }
     let program = tone_map_aces_batch();
-    let task = dispatch_task(36, &program, count, ResourceId(20), Some(ResourceId(21)), BTreeMap::new())?;
+    let task = dispatch_task(36, &program, count, ResourceId(20), 2, 1, Some(ResourceId(21)), BTreeMap::new())?;
     let graph = Graph {
         resources: ResourceGraph {
             nodes: vec![
@@ -830,8 +843,10 @@ pub fn compose_sky_ucf_vulkan_batch(
     let program = compose_sky_batch();
     let mut params = BTreeMap::new();
     params.insert("buffer_0".into(), ParamValue::I64(22));
-    params.insert("buffer_1".into(), ParamValue::I64(23));
-    params.insert("buffer_2".into(), ParamValue::I64(24));
+    params.insert("buffer_1".into(), ParamValue::I64(22));
+    params.insert("buffer_2".into(), ParamValue::I64(23));
+    params.insert("buffer_3".into(), ParamValue::I64(24));
+    params.insert("buffer_4".into(), ParamValue::I64(25));
     params.insert("output".into(), ParamValue::I64(25));
     params.insert("program".into(), program_param(&program)?);
     let task = TaskNode {
@@ -1104,7 +1119,7 @@ pub fn schwarzschild_geodesic_diagnostic_ucf_vulkan(bh: BlackHole, camera: Camer
 /// 由原生 Vulkan UCF backend 推进一个完整球坐标 Schwarzschild RK4 步。
 pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalState, step: f64) -> TonResult<SphericalState> {
     let program = schwarzschild_geodesic_rk4_step();
-    let task = dispatch_task(31, &program, 1, ResourceId(12), Some(ResourceId(10)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(mass)), ("uniform_1".into(), ParamValue::F64(step))]))?;
+    let task = dispatch_task(31, &program, 1, ResourceId(12), 0, 0, Some(ResourceId(10)), BTreeMap::from([("uniform_0".into(), ParamValue::F64(mass)), ("uniform_1".into(), ParamValue::F64(step))]))?;
     let graph = Graph { resources: ResourceGraph { nodes: vec![ResourceNode { id: ResourceId(12), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(4) }, ResourceNode { id: ResourceId(10), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(32) }] }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan geodesic graph: {e}")))?;
     let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan backend: {e}")))?;

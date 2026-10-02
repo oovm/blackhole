@@ -291,4 +291,24 @@ mod tests {
         };
         assert_eq!(cpu.pixels, gpu.pixels);
     }
+
+    #[test]
+    fn scene_vulkan_ucf_beauty_smoke_when_available() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_default_disk()
+            .with_resolution(1, 1)
+            .with_step_size(0.08)
+            .with_max_steps(1024)
+            .build();
+        let frame = match scene.render_frame_ucf_vulkan() {
+            Ok(frame) => frame,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan UCF Beauty smoke: {error}"),
+        };
+        assert_eq!((frame.width, frame.height), (1, 1));
+        assert_eq!(frame.pixels.len(), 1);
+        assert!(frame.pixels[0].r.is_finite());
+        assert!(frame.pixels[0].g.is_finite());
+        assert!(frame.pixels[0].b.is_finite());
+    }
 }
