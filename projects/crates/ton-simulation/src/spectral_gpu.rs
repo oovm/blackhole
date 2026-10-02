@@ -164,7 +164,10 @@ impl SchwarzschildSpectralGpuBuilder {
             let bright_builder = ton_ucf_frontend::HdrBrightExtractBuilder::new().build().map_err(TonError::Domain)?;
             let bright_input = composed.chunks_exact(7).flat_map(|record| record[3..6].iter().copied()).collect::<Vec<_>>();
             let bright_output = execute_stage(&mut backend, &bright_builder, &bright_input, 3, 3, 149, &[0.08], None)?;
-            let bright = bright_output.chunks_exact(3).map(|record| Rgb::new(record[0] as f64, record[1] as f64, record[2] as f64)).collect::<Vec<_>>();
+            hashes.push(ton_ucf_frontend::program_hash(&bright_builder));
+            let blur_builder = ton_ucf_frontend::UcfBoxBlur3x3Builder::new(width, height).build().map_err(TonError::Domain)?;
+            let blurred_output = execute_stage(&mut backend, &blur_builder, &bright_output, 3, 3, 152, &[], None)?;
+            let bright = blurred_output.chunks_exact(3).map(|record| Rgb::new(record[0] as f64, record[1] as f64, record[2] as f64)).collect::<Vec<_>>();
             let mut linear = Framebuffer { width, height,
                 pixels: display_input.chunks_exact(7).map(|record| Rgb::new(record[3] as f64, record[4] as f64, record[5] as f64)).collect(),
                 encoding: FramebufferEncoding::LinearHdr };
@@ -172,7 +175,7 @@ impl SchwarzschildSpectralGpuBuilder {
             for (record, pixel) in display_input.chunks_exact_mut(7).zip(linear.pixels) {
                 record[3] = pixel.r as f32; record[4] = pixel.g as f32; record[5] = pixel.b as f32;
             }
-            hashes.push(ton_ucf_frontend::program_hash(&bright_builder));
+            hashes.push(ton_ucf_frontend::program_hash(&blur_builder));
         }
         let hdr = display_input.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
         let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
@@ -395,7 +398,7 @@ mod tests {
         let base = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).execute(camera, 8, 4).unwrap();
         let bloom = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).bloom(true).execute(camera, 8, 4).unwrap();
         assert_eq!(base.shading_program_hashes.len(), 6);
-        assert_eq!(bloom.shading_program_hashes.len(), 7);
+        assert_eq!(bloom.shading_program_hashes.len(), 8);
         assert!(base.hdr.iter().zip(&bloom.hdr).any(|(a, b)| a != b));
     }
 
