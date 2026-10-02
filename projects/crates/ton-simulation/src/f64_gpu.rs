@@ -59,7 +59,7 @@ impl F64GpuTraceBatch {
 }
 
 /// F64 相机和完整捕获/逃逸追踪，所有轨迹计算均由通用 UCF 程序执行。
-/// 当前阶段之间 readback/re-upload，不声明全程 GPU 资源驻留。
+/// 追踪 chunk 之间使用 GPU 双缓冲，相机与辐射阶段之间仍有主机传输。
 #[derive(Debug, Clone, Copy)]
 pub struct SchwarzschildF64GpuTraceBuilder {
     mass: f64,
@@ -152,7 +152,11 @@ impl SchwarzschildF64GpuTraceBuilder {
         let mut scheduled = 0;
         let mut prepared_steps = 0;
         let mut prepared = None;
-        while scheduled < self.maximum_steps && records.iter().any(|record| record[8] == 0.0) {
+        let mut statuses = vec![0.0; records.len()];
+        let mut input_id = ResourceId(91);
+        let mut output_id = ResourceId(92);
+        let mut last_output = input_id;
+        while scheduled < self.maximum_steps && statuses.iter().any(|status| *status == 0.0) {
             let steps = self.chunk_steps.min(self.maximum_steps - scheduled);
             if steps != prepared_steps {
                 let prepare_started = Instant::now();
@@ -162,7 +166,7 @@ impl SchwarzschildF64GpuTraceBuilder {
                     .into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value))).collect::<BTreeMap<_, _>>();
                 params.insert("buffer_2".into(), ParamValue::I64(92));
                 let task = crate::ucf_physics::dispatch_task(78, &program, count, ResourceId(93), 2, 1, Some(ResourceId(91)), params)?;
-                let graph = Graph { resources: ResourceGraph { nodes: [(91, 29, Access::Read), (92, 29, Access::Write), (93, 1, Access::Write)]
+                let graph = Graph { resources: ResourceGraph { nodes: [(91, 29, Access::ReadWrite), (92, 29, Access::ReadWrite), (93, 1, Access::Write)]
                     .into_iter().map(|(id, stride, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
                         domain: Domain::Vram, access, byte_size: Some(u64::from(count) * stride * 8) }).collect() },
                     tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
@@ -172,26 +176,40 @@ impl SchwarzschildF64GpuTraceBuilder {
                 prepared_steps = steps;
                 timing.preparation += prepare_started.elapsed();
             }
-            let (graph, hash) = prepared.as_ref().unwrap();
-            let upload_started = Instant::now();
-            backend.write_f64(ResourceId(91), &records.iter().flatten().copied().collect::<Vec<_>>())
-                .map_err(|error| TonError::Domain(format!("upload F64 trace records: {error}")))?;
-            timing.upload += upload_started.elapsed();
+            let (graph, hash) = prepared.as_mut().unwrap();
+            let params = &mut graph.tasks.nodes[0].params;
+            params.insert("buffer_0".into(), ParamValue::I64(input_id.0 as i64));
+            params.insert("buffer_1".into(), ParamValue::I64(input_id.0 as i64));
+            params.insert("buffer_2".into(), ParamValue::I64(output_id.0 as i64));
+            if scheduled == 0 {
+                let upload_started = Instant::now();
+                backend.write_f64(input_id, &records.iter().flatten().copied().collect::<Vec<_>>())
+                    .map_err(|error| TonError::Domain(format!("upload F64 trace records: {error}")))?;
+                timing.upload += upload_started.elapsed();
+            }
             let dispatch_started = Instant::now();
             backend.run_prepared(graph).map_err(|error| TonError::Domain(format!("execute F64 trace graph: {error}")))?;
             timing.dispatch += dispatch_started.elapsed();
             let readback_started = Instant::now();
-            let output = backend.read_f64(ResourceId(92)).map_err(|error| TonError::Domain(format!("read F64 trace records: {error}")))?;
-            let status = backend.read_f64(ResourceId(93)).map_err(|error| TonError::Domain(format!("read F64 trace status: {error}")))?;
+            statuses = backend.read_f64(ResourceId(93)).map_err(|error| TonError::Domain(format!("read F64 trace status: {error}")))?;
             timing.readback += readback_started.elapsed();
-            if output.len() != records.len() * 29 || status.len() != records.len()
-                || output.iter().any(|value| !value.is_finite()) || output.chunks_exact(29).zip(&status).any(|(record, status)| record[8] != *status) {
-                return Err(TonError::Domain("invalid F64 trace output or scalar status mismatch".into()));
+            if statuses.len() != records.len() || statuses.iter().any(|status|
+                !matches!(*status, 0.0 | 1.0 | 2.0 | 3.0 | 4.0 | 5.0)) {
+                return Err(TonError::Domain("invalid F64 trace scalar status".into()));
             }
-            records = output.chunks_exact(29).map(|record| record.try_into().unwrap()).collect();
             hashes.push(*hash);
             scheduled += steps;
+            last_output = output_id;
+            std::mem::swap(&mut input_id, &mut output_id);
         }
+        let readback_started = Instant::now();
+        let output = backend.read_f64(last_output).map_err(|error| TonError::Domain(format!("read F64 final trace records: {error}")))?;
+        timing.readback += readback_started.elapsed();
+        if output.len() != records.len() * 29 || output.iter().any(|value| !value.is_finite())
+            || output.chunks_exact(29).zip(&statuses).any(|(record, status)| record[8] != *status) {
+            return Err(TonError::Domain("invalid F64 final trace output or scalar status mismatch".into()));
+        }
+        records = output.chunks_exact(29).map(|record| record.try_into().unwrap()).collect();
         let terminations = records.iter().map(|record| match record[8] {
             0.0 => Ok(GpuTraceTermination::StepBudgetExhausted), 1.0 => Ok(GpuTraceTermination::Captured),
             2.0 => Ok(GpuTraceTermination::Escaped), 3.0 => Ok(GpuTraceTermination::IntegrationFailure),
@@ -213,6 +231,27 @@ mod tests {
         let angular = state.angular_momentum();
         [state.t, state.position.x, state.position.y, state.position.z, state.energy,
             state.velocity.x, state.velocity.y, state.velocity.z, angular.dot(angular)]
+    }
+
+    #[test]
+    fn f64_native_resident_chunks_preserve_odd_even_and_partial_budget_outputs() {
+        let seeds = [pack(SchwarzschildCartesianNullState::from_ray(1.0, Vec3::new(0.0, 0.0, 79.9), Vec3::new(0.0, 0.0, 1.0)).unwrap()),
+            pack(SchwarzschildCartesianNullState::from_ray(1.0, Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0)).unwrap())];
+        for budget in [4, 5, 6] {
+            let mut backend = VulkanBackend::new().unwrap();
+            let fused = SchwarzschildF64GpuTraceBuilder::new(1.0).maximum_steps(budget).chunk_steps(budget)
+                .execute_initial_with_backend(&mut backend, &seeds).unwrap();
+            for chunk in [1, 2, 3] {
+                let mut backend = VulkanBackend::new().unwrap();
+                let split = SchwarzschildF64GpuTraceBuilder::new(1.0).maximum_steps(budget).chunk_steps(chunk)
+                    .execute_initial_with_backend(&mut backend, &seeds).unwrap();
+                assert_eq!(split.records, fused.records, "budget={budget}, chunk={chunk}");
+                assert_eq!(split.terminations, fused.terminations);
+                assert_eq!(split.records[1][10], budget as f64);
+                assert_eq!(split.terminations[1], GpuTraceTermination::StepBudgetExhausted);
+                assert_eq!(split.executed_program_hashes.len(), budget.div_ceil(chunk) as usize);
+            }
+        }
     }
 
     #[test]
