@@ -350,6 +350,12 @@ impl SchwarzschildCartesianF64TraceBuilder {
             let stride = 2 + maximum_events * 9;
             b(&builder, BinOp::Mul, builder.global_id(), builder.const_u32(stride))
         });
+        let event_values = event_capacity.map(|maximum_events| {
+            (0..maximum_events * 9).map(|offset| {
+                let index = b(&builder, BinOp::Add, event_base.as_ref().unwrap().clone(), builder.const_u32(2 + offset as u32));
+                builder.let_value(Ty::f64(), builder.load_buffer(3, index))
+            }).collect::<Vec<_>>()
+        });
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(record[8]), builder.const_f64(0.0));
         builder.bounded_while(running, self.maximum_steps, |builder| {
             let start = snapshot(builder, std::array::from_fn(|index| Expr::LoadLocal(record[index])));
@@ -403,7 +409,7 @@ impl SchwarzschildCartesianF64TraceBuilder {
             builder.store_local(record[14], builder.select(first_hit.clone(), disk_radius, Expr::LoadLocal(record[14])));
             builder.store_local(record[15], builder.select(first_hit,
                 b(builder, BinOp::Add, Expr::LoadLocal(record[12]), b(builder, BinOp::Mul, step.clone(), disk_fraction.clone())), Expr::LoadLocal(record[15])));
-            if let (Some(maximum_events), Some(event_base)) = (event_capacity, event_base.as_ref()) {
+            if let (Some(maximum_events), Some(_event_base)) = (event_capacity, event_base.as_ref()) {
                 let affine = b(builder, BinOp::Add, Expr::LoadLocal(record[12]), b(builder, BinOp::Mul, step.clone(), disk_fraction.clone()));
                 let values = [affine, disk_state[0].clone(), disk_state[1].clone(), disk_state[2].clone(),
                     disk_state[3].clone(), disk_state[4].clone(), disk_state[5].clone(), disk_state[6].clone(), disk_state[7].clone()];
@@ -411,9 +417,8 @@ impl SchwarzschildCartesianF64TraceBuilder {
                     let write_event = both(builder, hit.clone(), b(builder, BinOp::Eq,
                         Expr::LoadLocal(record[13]), builder.const_f64(event_index as f64)));
                     for (offset, value) in values.iter().cloned().enumerate() {
-                        let index = b(builder, BinOp::Add, event_base.clone(), builder.const_u32(2 + event_index * 9 + offset as u32));
-                        let previous = builder.load_buffer(3, index.clone());
-                        builder.store_buffer(3, index, builder.select(write_event.clone(), value, previous));
+                        let local = event_values.as_ref().unwrap()[event_index as usize * 9 + offset];
+                        builder.store_local(local, builder.select(write_event.clone(), value, Expr::LoadLocal(local)));
                     }
                 }
             }
@@ -443,6 +448,9 @@ impl SchwarzschildCartesianF64TraceBuilder {
             builder.store_buffer(3, b(&builder, BinOp::Add, event_base.clone(), builder.const_u32(1)),
                 builder.select(b(&builder, BinOp::Gt, Expr::LoadLocal(record[13]), builder.const_f64(maximum_events as f64)),
                     builder.const_f64(1.0), builder.const_f64(0.0)));
+            for (offset, local) in event_values.as_ref().unwrap().iter().copied().enumerate() {
+                builder.store_buffer(3, b(&builder, BinOp::Add, event_base.clone(), builder.const_u32(2 + offset as u32)), Expr::LoadLocal(local));
+            }
         }
         ProgramBuilder::new().structured_entry(builder, Ty::f64(), Expr::LoadLocal(record[8]))
             .map_err(|error| error.to_string())?.finish().map_err(|error| error.to_string())

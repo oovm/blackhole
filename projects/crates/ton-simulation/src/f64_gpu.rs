@@ -316,6 +316,61 @@ mod tests {
     }
 
     #[test]
+    fn f64_event_trace_vulkan_matches_reference_packet() {
+        let initial = SchwarzschildCartesianNullState::from_ray(1.0, Vec3::new(10.0, 0.0, 0.01), Vec3::new(0.0, 0.0, -1.0)).unwrap();
+        let reference_events = ton_geodesic::SchwarzschildEventConfig::builder(1.0)
+            .radial_boundaries(2.0002, 80.0).equatorial_disk(6.0, 20.0)
+            .localization(1.0e-11, 64).build().unwrap();
+        let integration = ton_geodesic::AdaptiveRk4Config::builder()
+            .tolerances(1.0e-12, 1.0e-12).step_range(1.0e-8, 0.04).build().unwrap();
+        let reference_config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0)
+            .events(reference_events).integration(integration).initial_step(0.04)
+            .maximum_steps(512).build().unwrap();
+        let reference = ton_geodesic::schwarzschild_cartesian_adaptive_trace(initial, reference_config).unwrap();
+        assert_eq!(reference.disk_events.len(), 1);
+        let expected = ton_geodesic::DiskEventBuffer::<4>::from_events(&reference.disk_events).unwrap();
+
+        let program = ton_ucf_frontend::SchwarzschildCartesianF64EventTraceBuilder::<4>::new()
+            .maximum_steps(512).build().unwrap();
+        let mut params = [1.0, 0.04, 2.0002, 80.0, 6.0, 20.0].into_iter().enumerate()
+            .map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(92));
+        params.insert("buffer_3".into(), ParamValue::I64(94));
+        let task = crate::ucf_physics::dispatch_task(780, &program, 1, ResourceId(93), 2, 1, Some(ResourceId(91)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(91u64, 29u64, Access::Read), (92, 29, Access::Write), (93, 1, Access::Write),
+                (94, 38, Access::ReadWrite)].into_iter().map(|(id, stride, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access,
+                    byte_size: Some(u64::from(stride) * 8),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        graph.validate().unwrap();
+        let mut backend = VulkanBackend::new().unwrap();
+        backend.prepare(&graph).unwrap();
+        let mut record = [0.0; 29];
+        record[..8].copy_from_slice(&[
+            initial.t, initial.position.x, initial.position.y, initial.position.z,
+            initial.energy, initial.velocity.x, initial.velocity.y, initial.velocity.z,
+        ]);
+        record[9] = 0.04;
+        record[19] = initial.energy;
+        record[20] = initial.angular_momentum().dot(initial.angular_momentum());
+        backend.write_f64(ResourceId(91), &record).unwrap();
+        backend.write_f64(ResourceId(94), &[0.0; 38]).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        let actual_record = backend.read_f64(ResourceId(92)).unwrap();
+        let actual_events = backend.read_f64(ResourceId(94)).unwrap();
+        assert_eq!(actual_events[0], expected.count as f64);
+        assert_eq!(actual_events[1], 0.0);
+        for (actual, expected) in actual_events[2..].iter().zip(expected.flatten()) {
+            assert!((actual - expected).abs() < 1.0e-8, "event actual={actual}, expected={expected}");
+        }
+        assert_eq!(actual_record[13], 1.0);
+        assert!((actual_record[14] - reference.disk_events[0].event.state.position.length()).abs() < 1.0e-8);
+    }
+
+    #[test]
     fn f64_native_camera_trace_frame_matches_independent_physics() {
         let bh = BlackHole::schwarzschild(1.0);
         let camera = Camera::cinematic(bh);
