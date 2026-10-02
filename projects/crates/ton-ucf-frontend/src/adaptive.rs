@@ -102,6 +102,20 @@ impl SchwarzschildAdaptiveStepBuilder {
         }));
         let request = builder.load_buffer(1, b(&builder, BinOp::Add, input_base, builder.const_u32(8)));
         let uniforms: [Expr; 5] = std::array::from_fn(|slot| builder.load_uniform(slot as u32));
+        let values = emit_integration(&mut builder, initial, request, uniforms, maximum_steps, self.maximum_retries);
+        for (index, value) in values.iter().cloned().enumerate() {
+            builder.store_buffer(2, b(&builder, BinOp::Add, output_base.clone(), builder.const_u32(index as u32)), value);
+        }
+        let program = Program { version: 1, entry: 0, functions: vec![builder.finish(Ty::f32(), values[8].clone())] };
+        super::validate_program(&program).map_err(|error| error.to_string())?;
+        Ok(program)
+    }
+}
+
+pub(crate) fn emit_integration(
+    builder: &mut StructuredFunctionBuilder, initial: [Expr; 8], request: Expr,
+    uniforms: [Expr; 5], maximum_steps: u32, maximum_retries: u32,
+) -> [Expr; 13] {
         let [mass, absolute, relative, minimum, maximum] = uniforms;
         let mut valid = Expr::ConstBool(true);
         for value in initial.iter().chain([&request, &mass, &absolute, &relative, &minimum, &maximum]) {
@@ -128,7 +142,7 @@ impl SchwarzschildAdaptiveStepBuilder {
             builder.const_f32(0.0), builder.const_f32(4.0),
         ));
         let running = b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0));
-        builder.bounded_while(running, self.maximum_retries + 1, |builder| {
+        builder.bounded_while(running, maximum_retries + 1, |builder| {
             let current_step = Expr::LoadLocal(step);
             let full = rk4(builder, &initial, &mass, current_step.clone());
             let half = rk4(builder, &initial, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)));
@@ -162,14 +176,7 @@ impl SchwarzschildAdaptiveStepBuilder {
         builder.store_local(status, builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0)), builder.const_f32(3.0), Expr::LoadLocal(status)));
         builder.store_local(step, builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(1.0)), Expr::LoadLocal(next), Expr::LoadLocal(step)));
         });
-        let values = output.into_iter().map(Expr::LoadLocal).chain([status, used, next, error, rejections].into_iter().map(Expr::LoadLocal));
-        for (index, value) in values.enumerate() {
-            builder.store_buffer(2, b(&builder, BinOp::Add, output_base.clone(), builder.const_u32(index as u32)), value);
-        }
-        let program = Program { version: 1, entry: 0, functions: vec![builder.finish(Ty::f32(), Expr::LoadLocal(status))] };
-        super::validate_program(&program).map_err(|error| error.to_string())?;
-        Ok(program)
-    }
+        std::array::from_fn(|index| Expr::LoadLocal(if index < 8 { output[index] } else { [status, used, next, error, rejections][index - 8] }))
 }
 
 #[cfg(test)]

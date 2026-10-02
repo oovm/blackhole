@@ -21,6 +21,22 @@ mod tests {
     use crate::{CpuInterpreter, Value};
 
     #[test]
+    fn radial_start_inside_localization_tolerance_still_brackets_capture() {
+        let program = SchwarzschildEventLocalizationBuilder::new().build().unwrap();
+        let mut cpu = CpuInterpreter::new();
+        cpu.with_buffer(1, [0.0, 9.980005, 1.2, 0.3, 1.25, -1.0, 0.0, 0.0,
+            0.05, 9.940005, 1.2, 0.3, 1.25, -1.0, 0.0, 0.0, 0.04].into_iter().map(Value::F32).collect());
+        cpu.with_buffer(2, vec![Value::F32(0.0); 11]);
+        for (slot, value) in [1.0, 0.0, 9.98, 1.0e-5].into_iter().enumerate() {
+            cpu.with_uniform(slot as u32, Value::F32(value));
+        }
+        cpu.run_parallel(&program, 1).unwrap();
+        let output = cpu.buffer(2).unwrap();
+        assert_eq!(output[10].as_f64().unwrap(), 1.0);
+        assert!(output[9].as_f64().unwrap() <= 1.0e-5);
+    }
+
+    #[test]
     fn localization_failures_preserve_state() {
         assert!(SchwarzschildEventLocalizationBuilder::new().maximum_bisections(0).build().is_err());
         assert!(SchwarzschildEventLocalizationBuilder::new().maximum_bisections(65).build().is_err());
@@ -91,6 +107,21 @@ impl SchwarzschildEventLocalizationBuilder {
         let end = snapshot(&mut builder, std::array::from_fn(|index| load(index as u32 + 8)));
         let step = load(16);
         let [mass, kind, radius, tolerance]: [Expr; 4] = std::array::from_fn(|slot| builder.load_uniform(slot as u32));
+        let values = emit_localization(&mut builder, start, end, step, [mass, kind, radius, tolerance], self.maximum_bisections);
+        for (index, value) in values.iter().cloned().enumerate() {
+            builder.store_buffer(2, b(&builder, BinOp::Add, output_base.clone(), builder.const_u32(index as u32)), value);
+        }
+        let program = Program { version: 1, entry: 0, functions: vec![builder.finish(Ty::f32(), values[10].clone())] };
+        super::validate_program(&program).map_err(|error| error.to_string())?;
+        Ok(program)
+    }
+}
+
+pub(crate) fn emit_localization(
+    builder: &mut StructuredFunctionBuilder, start: [Expr; 8], end: [Expr; 8], step: Expr,
+    uniforms: [Expr; 4], maximum_bisections: u32,
+) -> [Expr; 11] {
+        let [mass, kind, radius, tolerance] = uniforms;
         let mut valid = Expr::ConstBool(true);
         for value in start.iter().chain(end.iter()).chain([&step, &mass, &kind, &radius, &tolerance]) {
             valid = and(&builder, valid, builder.unary(UnOp::IsFinite, value.clone()));
@@ -109,7 +140,10 @@ impl SchwarzschildEventLocalizationBuilder {
         let opposite = b(&builder, BinOp::Ne,
             b(&builder, BinOp::Ge, before.clone(), builder.const_f32(0.0)),
             b(&builder, BinOp::Ge, after.clone(), builder.const_f32(0.0)));
-        let bracketed = and(&builder, b(&builder, BinOp::Gt, abs(&builder, before.clone()), tolerance.clone()),
+        let distinct_start = builder.select(b(&builder, BinOp::Eq, kind.clone(), builder.const_f32(0.0)),
+            b(&builder, BinOp::Ne, before.clone(), builder.const_f32(0.0)),
+            b(&builder, BinOp::Gt, abs(&builder, before.clone()), tolerance.clone()));
+        let bracketed = and(&builder, distinct_start,
             builder.select(b(&builder, BinOp::Eq, after.clone(), builder.const_f32(0.0)), Expr::ConstBool(true), opposite));
         let status = builder.let_value(Ty::f32(), builder.select(valid,
             builder.select(bracketed, builder.const_f32(0.0), builder.const_f32(2.0)), builder.const_f32(4.0)));
@@ -124,7 +158,7 @@ impl SchwarzschildEventLocalizationBuilder {
         let upper = builder.let_value(Ty::f32(), builder.const_f32(1.0));
         let lower_value = builder.let_value(Ty::f32(), before);
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0));
-        builder.bounded_while(running, self.maximum_bisections, |builder| {
+        builder.bounded_while(running, maximum_bisections, |builder| {
             let middle = builder.let_value(Ty::f32(), b(builder, BinOp::Mul,
                 b(builder, BinOp::Add, Expr::LoadLocal(lower), Expr::LoadLocal(upper)), builder.const_f32(0.5)));
             let half_step = b(builder, BinOp::Mul, b(builder, BinOp::Mul, step.clone(), Expr::LoadLocal(middle)), builder.const_f32(0.5));
@@ -149,12 +183,5 @@ impl SchwarzschildEventLocalizationBuilder {
             builder.store_local(lower_value, builder.select(Expr::LoadLocal(same_side), Expr::LoadLocal(value), Expr::LoadLocal(lower_value)));
         });
         builder.store_local(status, builder.select(b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0)), builder.const_f32(3.0), Expr::LoadLocal(status)));
-        let values = output.into_iter().map(Expr::LoadLocal).chain([fraction, residual, status].into_iter().map(Expr::LoadLocal));
-        for (index, value) in values.enumerate() {
-            builder.store_buffer(2, b(&builder, BinOp::Add, output_base.clone(), builder.const_u32(index as u32)), value);
-        }
-        let program = Program { version: 1, entry: 0, functions: vec![builder.finish(Ty::f32(), Expr::LoadLocal(status))] };
-        super::validate_program(&program).map_err(|error| error.to_string())?;
-        Ok(program)
-    }
+        std::array::from_fn(|index| Expr::LoadLocal(if index < 8 { output[index] } else { [fraction, residual, status][index - 8] }))
 }

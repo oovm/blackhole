@@ -1282,6 +1282,114 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_trace_vulkan_polar_ray_escapes_with_per_step_diagnostics() {
+        let camera = Camera::cinematic(BlackHole::schwarzschild(1.0));
+        let u = ((39.5 / 128.0) * 2.0 - 1.0) * (128.0 / 72.0);
+        let v = 1.0 - (0.5 / 72.0) * 2.0;
+        let initial = schwarzschild_geodesic_initial_state(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
+        let mut input = [0.0f32; 29];
+        input[..8].copy_from_slice(&[initial.t, initial.r, initial.theta, initial.phi, initial.ut, initial.ur, initial.utheta, initial.uphi].map(|value| value as f32));
+        input[9] = 0.08;
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).build().unwrap();
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 80.0, 6.0, 20.0, 1.0e-5];
+        let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(2));
+        let task = dispatch_task(55, &program, 1, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(1, 29, Access::Read), (2, 29, Access::Write), (3, 1, Access::Write)]
+                .into_iter().map(|(id, elements, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        let mut backend = VulkanBackend::new().expect("Vulkan adaptive trace polar ray");
+        backend.prepare(&graph).unwrap();
+        let mut chunks = 0;
+        while input[8] == 0.0 && chunks < 256 {
+            backend.write_f32(ResourceId(1), &input).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            let output = backend.read_f32(ResourceId(2)).unwrap();
+            assert!(output.iter().all(|value| value.is_finite()));
+            input.copy_from_slice(&output);
+            chunks += 1;
+        }
+        eprintln!("fused Vulkan polar chunks={chunks}, steps={}, status={}, r={}, max_null={}, energy_drift={}, angular_drift={}",
+            input[10], input[8], input[1], input[16], input[17], input[18]);
+        assert_eq!(input[8], 2.0);
+        assert!((input[1] - 80.0).abs() <= uniforms[9]);
+        assert!(input[16] < 1.0e-3);
+        assert!(input[17] < 1.0e-3);
+        assert!(input[18] < 2.0e-3);
+        assert!(input[10] > 64.0 && chunks < 256);
+    }
+
+    #[test]
+    fn adaptive_trace_chunk_matches_reference_events_on_cpu_and_vulkan() {
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(8).build().unwrap();
+        let encoded = serde_json::to_string(&program).unwrap();
+        let decoded: ucf_program::Program = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(ton_ucf_frontend::program_hash(&program), ton_ucf_frontend::program_hash(&decoded));
+        let mut input = [0.0f32; 29];
+        input[..8].copy_from_slice(&[0.0, 10.0, std::f32::consts::FRAC_PI_2 - 0.001, 0.3, 1.25, 1.0, 0.1, 0.0]);
+        input[9] = 0.04;
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 10.02, 6.0, 20.0, 1.0e-5];
+        let initial = SphericalState { t: input[0] as f64, r: input[1] as f64, theta: input[2] as f64,
+            phi: input[3] as f64, ut: input[4] as f64, ur: input[5] as f64, utheta: input[6] as f64, uphi: input[7] as f64 };
+        let integration = ton_geodesic::AdaptiveRk4Config::builder().tolerances(uniforms[1] as f64, uniforms[2] as f64)
+            .step_range(uniforms[3] as f64, uniforms[4] as f64).build().unwrap();
+        let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).radial_boundaries(uniforms[5] as f64, uniforms[6] as f64)
+            .equatorial_disk(6.0, 20.0).localization(uniforms[9] as f64, 48).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).integration(integration).events(events).initial_step(input[9] as f64).build().unwrap();
+        let expected = ton_geodesic::schwarzschild_adaptive_trace(initial, config).unwrap();
+        assert_eq!(expected.termination, ton_geodesic::AdaptiveTraceTermination::Escaped);
+        assert_eq!(expected.disk_events.len(), 1);
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        for (slot, value) in uniforms.into_iter().enumerate() { cpu.with_uniform(slot as u32, Value::F32(value)); }
+        cpu.with_buffer(1, input.into_iter().map(Value::F32).collect());
+        cpu.with_buffer(2, vec![Value::F32(0.0); 29]);
+        cpu.run_parallel(&program, 1).unwrap();
+        let cpu_output = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(cpu_output[8], 2.0);
+        assert_eq!(cpu_output[10], expected.accepted_steps as f64);
+        assert_eq!(cpu_output[13], 1.0);
+        assert!((cpu_output[14] - expected.disk_events[0].event.state.r).abs() < 2.0e-4);
+        assert!((cpu_output[15] - expected.disk_events[0].affine_parameter).abs() < 2.0e-4);
+        assert!((cpu_output[12] - expected.affine_parameter).abs() < 2.0e-4);
+        let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(2));
+        let task = dispatch_task(54, &program, 1, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(1, 29, Access::Read), (2, 29, Access::Write), (3, 1, Access::Write)]
+                .into_iter().map(|(id, elements, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        let mut backend = VulkanBackend::new().expect("Vulkan adaptive trace chunk");
+        backend.prepare(&graph).unwrap();
+        backend.write_f32(ResourceId(1), &input).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        let actual = backend.read_f32(ResourceId(2)).unwrap();
+        assert_eq!(actual[8], 2.0, "{actual:?}");
+        assert_eq!(actual[10], expected.accepted_steps as f32);
+        assert_eq!(actual[13], 1.0);
+        for index in 0..29 {
+            assert!((actual[index] as f64 - cpu_output[index]).abs() < 3.0e-4, "index={index}, actual={}, cpu={}", actual[index], cpu_output[index]);
+        }
+        backend.write_f32(ResourceId(1), &actual).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        assert_eq!(backend.read_f32(ResourceId(2)).unwrap(), actual);
+        let mut invalid = input;
+        invalid[9] = -1.0;
+        backend.write_f32(ResourceId(1), &invalid).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        let output = backend.read_f32(ResourceId(2)).unwrap();
+        assert_eq!(output[8], 5.0);
+        assert_eq!(&output[..8], &input[..8]);
+        assert_eq!(output[10], 0.0);
+    }
+
+    #[test]
     fn accepted_step_event_program_matches_independent_reference_and_vulkan() {
         let program = ton_ucf_frontend::SchwarzschildEventLocalizationBuilder::new().build().unwrap();
         let encoded = serde_json::to_string(&program).unwrap();
