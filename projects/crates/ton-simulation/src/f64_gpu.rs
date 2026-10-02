@@ -17,6 +17,8 @@ pub struct F64GpuTraceBatch {
     pub terminations: Vec<GpuTraceTermination>,
     /// 仅在实际执行与 readback 成功后记录的程序哈希。
     pub executed_program_hashes: Vec<u64>,
+    /// 为保持末批资源容量一致而实际执行、但不进入图像的重复实例数。
+    pub padded_instances: u32,
 }
 
 impl F64GpuTraceBatch {
@@ -46,13 +48,14 @@ pub struct SchwarzschildF64GpuTraceBuilder {
     outer: f64,
     maximum_steps: u32,
     chunk_steps: u32,
+    batch_instances: u32,
 }
 
 impl SchwarzschildF64GpuTraceBuilder {
     /// 默认最大步长 0.02M，总预算 32768，捕获面位于坐标视界外。
     pub fn new(mass: f64) -> Self {
         Self { mass, step: 0.02 * mass, capture: 2.0002 * mass, escape: 80.0 * mass,
-            inner: 6.0 * mass, outer: 20.0 * mass, maximum_steps: 32768, chunk_steps: 256 }
+            inner: 6.0 * mass, outer: 20.0 * mass, maximum_steps: 32768, chunk_steps: 256, batch_instances: 8192 }
     }
     /// 设置最大仿射步长，近视界仍受位移上限约束。
     pub fn maximum_step(mut self, value: f64) -> Self { self.step = value; self }
@@ -64,13 +67,15 @@ impl SchwarzschildF64GpuTraceBuilder {
     pub fn maximum_steps(mut self, value: u32) -> Self { self.maximum_steps = value; self }
     /// 设置单次 dispatch 的有界积分预算。
     pub fn chunk_steps(mut self, value: u32) -> Self { self.chunk_steps = value; self }
+    /// 限制单个 GPU dispatch 的实例规模，避免长循环大图触发设备超时。
+    pub fn batch_instances(mut self, value: u32) -> Self { self.batch_instances = value; self }
 
     fn validate(self) -> TonResult<()> {
         if [self.mass, self.step, self.capture, self.escape, self.inner, self.outer].iter().any(|value| !value.is_finite())
             || self.mass <= 0.0 || self.step <= 0.0 || self.step > 0.1 * self.mass
             || self.capture <= 2.0 * self.mass || self.inner < 6.0 * self.mass || self.inner <= self.capture
             || self.outer <= self.inner || self.escape <= self.outer || self.maximum_steps == 0
-            || self.chunk_steps == 0 || self.chunk_steps > 65536 {
+            || self.chunk_steps == 0 || self.chunk_steps > 65536 || self.batch_instances == 0 || self.batch_instances > 8192 {
             return Err(TonError::Domain("invalid F64 GPU trace configuration".into()));
         }
         Ok(())
@@ -85,9 +90,20 @@ impl SchwarzschildF64GpuTraceBuilder {
             (((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * width as f64 / height as f64,
                 1.0 - (y as f64 + 0.5) / height as f64 * 2.0))).collect::<Vec<_>>();
         let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create F64 trace backend: {error}")))?;
-        let (initial, hash) = crate::adaptive_gpu::initialize_f64_camera(&mut backend, camera, &coordinates, self.mass)?;
-        let mut result = self.execute_initial_with_backend(&mut backend, &initial)?;
-        result.executed_program_hashes.insert(0, hash);
+        let capacity = coordinates.len().min(self.batch_instances as usize);
+        let mut result = F64GpuTraceBatch { records: Vec::with_capacity(coordinates.len()), terminations: Vec::with_capacity(coordinates.len()),
+            executed_program_hashes: Vec::new(), padded_instances: 0 };
+        for batch in coordinates.chunks(capacity) {
+            let mut padded = batch.to_vec();
+            padded.resize(capacity, batch[0]);
+            let (initial, hash) = crate::adaptive_gpu::initialize_f64_camera(&mut backend, camera, &padded, self.mass)?;
+            let output = self.execute_initial_with_backend(&mut backend, &initial)?;
+            result.records.extend(output.records.into_iter().take(batch.len()));
+            result.terminations.extend(output.terminations.into_iter().take(batch.len()));
+            result.executed_program_hashes.push(hash);
+            result.executed_program_hashes.extend(output.executed_program_hashes);
+            result.padded_instances += (capacity - batch.len()) as u32;
+        }
         Ok(result)
     }
 
@@ -141,7 +157,7 @@ impl SchwarzschildF64GpuTraceBuilder {
             4.0 => Ok(GpuTraceTermination::EventLocalizationFailure), 5.0 => Ok(GpuTraceTermination::InvalidInput),
             status => Err(TonError::Domain(format!("unknown F64 trace status {status}"))),
         }).collect::<TonResult<Vec<_>>>()?;
-        Ok(F64GpuTraceBatch { records, terminations, executed_program_hashes: hashes })
+        Ok(F64GpuTraceBatch { records, terminations, executed_program_hashes: hashes, padded_instances: 0 })
     }
 }
 
@@ -155,6 +171,18 @@ mod tests {
         let angular = state.angular_momentum();
         [state.t, state.position.x, state.position.y, state.position.z, state.energy,
             state.velocity.x, state.velocity.y, state.velocity.z, angular.dot(angular)]
+    }
+
+    #[test]
+    fn f64_native_camera_batches_preserve_pixel_order_and_report_padding() {
+        let camera = Camera::cinematic(BlackHole::schwarzschild(1.0));
+        let plain = SchwarzschildF64GpuTraceBuilder::new(1.0).maximum_steps(1).execute_camera(camera, 5, 3).unwrap();
+        let batched = SchwarzschildF64GpuTraceBuilder::new(1.0).maximum_steps(1).batch_instances(8).execute_camera(camera, 5, 3).unwrap();
+        assert_eq!(plain.records, batched.records);
+        assert_eq!(plain.terminations, batched.terminations);
+        assert_eq!(plain.padded_instances, 0); assert_eq!(batched.padded_instances, 1);
+        assert_eq!(batched.records.len(), 15); assert_eq!(batched.executed_program_hashes.len(), 4);
+        assert!(SchwarzschildF64GpuTraceBuilder::new(1.0).batch_instances(8193).execute_camera(camera, 5, 3).is_err());
     }
 
     #[test]
