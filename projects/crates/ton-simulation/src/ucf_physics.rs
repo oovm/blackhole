@@ -1237,6 +1237,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn polar_scattering_reference_converges_under_step_refinement() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let u = ((39.5 / 128.0) * 2.0 - 1.0) * (128.0 / 72.0);
+        let v = 1.0 - (0.5 / 72.0) * 2.0;
+        let direction = camera.ray_direction(u, v);
+        let initial = schwarzschild_geodesic_initial_state(1.0, camera.position, direction).unwrap();
+        let mut results = Vec::new();
+        for step in [0.08, 0.02, 0.005, 0.00125] {
+            let mut state = initial;
+            let mut residual = 0.0f64;
+            for _ in 0..(200.0 / step) as usize {
+                if state.r >= 80.0 || state.r <= 2.0002 { break; }
+                state = reference_geodesic_rk4_step(1.0, state, step);
+                let f = 1.0 - 2.0 / state.r;
+                let temporal = f * state.ut * state.ut;
+                let spatial = state.ur * state.ur / f + state.r * state.r *
+                    (state.utheta * state.utheta + state.theta.sin().powi(2) * state.uphi * state.uphi);
+                let relative = ((spatial - temporal) / (spatial.abs() + temporal.abs())).abs();
+                if !relative.is_finite() { residual = f64::INFINITY; break; }
+                residual = residual.max(relative);
+            }
+            eprintln!("reference step={step}, r={}, theta={}, max_null_residual={residual}", state.r, state.theta);
+            results.push((state, residual));
+        }
+        let (finest, residual) = results.last().unwrap();
+        assert!(finest.r >= 80.0 && finest.r.is_finite());
+        assert!(*residual < 1.0e-3, "finest null residual={residual}");
+        assert!(*residual < results[0].1);
+    }
+
+    #[test]
     fn signed_spherical_chunk_matches_independent_reference() {
         let state = SphericalState { t: 0.0, r: 12.0, theta: -0.8, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.22, uphi: 0.08 };
         let expected = reference_geodesic_rk4_step(1.0, state, 0.01);
