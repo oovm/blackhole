@@ -356,7 +356,23 @@ fn execute_geodesic_chunk_program_cpu_with_state(
     states: Vec<SphericalState>,
     bound_infall: Vec<bool>,
 ) -> TonResult<GeodesicChunkProgramExecution> {
-    let task = program_task(graph, "schwarzschild_geodesic_rk4_chunk")?;
+    let task = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.params.get("program_name"),
+                Some(ParamValue::Str(name))
+                    if name == "schwarzschild_geodesic_rk4_chunk"
+                        || name == "schwarzschild_geodesic_rk4_chunk_with_disk"
+            )
+        })
+        .ok_or_else(|| TonError::Domain("UCF geodesic chunk program is missing".into()))?;
+    let extended_state = matches!(
+        task.params.get("program_name"),
+        Some(ParamValue::Str(name)) if name == "schwarzschild_geodesic_rk4_chunk_with_disk"
+    );
     let ParamValue::Program { hash, body, .. } = task
         .params
         .get("program")
@@ -382,6 +398,11 @@ fn execute_geodesic_chunk_program_cpu_with_state(
             [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi]
                 .into_iter()
                 .chain([0.0, if *bound { 1.0 } else { 0.0 }])
+                .chain(if extended_state {
+                    vec![0.0, 0.0, 0.0, 0.0]
+                } else {
+                    Vec::new()
+                })
                 .map(|value| Value::F32(value as f32))
         })
         .collect::<Vec<_>>();
@@ -401,12 +422,13 @@ fn execute_geodesic_chunk_program_cpu_with_state(
         .buffers
         .get(&0)
         .ok_or_else(|| TonError::Domain("geodesic chunk state buffer was not written".into()))?;
-    if output.len() != states.len() * 10 {
+    let output_stride = if extended_state { 14 } else { 10 };
+    if output.len() != states.len() * output_stride {
         return Err(TonError::Domain("geodesic chunk state buffer has invalid length".into()));
     }
     let mut next_states = Vec::with_capacity(states.len());
     let mut statuses = Vec::with_capacity(states.len());
-    for values in output.chunks_exact(10) {
+    for values in output.chunks_exact(output_stride) {
         let scalar = |index: usize| {
             values[index]
                 .as_f64()

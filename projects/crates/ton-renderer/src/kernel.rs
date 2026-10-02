@@ -2,8 +2,8 @@
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ton_ucf_frontend::{
-    Program, camera_ray_batch, disk_shade_novikov, disk_shade_novikov_batch, equatorial_orbit_rk4_step, geodesic_capture_classify,
-    geodesic_radial_infall_steps, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk, schwarzschild_initial_state_batch,
+    Program, camera_ray_batch, disk_shade_novikov, disk_shade_novikov_batch, disk_shade_novikov_from_geodesic_batch, equatorial_orbit_rk4_step, geodesic_capture_classify,
+    geodesic_radial_infall_steps, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_initial_state_batch,
     tone_map_aces, vector_math_normalize,
 };
 use ucf_types::ParamValue;
@@ -53,6 +53,22 @@ pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
     }
 }
 
+/// 按帧所需的状态布局选择测地线 Program。
+pub fn trace_kernel_for_disk(integrator: IntegratorKind, disk: DiskModelKind) -> KernelInstance {
+    if matches!(integrator, IntegratorKind::Geodesic3d)
+        && matches!(disk, DiskModelKind::NovikovThorneThin)
+    {
+        return KernelInstance {
+            op: integrator.ucf_op_name().to_string(),
+            binding: KernelBinding::from_program(
+                "schwarzschild_geodesic_rk4_chunk_with_disk",
+                schwarzschild_geodesic_rk4_chunk_with_disk(16),
+            ),
+        };
+    }
+    trace_kernel(integrator)
+}
+
 /// 解析捕获分类程序绑定（史瓦西 `b < b_c`）。
 pub fn capture_classify_kernel() -> KernelBinding {
     let p = geodesic_capture_classify();
@@ -84,6 +100,17 @@ pub fn shade_batch_kernel(disk: DiskModelKind) -> KernelBinding {
             let p = vector_math_normalize();
             KernelBinding::from_program("vector_math_normalize", p)
         }
+    }
+}
+
+/// 从扩展测地线状态读取盘面交点的批量着色绑定。
+pub fn shade_state_batch_kernel(disk: DiskModelKind) -> KernelBinding {
+    match disk {
+        DiskModelKind::NovikovThorneThin => KernelBinding::from_program(
+            "disk_shade_novikov_from_geodesic_batch",
+            disk_shade_novikov_from_geodesic_batch(),
+        ),
+        _ => shade_batch_kernel(disk),
     }
 }
 
@@ -124,13 +151,19 @@ pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) 
 /// 帧图构建后标注 generate_rays / trace / shade / 后处理的程序绑定。
 pub fn annotate_frame_programs(graph: &mut Graph, integrator: IntegratorKind, disk: DiskModelKind, bloom: bool) {
     attach_binding(graph, 11, &generate_rays_kernel());
-    let trace = trace_kernel(integrator);
+    let trace = trace_kernel_for_disk(integrator, disk);
     let trace_task = if matches!(integrator, IntegratorKind::Geodesic3d) { 13 } else { 12 };
     if matches!(integrator, IntegratorKind::Geodesic3d) {
         attach_binding(graph, 12, &schwarzschild_initial_state_kernel());
     }
     attach_binding(graph, trace_task, &trace.binding);
-    let shade = shade_batch_kernel(disk);
+    let shade = if matches!(integrator, IntegratorKind::Geodesic3d)
+        && matches!(disk, DiskModelKind::NovikovThorneThin)
+    {
+        shade_state_batch_kernel(disk)
+    } else {
+        shade_batch_kernel(disk)
+    };
     let shade_task = trace_task + 1;
     attach_binding(graph, shade_task, &shade);
     if bloom {
