@@ -25,6 +25,10 @@ mod cartesian_radiance;
 pub use cartesian_radiance::SchwarzschildDiskFrequencyBuilder;
 mod thermal_spectrum;
 pub use thermal_spectrum::BlackbodySpectrumBuilder;
+mod spectral_color;
+pub use spectral_color::VisibleSpectrumColorBuilder;
+mod spectral_disk;
+pub use spectral_disk::{ZeroTorqueDiskInputsBuilder, SpectralDisplayBuilder};
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{

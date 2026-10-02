@@ -2,6 +2,22 @@
 
 use super::{b, BinOp, Expr, Program, ProgramBuilder, ScalarTy, StructuredFunctionBuilder, Ty, UnOp};
 
+pub(super) fn intensity(builder: &mut StructuredFunctionBuilder, temperature: Expr, frequency: Expr) -> Expr {
+    let exponent = b(builder, BinOp::Mul, builder.const_f32(47.9924307337), b(builder, BinOp::Div, frequency.clone(), temperature));
+    let exponent = Expr::LoadLocal(builder.let_value(Ty::f32(), exponent));
+    let safe = b(builder, BinOp::Min, exponent.clone(), builder.const_f32(80.0));
+    let polynomial = b(builder, BinOp::Mul, safe.clone(), b(builder, BinOp::Add, builder.const_f32(1.0),
+        b(builder, BinOp::Mul, safe.clone(), b(builder, BinOp::Add, builder.const_f32(0.5),
+            b(builder, BinOp::Mul, safe.clone(), b(builder, BinOp::Add, builder.const_f32(1.0 / 6.0),
+                b(builder, BinOp::Mul, safe.clone(), builder.const_f32(1.0 / 24.0))))))));
+    let exponential = b(builder, BinOp::Sub, b(builder, BinOp::Pow, builder.const_f32(std::f32::consts::E), safe), builder.const_f32(1.0));
+    let denominator = builder.select(b(builder, BinOp::Lt, exponent.clone(), builder.const_f32(0.01)), polynomial, exponential);
+    let numerator = b(builder, BinOp::Mul, b(builder, BinOp::Mul, b(builder, BinOp::Mul,
+        builder.const_f32(1.47449946476e-14), frequency.clone()), frequency.clone()), frequency);
+    let value = builder.select(b(builder, BinOp::Gt, exponent, builder.const_f32(80.0)), builder.const_f32(0.0), b(builder, BinOp::Div, numerator, denominator));
+    Expr::LoadLocal(builder.let_value(Ty::f32(), value))
+}
+
 /// 输入 buffer 1 为 `[temperature_kelvin, observer_frequency_thz, g]`。
 /// 输出 buffer 2 为 `[I_nu,status]`，I_nu 单位 W m^-2 sr^-1 Hz^-1。
 /// status=1 有效，status=2 非法。函数返回值必须绑定独立资源。
@@ -32,22 +48,7 @@ impl BlackbodySpectrumBuilder {
         let valid = Expr::LoadLocal(builder.let_value(Ty::Scalar(ScalarTy::Bool), valid));
         let temperature = builder.select(valid.clone(), effective, builder.const_f32(6000.0));
         let frequency = builder.select(valid.clone(), input[1].clone(), builder.const_f32(500.0));
-        let exponent = b(&builder, BinOp::Mul, builder.const_f32(47.9924307337),
-            b(&builder, BinOp::Div, frequency.clone(), temperature));
-        let exponent = Expr::LoadLocal(builder.let_value(Ty::f32(), exponent));
-        let safe_exponent = b(&builder, BinOp::Min, exponent.clone(), builder.const_f32(80.0));
-        let polynomial = b(&builder, BinOp::Mul, safe_exponent.clone(), b(&builder, BinOp::Add, builder.const_f32(1.0),
-            b(&builder, BinOp::Mul, safe_exponent.clone(), b(&builder, BinOp::Add, builder.const_f32(0.5),
-                b(&builder, BinOp::Mul, safe_exponent.clone(), b(&builder, BinOp::Add, builder.const_f32(1.0 / 6.0),
-                    b(&builder, BinOp::Mul, safe_exponent.clone(), builder.const_f32(1.0 / 24.0))))))));
-        let exponential = b(&builder, BinOp::Sub,
-            b(&builder, BinOp::Pow, builder.const_f32(std::f32::consts::E), safe_exponent), builder.const_f32(1.0));
-        let denominator = builder.select(b(&builder, BinOp::Lt, exponent.clone(), builder.const_f32(0.01)), polynomial, exponential);
-        let numerator = b(&builder, BinOp::Mul, b(&builder, BinOp::Mul,
-            b(&builder, BinOp::Mul, builder.const_f32(1.47449946476e-14), frequency.clone()), frequency.clone()), frequency);
-        let intensity = builder.select(b(&builder, BinOp::Gt, exponent, builder.const_f32(80.0)),
-            builder.const_f32(0.0), b(&builder, BinOp::Div, numerator, denominator));
-        let intensity = Expr::LoadLocal(builder.let_value(Ty::f32(), intensity));
+        let intensity = intensity(&mut builder, temperature, frequency);
         let finite = builder.select(builder.unary(UnOp::IsFinite, intensity.clone()),
             b(&builder, BinOp::Ge, intensity.clone(), builder.const_f32(0.0)), Expr::ConstBool(false));
         let valid = builder.select(valid, finite, Expr::ConstBool(false));
