@@ -66,6 +66,18 @@ mod tests {
         let expected_time = 2.001 - capture[3] + 2.0 * ((2.001 - 2.0) / (capture[3] - 2.0)).ln();
         assert!((capture[0] - expected_time).abs() < 1.0e-8, "radial coordinate time error={}", (capture[0] - expected_time).abs());
     }
+
+    #[test]
+    fn f64_trace_records_initial_residual_before_immediate_capture() {
+        let program = SchwarzschildCartesianF64TraceBuilder::new().maximum_steps(1).build().unwrap();
+        let mut initial = radial(2.0001, -1.0);
+        initial[4] = 1.0 - 1.0e-7; initial[19] = initial[4];
+        let result = execute(&program, &initial, [1.0, 0.02, 2.0002, 80.0, 6.0, 20.0]);
+        let expected_null = (1.0 - initial[4] * initial[4]) / (1.0 + initial[4] * initial[4]);
+        assert_eq!(result[8], 1.0); assert_eq!(result[10], 0.0);
+        assert!((result[16] - expected_null).abs() < 1.0e-15);
+        assert_eq!(execute(&program, &result, [1.0, 0.02, 2.0002, 80.0, 6.0, 20.0]), result);
+    }
 }
 
 fn both(builder: &StructuredFunctionBuilder, left: Expr, right: Expr) -> Expr {
@@ -235,6 +247,8 @@ impl SchwarzschildCartesianF64TraceBuilder {
             builder.select(b(&builder, BinOp::Eq, Expr::LoadLocal(record[8]), builder.const_f64(status as f64)), Expr::ConstBool(true), known));
         valid = both(&builder, valid, known_status);
         let valid = saved(&mut builder, valid, Ty::Scalar(ScalarTy::Bool));
+        let inspect_initial = both(&builder, valid.clone(), b(&builder, BinOp::Eq, Expr::LoadLocal(record[8]), builder.const_f64(0.0)));
+        observe(&mut builder, &record, &initial, &mass, inspect_initial);
         builder.store_local(record[8], builder.select(valid, Expr::LoadLocal(record[8]), builder.const_f64(5.0)));
         let initial_running = b(&builder, BinOp::Eq, Expr::LoadLocal(record[8]), builder.const_f64(0.0));
         let initial_capture = b(&builder, BinOp::Le, radius(&builder, &initial), capture.clone());
