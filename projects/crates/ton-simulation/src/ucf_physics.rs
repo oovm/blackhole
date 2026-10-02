@@ -170,6 +170,69 @@ pub fn schwarzschild_initial_state_ucf_cpu_batch(
         .collect()
 }
 
+/// 由原生 Vulkan UCF backend 批量构造 Schwarzschild 球坐标初态。
+///
+/// Vulkan 不支持该 Program 或资源绑定失败时直接返回错误，不回退 CPU。
+pub fn schwarzschild_initial_state_ucf_vulkan_batch(
+    mass: f64,
+    critical_impact: f64,
+    rays: &[(Vec3, Vec3)],
+) -> TonResult<Vec<SphericalState>> {
+    if rays.is_empty() {
+        return Ok(Vec::new());
+    }
+    let count = u32::try_from(rays.len()).map_err(|_| TonError::Domain("ray batch exceeds u32 capacity".into()))?;
+    let program = schwarzschild_initial_state_batch();
+    let input = rays
+        .iter()
+        .flat_map(|(origin, direction)| {
+            [origin.x, origin.y, origin.z, direction.x, direction.y, direction.z]
+                .into_iter()
+                .map(|value| value as f32)
+        })
+        .collect::<Vec<_>>();
+    let params = BTreeMap::from([
+        ("uniform_0".into(), ParamValue::F64(mass)),
+        ("uniform_1".into(), ParamValue::F64(critical_impact)),
+        ("output".into(), ParamValue::I64(3)),
+        ("buffer_1".into(), ParamValue::I64(1)),
+        ("buffer_2".into(), ParamValue::I64(2)),
+    ]);
+    let task = dispatch_task(23, &program, count, ResourceId(3), Some(ResourceId(1)), params)?;
+    let graph = Graph {
+        resources: ResourceGraph {
+            nodes: vec![
+                ResourceNode { id: ResourceId(1), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 6 * 4) },
+                ResourceNode { id: ResourceId(2), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 10 * 4) },
+                ResourceNode { id: ResourceId(3), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) },
+            ],
+        },
+        tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+    };
+    graph.validate().map_err(|error| TonError::Domain(format!("Vulkan initial state graph: {error}")))?;
+    let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create Vulkan backend: {error}")))?;
+    backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare Vulkan initial state graph: {error}")))?;
+    backend.write_f32(ResourceId(1), &input).map_err(|error| TonError::Domain(format!("upload initial state rays: {error}")))?;
+    backend.run_prepared(&graph).map_err(|error| TonError::Domain(format!("execute Vulkan initial state graph: {error}")))?;
+    let output = backend.read_f32(ResourceId(2)).map_err(|error| TonError::Domain(format!("read Vulkan initial state output: {error}")))?;
+    if output.len() != rays.len() * 10 {
+        return Err(TonError::Domain("Vulkan initial state output has invalid length".into()));
+    }
+    output
+        .chunks_exact(10)
+        .map(|values| Ok(SphericalState {
+            t: values[0] as f64,
+            r: values[1] as f64,
+            theta: values[2] as f64,
+            phi: values[3] as f64,
+            ut: values[4] as f64,
+            ur: values[5] as f64,
+            utheta: values[6] as f64,
+            uphi: values[7] as f64,
+        }))
+        .collect()
+}
+
 /// 由 UCF CPU Interpreter 批量计算 Schwarzschild 守恒冲击参数。
 pub fn schwarzschild_impact_ucf_cpu_batch(mass: f64, rays: &[(Vec3, Vec3)]) -> TonResult<Vec<f64>> {
     let input = rays.iter().flat_map(|(position, direction)| impact_input(*position, *direction).into_iter().map(Value::F32)).collect::<Vec<_>>();
@@ -656,6 +719,41 @@ mod tests {
         for ((cpu_state, cpu_status), (gpu_state, gpu_status)) in cpu.into_iter().zip(gpu) {
             assert!((cpu_state.r - gpu_state.r).abs() < 3.0e-3);
             assert_eq!(cpu_status, gpu_status);
+        }
+    }
+
+    #[test]
+    fn vulkan_initial_state_program_matches_cpu_when_available() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let rays = vec![
+            (Vec3::new(0.0, 0.0, 20.0), Vec3::new(0.0, 0.0, -1.0)),
+            (Vec3::new(3.0, -2.0, 18.0), Vec3::new(0.2, 0.1, -1.0).normalize()),
+        ];
+        let cpu = schwarzschild_initial_state_ucf_cpu_batch(
+            bh.mass,
+            bh.critical_impact_parameter(),
+            &rays,
+        )
+        .expect("CPU initial state program");
+        let gpu = match schwarzschild_initial_state_ucf_vulkan_batch(
+            bh.mass,
+            bh.critical_impact_parameter(),
+            &rays,
+        ) {
+            Ok(value) => value,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("Vulkan initial state program: {error}"),
+        };
+        assert_eq!(gpu.len(), cpu.len());
+        for (actual, expected) in gpu.into_iter().zip(cpu) {
+            let actual = [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi];
+            let expected = [expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi];
+            for (index, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
+                if index == 3 && expected.sin().abs() < 1.0e-8 {
+                    continue;
+                }
+                assert!((actual - expected).abs() < 4.0e-3, "index={index}, actual={actual}, expected={expected}");
+            }
         }
     }
 
