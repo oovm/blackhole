@@ -102,8 +102,8 @@ fn sample_capture_at_step(
                 terminations[idx + width as usize],
             ];
             if neighbors.iter().any(|t| !is_captured_termination(*t)) {
-                let u = (x as f64 / width as f64 * 2.0 - 1.0) * aspect;
-                let v = 1.0 - y as f64 / height as f64 * 2.0;
+                let u = ((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * aspect;
+                let v = 1.0 - (y as f64 + 0.5) / height as f64 * 2.0;
                 boundary_r_sum += (u * u + v * v).sqrt();
                 boundary_n += 1;
             }
@@ -135,8 +135,8 @@ fn sample_capture_at_step(
 }
 
 fn pixel_ray_dir(x: u32, y: u32, w: u32, h: u32, cam: Camera) -> Vec3 {
-    let u = (x as f64 / w as f64) * 2.0 - 1.0;
-    let v = 1.0 - (y as f64 / h as f64) * 2.0;
+    let u = ((x as f64 + 0.5) / w as f64) * 2.0 - 1.0;
+    let v = 1.0 - ((y as f64 + 0.5) / h as f64) * 2.0;
     let aspect = w as f64 / h as f64;
     cam.ray_direction(u * aspect, v)
 }

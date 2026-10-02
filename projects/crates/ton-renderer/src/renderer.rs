@@ -227,8 +227,8 @@ impl Renderer {
         cam: Camera,
         ucf_rays: Option<&mut CameraRayUcf>,
     ) -> Vec3 {
-        let u = (x as f64 / w as f64) * 2.0 - 1.0;
-        let v = 1.0 - (y as f64 / h as f64) * 2.0;
+        let u = ((x as f64 + 0.5) / w as f64) * 2.0 - 1.0;
+        let v = 1.0 - ((y as f64 + 0.5) / h as f64) * 2.0;
         let aspect = w as f64 / h as f64;
         let u_scaled = u * aspect;
         if let Some(rays) = ucf_rays {
