@@ -29,6 +29,8 @@ mod spectral_color;
 pub use spectral_color::VisibleSpectrumColorBuilder;
 mod spectral_disk;
 pub use spectral_disk::{ZeroTorqueDiskInputsBuilder, SpectralDisplayBuilder};
+mod graybody;
+pub use graybody::GraybodyEmissionBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
