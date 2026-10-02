@@ -216,6 +216,24 @@ mod tests {
     }
 
     #[test]
+    fn packed_radiative_transfer_program_matches_cpu_and_vulkan() {
+        let program = ton_ucf_frontend::PackedRadiativeTransferBuilder::new().maximum_events(4).build().unwrap();
+        let input = [1.0f32, 0.0, 2.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut backend = VulkanBackend::new().unwrap();
+        let output = execute_stage(&mut backend, &program, &input, 10, 4, 134, &[1.0], None).unwrap();
+        assert!((output[0] - 1.25).abs() < 1.0e-5);
+        assert_eq!(output[2], 1.0);
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        cpu.with_uniform(0, ton_ucf_frontend::Value::F32(1.0));
+        cpu.with_buffer(1, input.into_iter().map(ton_ucf_frontend::Value::F32).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 4]);
+        cpu.run_parallel(&program, 1).unwrap();
+        for (actual, expected) in output.iter().zip(cpu.buffer(2).unwrap()) {
+            assert!(((*actual as f64) - expected.as_f64().unwrap()).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
     fn radiative_transfer_uses_real_reference_disk_events_on_cpu_and_vulkan() {
         let initial = ton_geodesic::SchwarzschildCartesianNullState::from_ray(
             1.0, ton_types::Vec3::new(10.0, 0.0, 0.01), ton_types::Vec3::new(0.0, 0.0, -1.0),
