@@ -102,7 +102,7 @@ fn and(builder: &StructuredFunctionBuilder, left: Expr, right: Expr) -> Expr {
 
 fn surface(builder: &StructuredFunctionBuilder, state: &[Expr; 8], kind: &Expr, radius: &Expr, model: IntegrationModel) -> Expr {
     let plane = match model {
-        IntegrationModel::CartesianNull => state[3].clone(),
+        IntegrationModel::CartesianNull | IntegrationModel::CartesianConserved(_) => state[3].clone(),
         _ => b(builder, BinOp::Mul, state[1].clone(), builder.unary(UnOp::Cos, state[2].clone())),
     };
     builder.select(b(builder, BinOp::Eq, kind.clone(), builder.const_f32(0.0)),

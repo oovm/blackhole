@@ -8,14 +8,14 @@ pub(crate) fn radius(builder: &StructuredFunctionBuilder, state: &[Expr; 8]) -> 
     builder.unary(UnOp::Sqrt, b(builder, BinOp::Add, b(builder, BinOp::Add, square(1), square(2)), square(3)))
 }
 
-pub(crate) fn derivative(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr) -> [Expr; 8] {
+pub(crate) fn derivative(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr, conserved_angular: Option<Expr>) -> [Expr; 8] {
     let radius = radius(builder, state);
     let cross = |first: usize, second: usize, third: usize, fourth: usize| b(builder, BinOp::Sub,
         b(builder, BinOp::Mul, state[first].clone(), state[second].clone()),
         b(builder, BinOp::Mul, state[third].clone(), state[fourth].clone()));
     let angular = [cross(2, 7, 3, 6), cross(3, 5, 1, 7), cross(1, 6, 2, 5)];
     let square = |index: usize| b(builder, BinOp::Mul, angular[index].clone(), angular[index].clone());
-    let angular_squared = b(builder, BinOp::Add, b(builder, BinOp::Add, square(0), square(1)), square(2));
+    let angular_squared = conserved_angular.unwrap_or_else(|| b(builder, BinOp::Add, b(builder, BinOp::Add, square(0), square(1)), square(2)));
     let radius_squared = b(builder, BinOp::Mul, radius.clone(), radius.clone());
     let radius_fifth = b(builder, BinOp::Mul, b(builder, BinOp::Mul, radius_squared.clone(), radius_squared), radius.clone());
     let coefficient = b(builder, BinOp::Div, b(builder, BinOp::Mul,

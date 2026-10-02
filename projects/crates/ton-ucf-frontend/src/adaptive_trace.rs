@@ -137,7 +137,7 @@ fn square(builder: &StructuredFunctionBuilder, value: Expr) -> Expr {
 }
 
 fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr, model: IntegrationModel) -> [Expr; 3] {
-    if matches!(model, IntegrationModel::CartesianNull) {
+    if model.is_cartesian() {
         let [null, angular] = super::cartesian_null::invariants(builder, state, mass);
         return [state[4].clone(), angular, null];
     }
@@ -159,7 +159,7 @@ fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Exp
 fn observe(builder: &mut StructuredFunctionBuilder, locals: &[u32; 29], state: &[Expr; 8], mass: &Expr, enabled: Expr, model: IntegrationModel) {
     let [energy, angular, null] = invariants(builder, state, mass, model);
     let energy_drift = abs(builder, b(builder, BinOp::Div, b(builder, BinOp::Sub, energy, Expr::LoadLocal(locals[19])), Expr::LoadLocal(locals[19])));
-    let angular_drift = if matches!(model, IntegrationModel::CartesianNull) {
+    let angular_drift = if model.is_cartesian() {
         let scale = b(builder, BinOp::Max, Expr::LoadLocal(locals[20]), square(builder,
             b(builder, BinOp::Mul, mass.clone(), Expr::LoadLocal(locals[19]))));
         b(builder, BinOp::Div, abs(builder, b(builder, BinOp::Sub, angular, Expr::LoadLocal(locals[20]))), scale)
@@ -249,6 +249,7 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
         for (index, value) in [(19, energy), (20, angular), (16, null)] {
             builder.store_local(locals[index], builder.select(Expr::LoadLocal(initialized), value, Expr::LoadLocal(locals[index])));
         }
+        let model = if self.cartesian { IntegrationModel::CartesianConserved(locals[20]) } else { model };
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(0.0));
         let radius = model.radius(&builder, &initial);
         let captured = b(&builder, BinOp::Le, radius.clone(), uniforms[5].clone());
@@ -327,7 +328,7 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
 }
 
 fn outgoing(builder: &StructuredFunctionBuilder, state: &[Expr; 8], model: IntegrationModel) -> Expr {
-    let radial = if matches!(model, IntegrationModel::CartesianNull) {
+    let radial = if model.is_cartesian() {
         (1..=3).fold(builder.const_f32(0.0), |sum, index| b(builder, BinOp::Add, sum,
             b(builder, BinOp::Mul, state[index].clone(), state[index + 4].clone())))
     } else { state[5].clone() };

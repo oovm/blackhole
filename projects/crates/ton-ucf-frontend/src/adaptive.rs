@@ -53,16 +53,20 @@ pub(crate) fn snapshot(builder: &mut StructuredFunctionBuilder, values: [Expr; 8
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum IntegrationModel { Spherical, NullEnergy, CartesianNull }
+pub(crate) enum IntegrationModel { Spherical, NullEnergy, CartesianNull, CartesianConserved(u32) }
 
 impl From<bool> for IntegrationModel {
     fn from(null_energy: bool) -> Self { if null_energy { Self::NullEnergy } else { Self::Spherical } }
 }
 
 impl IntegrationModel {
+    pub(crate) fn is_cartesian(self) -> bool {
+        matches!(self, Self::CartesianNull | Self::CartesianConserved(_))
+    }
+
     pub(crate) fn radius(self, builder: &StructuredFunctionBuilder, state: &[Expr; 8]) -> Expr {
         match self {
-            Self::CartesianNull => super::cartesian_null::radius(builder, state),
+            Self::CartesianNull | Self::CartesianConserved(_) => super::cartesian_null::radius(builder, state),
             _ => state[1].clone(),
         }
     }
@@ -73,7 +77,8 @@ pub(crate) fn rk4_model(builder: &mut StructuredFunctionBuilder, values: &[Expr;
     let derivative = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr| {
         match model {
             IntegrationModel::NullEnergy => super::null_energy::derivative(builder, values, mass),
-            IntegrationModel::CartesianNull => super::cartesian_null::derivative(builder, values, mass),
+            IntegrationModel::CartesianNull => super::cartesian_null::derivative(builder, values, mass, None),
+            IntegrationModel::CartesianConserved(local) => super::cartesian_null::derivative(builder, values, mass, Some(Expr::LoadLocal(local))),
             IntegrationModel::Spherical => schwarzschild_derivative(builder, values, mass),
         }
     };
