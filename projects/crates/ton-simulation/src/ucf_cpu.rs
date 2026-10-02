@@ -4,7 +4,8 @@ use ton_renderer::{
     apply_tone_map_ucf, bloom_pass_ucf, Framebuffer, Graph, DEFAULT_BLOOM_INTENSITY,
     DEFAULT_BLOOM_THRESHOLD,
 };
-use ton_types::{Camera, DiskModelKind, TonError, TonResult, Vec3};
+use ton_geodesic::SphericalState;
+use ton_types::{Camera, DiskModelKind, IntegratorKind, TonError, TonResult, Vec3};
 use ton_ucf_frontend::program_hash;
 use ucf_backend_cpu::CpuBackend;
 use ucf_program::Value;
@@ -26,6 +27,15 @@ pub struct CameraProgramExecution {
     pub program_hash: u64,
     /// 输出 ray buffer 解码后的方向。
     pub rays: Vec<Vec3>,
+}
+
+/// 一次真实 UCF 初态 Program 执行的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct InitialStateProgramExecution {
+    /// 实际执行的 Program hash。
+    pub program_hash: u64,
+    /// 输出 buffer 解码后的球坐标状态。
+    pub states: Vec<SphericalState>,
 }
 
 fn camera_uniforms(camera: Camera) -> Vec<(u32, Value)> {
@@ -124,6 +134,98 @@ pub fn execute_camera_program_cpu(
         })
         .collect::<TonResult<Vec<_>>>()?;
     Ok(CameraProgramExecution { program_hash: actual_hash, rays })
+}
+
+/// 从三维 Schwarzschild 帧图执行初态 Program。
+///
+/// 相机 Program 的输出资源是图资源 `2`，初态 Program 的输入资源是图资源
+/// `2`，但二者在各自 UCF 正文中使用固定的程序 buffer 槽 `1` 和 `2`。
+/// 这里显式完成图资源到程序槽的绑定，不根据任务名称调用领域函数。
+pub fn execute_initial_state_program_cpu(
+    scene: &Scene,
+    graph: &Graph,
+) -> TonResult<InitialStateProgramExecution> {
+    if scene.integrator != IntegratorKind::Geodesic3d {
+        return Err(TonError::Domain("initial state program requires Geodesic3d graph".into()));
+    }
+    let camera = execute_camera_program_cpu(scene, graph)?;
+    let task = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|node| node.id.0 == 12)
+        .ok_or_else(|| TonError::Domain("initial state task 12 is missing".into()))?;
+    let ParamValue::Program { hash, body, .. } = task
+        .params
+        .get("program")
+        .ok_or_else(|| TonError::Domain("initial state task has no UCF program body".into()))?
+    else {
+        return Err(TonError::Domain("initial state task program binding has invalid type".into()));
+    };
+    let program: ucf_program::Program = serde_json::from_str(body)
+        .map_err(|error| TonError::Domain(format!("decode initial state UCF program: {error}")))?;
+    let actual_hash = program_hash(&program);
+    if actual_hash != *hash {
+        return Err(TonError::Domain(format!(
+            "initial state program hash mismatch: expected {hash}, actual {actual_hash}"
+        )));
+    }
+    let input = camera
+        .rays
+        .iter()
+        .flat_map(|direction| {
+            [
+                scene.camera.position.x,
+                scene.camera.position.y,
+                scene.camera.position.z,
+                direction.x,
+                direction.y,
+                direction.z,
+            ]
+            .into_iter()
+            .map(|value| Value::F32(value as f32))
+        })
+        .collect::<Vec<_>>();
+    let output_seed = vec![Value::F32(0.0); camera.rays.len() * 10];
+    let report = CpuBackend::new()
+        .execute_program_with_buffers(
+            &program,
+            camera.rays.len() as u32,
+            [
+                (0, Value::F32(scene.black_hole.mass as f32)),
+                (1, Value::F32(scene.black_hole.critical_impact_parameter() as f32)),
+            ],
+            [(1, input), (2, output_seed)],
+        )
+        .map_err(TonError::Domain)?;
+    let output = report
+        .buffers
+        .get(&2)
+        .ok_or_else(|| TonError::Domain("initial state output buffer was not written".into()))?;
+    if output.len() != camera.rays.len() * 10 {
+        return Err(TonError::Domain("initial state output has invalid length".into()));
+    }
+    let states = output
+        .chunks_exact(10)
+        .map(|values| {
+            let scalar = |index: usize| {
+                values[index]
+                    .as_f64()
+                    .map_err(|error| TonError::Domain(format!("initial state value {index}: {error}")))
+            };
+            Ok(SphericalState {
+                t: scalar(0)?,
+                r: scalar(1)?,
+                theta: scalar(2)?,
+                phi: scalar(3)?,
+                ut: scalar(4)?,
+                ur: scalar(5)?,
+                utheta: scalar(6)?,
+                uphi: scalar(7)?,
+            })
+        })
+        .collect::<TonResult<Vec<_>>>()?;
+    Ok(InitialStateProgramExecution { program_hash: actual_hash, states })
 }
 
 fn task_op(graph: &Graph, task_id: u64) -> TonResult<&str> {
@@ -246,5 +348,29 @@ mod tests {
         assert!((center.x - expected.x).abs() < 2.0e-5);
         assert!((center.y - expected.y).abs() < 2.0e-5);
         assert!((center.z - expected.z).abs() < 2.0e-5);
+    }
+
+    #[test]
+    fn cpu_graph_executes_bound_initial_state_program() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_resolution(4, 3)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let execution = execute_initial_state_program_cpu(&scene, &graph)
+            .expect("bound initial state program must execute through UCF CPU backend");
+        assert_eq!(execution.states.len(), 12);
+        let center = execution.states[1 + 4];
+        let expected = ton_geodesic::schwarzschild_geodesic_initial_state(
+            scene.black_hole.mass,
+            scene.camera.position,
+            scene.camera.ray_direction(
+                (1.0 / 4.0 * 2.0 - 1.0) * 4.0 / 3.0,
+                1.0 - 1.0 / 3.0 * 2.0,
+            ),
+        )
+        .expect("reference initial state");
+        assert!((center.r - expected.r).abs() < 3.0e-4);
+        assert!((center.ut - expected.ut).abs() < 3.0e-4);
     }
 }
