@@ -48,11 +48,11 @@ impl SchwarzschildAdaptiveChunkBuilder {
     }
 }
 
-fn snapshot(builder: &mut StructuredFunctionBuilder, values: [Expr; 8]) -> [Expr; 8] {
+pub(crate) fn snapshot(builder: &mut StructuredFunctionBuilder, values: [Expr; 8]) -> [Expr; 8] {
     values.map(|value| Expr::LoadLocal(builder.let_value(Ty::f32(), value)))
 }
 
-fn rk4(builder: &mut StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr, step: Expr) -> [Expr; 8] {
+pub(crate) fn rk4(builder: &mut StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr, step: Expr) -> [Expr; 8] {
     let half_step = b(builder, BinOp::Mul, step.clone(), builder.const_f32(0.5));
     let k1 = snapshot(builder, schwarzschild_derivative(builder, values, mass));
     let middle = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, k1[index].clone(), half_step.clone()))));

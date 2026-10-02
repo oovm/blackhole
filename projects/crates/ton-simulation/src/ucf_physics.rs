@@ -1282,6 +1282,78 @@ mod tests {
     }
 
     #[test]
+    fn accepted_step_event_program_matches_independent_reference_and_vulkan() {
+        let program = ton_ucf_frontend::SchwarzschildEventLocalizationBuilder::new().build().unwrap();
+        let encoded = serde_json::to_string(&program).unwrap();
+        let decoded: ucf_program::Program = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(ton_ucf_frontend::program_hash(&program), ton_ucf_frontend::program_hash(&decoded));
+        for disk in [false, true] {
+            let start_values = [0.0f32, 10.0, if disk { std::f32::consts::FRAC_PI_2 - 0.001 } else { 1.2 },
+                0.3, 1.25, if disk { 0.0 } else { -1.0 }, if disk { 0.1 } else { 0.0 }, 0.0];
+            let start = SphericalState { t: start_values[0] as f64, r: start_values[1] as f64,
+                theta: start_values[2] as f64, phi: start_values[3] as f64, ut: start_values[4] as f64,
+                ur: start_values[5] as f64, utheta: start_values[6] as f64, uphi: start_values[7] as f64 };
+            let accepted = ton_geodesic::schwarzschild_adaptive_rk4_step(1.0, start, 0.04,
+                ton_geodesic::AdaptiveRk4Config::builder().build().unwrap()).unwrap();
+            let target = 9.98f32;
+            let config = if disk {
+                ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0)
+            } else {
+                ton_geodesic::SchwarzschildEventConfig::builder(1.0).radial_boundaries(target as f64, 80.0)
+            }.localization(1.0e-5f32 as f64, 48).build().unwrap();
+            let expected = ton_geodesic::schwarzschild_accepted_step_events(start, accepted, config).unwrap()[0];
+            let end = accepted.state;
+            let mut input = start_values.to_vec();
+            input.extend([end.t, end.r, end.theta, end.phi, end.ut, end.ur, end.utheta, end.uphi, accepted.step_used].map(|value| value as f32));
+            let uniforms = [1.0f32, if disk { 1.0 } else { 0.0 }, target, 1.0e-5];
+            let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+            cpu.with_buffer(1, input.iter().copied().map(Value::F32).collect());
+            cpu.with_buffer(2, vec![Value::F32(0.0); 11]);
+            for (slot, value) in uniforms.iter().enumerate() { cpu.with_uniform(slot as u32, Value::F32(*value)); }
+            cpu.run_parallel(&program, 1).unwrap();
+            let cpu_output = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+            assert_eq!(cpu_output[10], 1.0);
+            assert!((cpu_output[8] - expected.fraction).abs() < 1.0e-5);
+            let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+            params.insert("buffer_2".into(), ParamValue::I64(2));
+            let task = dispatch_task(53, &program, 1, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+            let graph = Graph {
+                resources: ResourceGraph { nodes: [(1, 17, Access::Read), (2, 11, Access::Write), (3, 1, Access::Write)]
+                    .into_iter().map(|(id, elements, access)| ResourceNode {
+                        id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                    }).collect() },
+                tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+            };
+            let mut backend = VulkanBackend::new().expect("Vulkan accepted step event localization");
+            backend.prepare(&graph).unwrap();
+            backend.write_f32(ResourceId(1), &input).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            let actual = backend.read_f32(ResourceId(2)).unwrap();
+            assert_eq!(actual[10], 1.0, "disk={disk}, output={actual:?}");
+            assert!(actual[9] <= uniforms[3]);
+            assert!((actual[8] as f64 - expected.fraction).abs() < 2.0e-4);
+            for (actual, expected) in actual[..8].iter().zip(&cpu_output[..8]) {
+                assert!((*actual as f64 - expected).abs() < 2.0e-4);
+            }
+            let mut no_crossing = input.clone();
+            no_crossing[8..16].copy_from_slice(&start_values);
+            backend.write_f32(ResourceId(1), &no_crossing).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            let actual = backend.read_f32(ResourceId(2)).unwrap();
+            assert_eq!(actual[10], 2.0);
+            assert_eq!(&actual[..8], &start_values);
+            assert_eq!(actual[8], 0.0);
+            let mut invalid = input.clone();
+            invalid[16] = -0.04;
+            backend.write_f32(ResourceId(1), &invalid).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            let actual = backend.read_f32(ResourceId(2)).unwrap();
+            assert_eq!(actual[10], 4.0);
+            assert_eq!(&actual[..8], &start_values);
+        }
+    }
+
+    #[test]
     fn adaptive_ucf_vulkan_chunk_matches_cpu_sequence() {
         let program = ton_ucf_frontend::SchwarzschildAdaptiveChunkBuilder::new().maximum_steps(32).build().unwrap();
         let input = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 0.08];

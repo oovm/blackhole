@@ -5,6 +5,8 @@
 
 mod adaptive;
 pub use adaptive::{SchwarzschildAdaptiveChunkBuilder, SchwarzschildAdaptiveStepBuilder};
+mod events;
+pub use events::SchwarzschildEventLocalizationBuilder;
 
 pub use ucf_program::{
     program_hash, validate_program, BinOp, CpuExecResult, CpuInterpreter, Expr, Function,
