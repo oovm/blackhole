@@ -651,7 +651,7 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
         let du_t = u(builder, UnOp::Neg, b(builder, BinOp::Mul, two.clone(), b(builder, BinOp::Mul, gamma_t_tr, b(builder, BinOp::Mul, ut.clone(), ur.clone()))));
         let gamma_r_tt = b(builder, BinOp::Mul, f.clone(), b(builder, BinOp::Mul, mass.clone(), inv_r2.clone()));
         let gamma_r_rr = u(builder, UnOp::Neg, b(builder, BinOp::Div, fp, b(builder, BinOp::Mul, builder.const_f32(2.0), f.clone())));
-        let sin_theta = b(builder, BinOp::Max, u(builder, UnOp::Sin, theta.clone()), builder.const_f32(1.0e-6));
+        let sin_theta = u(builder, UnOp::Sin, theta.clone());
         let cos_theta = u(builder, UnOp::Cos, theta);
         let sin2 = b(builder, BinOp::Mul, sin_theta.clone(), sin_theta.clone());
         let fr = b(builder, BinOp::Mul, f, r);
@@ -671,9 +671,15 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
             b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), gamma_theta_rtheta), b(builder, BinOp::Mul, ur.clone(), utheta.clone())),
             b(builder, BinOp::Mul, gamma_theta_pp, uphi2));
         let du_theta = u(builder, UnOp::Neg, angular);
+        let abs_sin = b(builder, BinOp::Max, sin_theta.clone(), u(builder, UnOp::Neg, sin_theta.clone()));
+        let cot_theta = builder.select(
+            b(builder, BinOp::Gt, abs_sin, builder.const_f32(1.0e-12)),
+            b(builder, BinOp::Div, u(builder, UnOp::Cos, values[2].clone()), sin_theta),
+            builder.const_f32(0.0),
+        );
         let phi = b(builder, BinOp::Add,
             b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), builder.binary(BinOp::Div, builder.const_f32(1.0), values[1].clone())), b(builder, BinOp::Mul, ur.clone(), uphi.clone())),
-            b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), b(builder, BinOp::Div, u(builder, UnOp::Cos, values[2].clone()), b(builder, BinOp::Max, u(builder, UnOp::Sin, values[2].clone()), builder.const_f32(1.0e-6)))), b(builder, BinOp::Mul, utheta.clone(), uphi.clone())));
+            b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), cot_theta), b(builder, BinOp::Mul, utheta.clone(), uphi.clone())));
         [ut, ur, utheta, uphi, du_t, du_r, du_theta, u(builder, UnOp::Neg, phi)]
     }
     let mut builder = StructuredFunctionBuilder::new(if detect_disk {

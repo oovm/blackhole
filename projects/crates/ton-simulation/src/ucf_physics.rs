@@ -1237,6 +1237,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn signed_spherical_chunk_matches_independent_reference() {
+        let state = SphericalState { t: 0.0, r: 12.0, theta: -0.8, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.22, uphi: 0.08 };
+        let expected = reference_geodesic_rk4_step(1.0, state, 0.01);
+        let (actual, status) = schwarzschild_geodesic_integrate_ucf_cpu(1.0, state, 0.01, 100.0, 1).unwrap();
+        assert_eq!(status, 3);
+        for (actual, expected) in [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi]
+            .into_iter().zip([expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi]) {
+            assert!((actual - expected).abs() < 2.0e-5, "actual={actual}, expected={expected}");
+        }
+    }
+
+    #[test]
+    fn vulkan_signed_spherical_chunks_match_independent_reference() {
+        let states = [-0.8, std::f64::consts::PI + 0.8].map(|theta| SphericalState {
+            t: 0.0, r: 12.0, theta, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.22, uphi: 0.08,
+        });
+        let output = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+            1.0, &states, &[false; 2], &[false; 2], &[0.0; 2], &[1.0; 2],
+            6.0, 40.0, 0.01, 100.0, 4,
+        ).expect("Vulkan signed-angle RK4");
+        for (initial, (actual, status, _, _, _)) in states.into_iter().zip(output) {
+            let mut expected = initial;
+            for _ in 0..4 { expected = reference_geodesic_rk4_step(1.0, expected, 0.01); }
+            assert_eq!(status, 0);
+            for (actual, expected) in [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi]
+                .into_iter().zip([expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi]) {
+                assert!((actual - expected).abs() < 2.0e-5, "actual={actual}, expected={expected}");
+            }
+        }
+    }
+
+    #[test]
     fn vulkan_geodesic_failure_preserves_last_finite_state() {
         let state = SphericalState { t: 0.0, r: 4.0, theta: 1.0, phi: 0.0, ut: 1.0, ur: -0.5, utheta: 0.0, uphi: 0.0 };
         let output = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
