@@ -15,5 +15,6 @@ cargo run -p ton-view -- blackhole.png --ucf-spectral --camera level --width 640
 - `--step-size` 设置最大仿射步长，默认 `0.02M`。
 - `--max-steps` 设置逐射线预算，默认 32768。
 - `--camera level` 使用 80 度倾角与 50M 观察距离，保持完整盘面构图。
+- `--graybody` 启用有界、随圆轨道平流的程序化灰体发射结构。它只调制发射强度，不是流体模拟或 Novikov-Thorne 通量。
 
 此入口暂不支持 Kerr、Bloom、阴影覆盖、HDR 导出或其他盘/积分器选项。设备、程序或数值失败均返回非零退出码，不切换到 CPU 渲染。

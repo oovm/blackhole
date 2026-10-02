@@ -15,4 +15,5 @@ path = "src/main.rs"
 [dependencies]
 ton-types = { workspace = true }
 ton-simulation = { workspace = true }
+ton-disk = { workspace = true }
 image = { workspace = true }

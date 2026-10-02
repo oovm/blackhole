@@ -29,6 +29,7 @@ fn main() -> ExitCode {
     let convergence = args.iter().any(|a| a == "--convergence");
     let overlay_shadow = args.iter().any(|a| a == "--overlay-shadow");
     let hdr_linear = args.iter().any(|a| a == "--hdr-linear");
+    let graybody = args.iter().any(|a| a == "--graybody");
     let camera = parse_camera(&args, mass, spin);
     let render_mode = parse_render_mode(&args);
     let step_size = parse_f64_arg(&args, "--step-size", if ucf_spectral { 0.02 * mass } else { 0.08 });
@@ -96,15 +97,20 @@ fn main() -> ExitCode {
             eprintln!("--ucf-spectral requires Schwarzschild Beauty without Bloom, overlays or other backend flags");
             return ExitCode::from(4);
         }
-        let renderer = ton_simulation::SchwarzschildSpectralGpuBuilder::new(mass)
+        let mut renderer = ton_simulation::SchwarzschildSpectralGpuBuilder::new(mass)
             .maximum_step(step_size).maximum_steps(max_steps.unwrap_or(32768))
             .peak_temperature(parse_f64_arg(&args, "--peak-kelvin", 6500.0))
             .exposure(parse_f64_arg(&args, "--exposure", 1.0e-10));
+        if graybody {
+            let pattern = ton_disk::GraybodyDiskPattern::builder().contrast(0.62).arms(3).pitch(8.0).radial_frequency(18.0)
+                .build().expect("built-in graybody pattern must be valid");
+            renderer = renderer.graybody_pattern(pattern);
+        }
         let output = match renderer.execute(camera, width, height) {
             Ok(output) => output,
             Err(error) => { eprintln!("UCF spectral Vulkan failed without fallback: {error}"); return ExitCode::from(3); }
         };
-        eprintln!("  actual backend=Vulkan, trace=F64, radiance=F32, disk=zero-torque opaque baseline, observer=CIE1931 fit");
+        eprintln!("  actual backend=Vulkan, trace=F64, radiance=F32, disk=zero-torque opaque baseline, graybody={}, observer=CIE1931 fit", graybody);
         eprintln!("  completed trace programs={}, shading hashes={:?}, HDR pixels={}", output.trace.executed_program_hashes.len(),
             output.shading_program_hashes, output.hdr.iter().filter(|pixel| pixel.iter().any(|value| *value > 1.0)).count());
         eprintln!("  padded GPU instances excluded from image={}", output.trace.padded_instances);
@@ -135,7 +141,7 @@ fn main() -> ExitCode {
         } else {
             (output.framebuffer, 0.0)
         }
-    } else if ucf_tone || bloom {
+    } else if ucf_tone {
         let output = scene.render_frame_with_histogram();
         let failure_pct = output
             .termination_histogram
@@ -145,9 +151,13 @@ fn main() -> ExitCode {
         if let Some(hist) = &output.termination_histogram {
             eprintln!("{}", hist);
         }
-        let (frame, report) = scene
-            .render_frame_ucf_cpu()
-            .expect("UCF CPU render failed");
+        let (frame, report) = match scene.render_frame_ucf_cpu() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("UCF CPU render unavailable: {error}");
+                return ExitCode::from(3);
+            }
+        };
         eprintln!("  UCF ops: {}", report.executed_ops.join(" → "));
         (frame, failure_pct)
     } else {
@@ -234,7 +244,7 @@ fn parse_integrator(args: &[String]) -> IntegratorKind {
         Some("sem-classical") => IntegratorKind::SemiClassicalRayMarch,
         Some("geodesic3d") => IntegratorKind::Geodesic3d,
         Some("kerr") => IntegratorKind::KerrEquatorial,
-        _ => IntegratorKind::Geodesic3d,
+        _ => IntegratorKind::SemiClassicalRayMarch,
     }
 }
 

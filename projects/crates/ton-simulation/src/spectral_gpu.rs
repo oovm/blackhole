@@ -35,7 +35,12 @@ fn execute_stage(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Progra
     let status = backend.read_f32(ResourceId(base + 2)).map_err(|error| TonError::Domain(format!("read spectral status: {error}")))?;
     if output.len() != count as usize * output_stride as usize || status.len() != count as usize
         || output.iter().any(|value| !value.is_finite()) || status.iter().any(|value| *value != 0.0 && *value != 1.0) {
-        return Err(TonError::Domain("spectral stage rejected input or produced invalid output".into()));
+        let mut unique_status = status.iter().copied().filter(|value| value.is_finite()).collect::<Vec<_>>();
+        unique_status.sort_by(f32::total_cmp); unique_status.dedup();
+        let first_bad = output.iter().position(|value| !value.is_finite());
+        let bad_input = first_bad.and_then(|index| input.get((index / output_stride as usize) * input_stride as usize..((index / output_stride as usize) + 1) * input_stride as usize));
+        return Err(TonError::Domain(format!("spectral stage rejected input or produced invalid output: output_len={}, status_len={}, finite_output={}, first_bad={first_bad:?}, bad_input={bad_input:?}, statuses={unique_status:?}",
+            output.len(), status.len(), output.iter().all(|value| value.is_finite()))));
     }
     Ok(output)
 }
@@ -62,11 +67,13 @@ pub struct SchwarzschildSpectralGpuBuilder {
     step: f64,
     maximum_steps: u32,
     wavelength_step_nm: u32,
+    pattern: ton_disk::GraybodyDiskPattern,
 }
 
 impl SchwarzschildSpectralGpuBuilder {
     /// 默认峰值 6500K、曝光 1e-10、最大步长 0.02M。
-    pub fn new(mass: f64) -> Self { Self { mass, peak_kelvin: 6500.0, exposure: 1.0e-10, step: 0.02 * mass, maximum_steps: 32768, wavelength_step_nm: 5 } }
+    pub fn new(mass: f64) -> Self { Self { mass, peak_kelvin: 6500.0, exposure: 1.0e-10, step: 0.02 * mass, maximum_steps: 32768, wavelength_step_nm: 5,
+        pattern: ton_disk::GraybodyDiskPattern::builder().build().expect("default graybody pattern must be valid") } }
     /// 设置物理发射温度峰值。
     pub fn peak_temperature(mut self, value: f64) -> Self { self.peak_kelvin = value; self }
     /// 设置显示曝光，不改变几何或频移。
@@ -77,6 +84,8 @@ impl SchwarzschildSpectralGpuBuilder {
     pub fn maximum_steps(mut self, value: u32) -> Self { self.maximum_steps = value; self }
     /// 控制谱积分采样，范围 1..20nm 且须整除 400nm，不改变几何。
     pub fn wavelength_step_nm(mut self, value: u32) -> Self { self.wavelength_step_nm = value; self }
+    /// 设置有界盘面结构，零对比度可恢复平滑参考基线。
+    pub fn graybody_pattern(mut self, pattern: ton_disk::GraybodyDiskPattern) -> Self { self.pattern = pattern; self }
     /// 执行完整原生程序链，失败直接返回，不 fallback。
     pub fn execute(self, camera: Camera, width: u32, height: u32) -> TonResult<SpectralGpuFrame> {
         if !self.peak_kelvin.is_finite() || self.peak_kelvin <= 0.0 || !self.exposure.is_finite() || self.exposure <= 0.0 {
@@ -91,12 +100,23 @@ impl SchwarzschildSpectralGpuBuilder {
         if records.iter().flatten().any(|value| !value.is_finite()) { return Err(TonError::Domain("F64 trajectory cannot be represented by F32 radiance inputs".into())); }
         let frequency = crate::adaptive_gpu::execute_cartesian_frequency_with_backend(&mut backend, &records, self.mass as f32, camera.position.length() as f32)?;
         let mut hashes = vec![ton_ucf_frontend::program_hash(&ton_ucf_frontend::SchwarzschildDiskFrequencyBuilder::new().build().map_err(TonError::Domain)?)];
-        let temperature = ton_ucf_frontend::ZeroTorqueDiskInputsBuilder::new().build().map_err(TonError::Domain)?;
-        let inputs = execute_stage(&mut backend, &temperature, &frequency.iter().flatten().copied().collect::<Vec<_>>(), 4, 3, 101,
-            &[6.0 * self.mass, self.peak_kelvin, self.exposure], None)?;
-        hashes.push(ton_ucf_frontend::program_hash(&temperature));
+        let mut graybody_input = Vec::with_capacity(records.len() * 7);
+        for (record, frequency) in records.iter().zip(frequency.iter()) {
+            graybody_input.extend_from_slice(frequency);
+            if frequency[3] == 0.0 {
+                graybody_input.extend_from_slice(&[6.0 * self.mass as f32, 0.0, 0.0]);
+            } else {
+                graybody_input.extend_from_slice(&[record[22], record[23], record[21]]);
+            }
+        }
+        let emission = ton_ucf_frontend::GraybodyEmissionBuilder::new().build().map_err(TonError::Domain)?;
+        let pattern = self.pattern;
+        let emission_input = execute_stage(&mut backend, &emission, &graybody_input, 7, 3, 101,
+            &[6.0 * self.mass, self.peak_kelvin, self.exposure, self.mass, pattern.contrast() as f64,
+                pattern.arms() as f64, pattern.pitch(), pattern.radial_frequency()], None)?;
+        hashes.push(ton_ucf_frontend::program_hash(&emission));
         let color = spectrum.build().map_err(TonError::Domain)?;
-        let colors = execute_stage(&mut backend, &color, &inputs, 3, 7, 111, &[], Some(&table))?;
+        let colors = execute_stage(&mut backend, &color, &emission_input, 3, 7, 111, &[], Some(&table))?;
         hashes.push(ton_ucf_frontend::program_hash(&color));
         let hdr = colors.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
         let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
@@ -158,6 +178,25 @@ mod tests {
         assert!(display_error < 1.0 / 255.0, "encoded display error={display_error}");
         eprintln!("32x18 native convergence: disk_pixels={hits}, radius_errors={radius_errors:?}, hdr_absolute_errors={hdr_errors:?}, 5nm/1nm_hdr_relative={relative_spectrum_error}, display_absolute={display_error}");
         assert!(SchwarzschildSpectralGpuBuilder::new(1.0).wavelength_step_nm(3).execute(camera, 32, 18).is_err());
+    }
+
+    #[test]
+    fn spectral_gpu_graybody_changes_radiance_but_not_trace_or_frequency_program() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let baseline = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).execute(camera, 16, 9).unwrap();
+        let pattern = ton_disk::GraybodyDiskPattern::builder().contrast(0.62).arms(3).pitch(8.0).radial_frequency(18.0).build().unwrap();
+        let structured = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).graybody_pattern(pattern).execute(camera, 16, 9).unwrap();
+        assert_eq!(baseline.trace.records, structured.trace.records);
+        assert_eq!(baseline.trace.terminations, structured.trace.terminations);
+        assert_eq!(baseline.shading_program_hashes[0], structured.shading_program_hashes[0]);
+        assert_eq!(baseline.shading_program_hashes[1], structured.shading_program_hashes[1]);
+        assert_eq!(baseline.shading_program_hashes[2..], structured.shading_program_hashes[2..]);
+        let mut changed = 0;
+        for (base, actual) in baseline.hdr.iter().zip(&structured.hdr) {
+            if base != actual { changed += 1; }
+            for (base, actual) in base.iter().zip(actual) { assert!((*actual as f64) <= (*base as f64) + 1.0e-12); }
+        }
+        assert!(changed > 0);
     }
 
     #[test]
