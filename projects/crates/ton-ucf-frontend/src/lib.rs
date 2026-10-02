@@ -14,7 +14,7 @@ mod cartesian_initial;
 pub use cartesian_initial::SchwarzschildCartesianInitialStateBuilder;
 pub use cartesian_null::SchwarzschildCartesianAdaptiveChunkBuilder;
 mod cartesian_radiance;
-pub use cartesian_radiance::disk_radiance_from_cartesian_trace;
+pub use cartesian_radiance::SchwarzschildDiskFrequencyBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
