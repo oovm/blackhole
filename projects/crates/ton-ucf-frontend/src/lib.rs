@@ -882,6 +882,78 @@ pub fn disk_shade_novikov() -> Program {
     f("disk_shade_novikov", vec![Stmt::If { cond: bin(BinOp::Lt, radius.clone(), uni(2)), then_body: vec![Stmt::Return(v3(c(0.0), c(0.0), c(0.0)))], else_body: Vec::new() }, Stmt::If { cond: bin(BinOp::Gt, radius, uni(3)), then_body: vec![Stmt::Return(v3(c(0.0), c(0.0), c(0.0)))], else_body: Vec::new() }, Stmt::Return(bin(BinOp::Mul, v3(bin(BinOp::Div, un(UnOp::Vec3Comp(0), rgb.clone()), c(255.0)), bin(BinOp::Div, un(UnOp::Vec3Comp(1), rgb.clone()), c(255.0)), bin(BinOp::Div, un(UnOp::Vec3Comp(2), rgb), c(255.0))), scale))], Vec::new(), Ty::vec3())
 }
 
+/// 构建并行 Novikov-Thorne 盘面着色程序。
+///
+/// 输入资源 `1` 每实例为 `[radius, doppler]`，输出资源 `2` 每实例为线性
+/// `[r, g, b]`。uniform `0..3` 依次为内半径、外半径、质量和吸积率。
+/// 该程序是 TON 前端生成的普通 UCF 程序，不是 UCF 领域算子。
+pub fn disk_shade_novikov_batch() -> Program {
+    let mut builder = StructuredFunctionBuilder::new("disk_shade_novikov_batch");
+    let global = builder.global_id();
+    let index = |base: Expr, offset: u32| bin(BinOp::Add, base, Expr::ConstU32(offset));
+    let input_base = builder.binary(BinOp::Mul, global.clone(), builder.const_u32(2));
+    let output_base = builder.binary(BinOp::Mul, global, builder.const_u32(3));
+    let radius = builder.load_buffer(1, index(input_base.clone(), 0));
+    let doppler = builder.load_buffer(1, index(input_base, 1));
+    let inner = builder.load_uniform(0);
+    let outer = builder.load_uniform(1);
+    let mass = builder.load_uniform(2);
+    let accretion = builder.load_uniform(3);
+    let mass_squared = builder.binary(BinOp::Mul, mass.clone(), mass.clone());
+    let temperature_base = builder.binary(BinOp::Div, accretion, mass_squared);
+    let radius_ratio = builder.binary(BinOp::Div, inner.clone(), radius.clone());
+    let radial_power = builder.binary(BinOp::Pow, radius_ratio, builder.const_f32(0.75));
+    let temperature_scaled = builder.binary(BinOp::Mul, temperature_base, radial_power);
+    let temperature = builder.binary(BinOp::Mul, temperature_scaled, builder.const_f32(2800.0));
+    let t = builder.binary(BinOp::Mul, temperature, builder.const_f32(0.01));
+    let t_minus_10 = builder.binary(BinOp::Sub, t.clone(), builder.const_f32(10.0));
+    let cool_blue_raw = builder.binary(
+        BinOp::Sub,
+        builder.binary(BinOp::Mul, builder.const_f32(138.5177), builder.unary(UnOp::Ln, t_minus_10)),
+        builder.const_f32(305.0448),
+    );
+    let cool_blue = builder.select(
+        builder.binary(BinOp::Le, t.clone(), builder.const_f32(19.0)),
+        builder.const_f32(0.0),
+        cool_blue_raw,
+    );
+    let cool_green = builder.binary(
+        BinOp::Sub,
+        builder.binary(BinOp::Mul, builder.const_f32(99.4708), builder.unary(UnOp::Ln, t.clone())),
+        builder.const_f32(161.1196),
+    );
+    let cool = v3(builder.const_f32(255.0), cool_green, cool_blue);
+    let t_minus_60 = builder.binary(BinOp::Sub, t.clone(), builder.const_f32(60.0));
+    let warm_red = builder.binary(
+        BinOp::Mul,
+        builder.const_f32(329.6987),
+        builder.binary(BinOp::Pow, t_minus_60.clone(), builder.const_f32(-0.1332)),
+    );
+    let warm_green = builder.binary(
+        BinOp::Mul,
+        builder.const_f32(288.1222),
+        builder.binary(BinOp::Pow, t_minus_60, builder.const_f32(-0.0755)),
+    );
+    let warm = v3(warm_red, warm_green, builder.const_f32(255.0));
+    let rgb = builder.select(builder.binary(BinOp::Le, t.clone(), builder.const_f32(66.0)), cool, warm);
+    let clamped_low = builder.binary(BinOp::Max, builder.const_f32(0.0), doppler);
+    let clamped = builder.binary(BinOp::Min, clamped_low, builder.const_f32(3.0));
+    let doppler_squared = builder.binary(BinOp::Mul, clamped.clone(), clamped.clone());
+    let doppler_cubed = builder.binary(BinOp::Mul, doppler_squared, clamped);
+    let scale = builder.binary(BinOp::Mul, doppler_cubed, builder.const_f32(0.5));
+    let zero_color = v3(builder.const_f32(0.0), builder.const_f32(0.0), builder.const_f32(0.0));
+    let false_value = builder.binary(BinOp::Eq, builder.const_f32(0.0), builder.const_f32(1.0));
+    let inside = builder.select(builder.binary(BinOp::Lt, radius.clone(), inner), false_value, builder.binary(BinOp::Le, radius, outer));
+    let rgb = builder.select(inside, rgb, zero_color);
+    for component in 0u8..3 {
+        let channel = un(UnOp::Vec3Comp(component), rgb.clone());
+        let normalized = builder.binary(BinOp::Div, channel, builder.const_f32(255.0));
+        let value = builder.binary(BinOp::Mul, normalized, scale.clone());
+        builder.store_buffer(2, index(output_base.clone(), component as u32), value);
+    }
+    ProgramBuilder::new().structured_entry(builder, Ty::f32(), scale).expect("valid batch disk builder").finish().expect("valid batch disk program")
+}
+
 /// 构建并行步数验证程序。
 pub fn ray_batch_steps() -> Program {
     f("ray_batch_steps", vec![Stmt::Let { id: 0, ty: Ty::f64(), init: c(0.0) }, Stmt::Let { id: 1, ty: Ty::f64(), init: bin(BinOp::Add, bin(BinOp::Mod, Expr::GlobalId, c(16.0)), c(1.0)) }, Stmt::For { iter: 2, limit: 32, body: vec![Stmt::If { cond: bin(BinOp::Lt, Expr::LoadLocal(2), Expr::LoadLocal(1)), then_body: vec![Stmt::StoreLocal { id: 0, value: bin(BinOp::Add, Expr::LoadLocal(0), c(1.0)) }], else_body: Vec::new() }] }, Stmt::Return(Expr::LoadLocal(0))], vec![(0, Ty::f64()), (1, Ty::f64())], Ty::f64())
