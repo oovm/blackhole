@@ -52,7 +52,7 @@ pub(crate) fn snapshot(builder: &mut StructuredFunctionBuilder, values: [Expr; 8
     values.map(|value| Expr::LoadLocal(builder.let_value(Ty::f32(), value)))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum IntegrationModel { Spherical, NullEnergy, CartesianNull }
 
 impl From<bool> for IntegrationModel {
@@ -60,7 +60,7 @@ impl From<bool> for IntegrationModel {
 }
 
 impl IntegrationModel {
-    fn radius(self, builder: &StructuredFunctionBuilder, state: &[Expr; 8]) -> Expr {
+    pub(crate) fn radius(self, builder: &StructuredFunctionBuilder, state: &[Expr; 8]) -> Expr {
         match self {
             Self::CartesianNull => super::cartesian_null::radius(builder, state),
             _ => state[1].clone(),

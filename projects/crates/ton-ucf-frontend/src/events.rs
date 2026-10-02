@@ -1,7 +1,7 @@
 //! 接受步事件定位的通用程序构造，不注册 UCF 领域能力。
 
 use super::{b, BinOp, Expr, Program, StructuredFunctionBuilder, Ty, UnOp};
-use super::adaptive::{rk4_model, snapshot};
+use super::adaptive::{rk4_model, snapshot, IntegrationModel};
 
 /// 通过两个半步重积分与有界二分定位括住的事件。
 ///
@@ -13,6 +13,7 @@ use super::adaptive::{rk4_model, snapshot};
 #[derive(Debug, Clone, Copy)]
 pub struct SchwarzschildEventLocalizationBuilder {
     maximum_bisections: u32,
+    model: IntegrationModel,
 }
 
 #[cfg(test)]
@@ -64,10 +65,31 @@ mod tests {
             assert_eq!(output[9], 0.0);
         }
     }
+
+    #[test]
+    fn cartesian_localization_preserves_state_on_failure() {
+        let program = SchwarzschildEventLocalizationBuilder::new().cartesian_null().maximum_bisections(1).build().unwrap();
+        let start = [0.0f32, 0.0, 0.0, 10.0, 1.0, 0.0, 0.0, -1.0];
+        let mut input = start.to_vec();
+        input.extend([0.05, 0.0, 0.0, 9.96, 1.0, 0.0, 0.0, -1.0, 0.04]);
+        for (kind, radius, tolerance, status) in [(0.0, 8.0, 1.0e-5, 2.0),
+            (0.0, 9.971, 1.0e-9, 3.0), (2.0, 9.98, 1.0e-5, 4.0)] {
+            let mut cpu = CpuInterpreter::new();
+            cpu.with_buffer(1, input.iter().copied().map(Value::F32).collect());
+            cpu.with_buffer(2, vec![Value::F32(0.0); 11]);
+            for (slot, value) in [1.0, kind, radius, tolerance].into_iter().enumerate() { cpu.with_uniform(slot as u32, Value::F32(value)); }
+            cpu.run_parallel(&program, 1).unwrap();
+            let output = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+            assert_eq!(output[10], status);
+            assert_eq!(output[8], 0.0);
+            assert_eq!(output[9], 0.0);
+            for (actual, expected) in output[..8].iter().zip(start) { assert_eq!(*actual, expected as f64); }
+        }
+    }
 }
 
 impl Default for SchwarzschildEventLocalizationBuilder {
-    fn default() -> Self { Self { maximum_bisections: 48 } }
+    fn default() -> Self { Self { maximum_bisections: 48, model: IntegrationModel::Spherical } }
 }
 
 fn abs(builder: &StructuredFunctionBuilder, value: Expr) -> Expr {
@@ -78,10 +100,13 @@ fn and(builder: &StructuredFunctionBuilder, left: Expr, right: Expr) -> Expr {
     builder.select(left, right, Expr::ConstBool(false))
 }
 
-fn surface(builder: &StructuredFunctionBuilder, state: &[Expr; 8], kind: &Expr, radius: &Expr) -> Expr {
+fn surface(builder: &StructuredFunctionBuilder, state: &[Expr; 8], kind: &Expr, radius: &Expr, model: IntegrationModel) -> Expr {
+    let plane = match model {
+        IntegrationModel::CartesianNull => state[3].clone(),
+        _ => b(builder, BinOp::Mul, state[1].clone(), builder.unary(UnOp::Cos, state[2].clone())),
+    };
     builder.select(b(builder, BinOp::Eq, kind.clone(), builder.const_f32(0.0)),
-        b(builder, BinOp::Sub, state[1].clone(), radius.clone()),
-        b(builder, BinOp::Mul, state[1].clone(), builder.unary(UnOp::Cos, state[2].clone())))
+        b(builder, BinOp::Sub, model.radius(builder, state), radius.clone()), plane)
 }
 
 impl SchwarzschildEventLocalizationBuilder {
@@ -90,6 +115,9 @@ impl SchwarzschildEventLocalizationBuilder {
 
     /// 设置静态二分预算。
     pub fn maximum_bisections(mut self, iterations: u32) -> Self { self.maximum_bisections = iterations; self }
+
+    /// 接受 `[t,x,y,z,E,vx,vy,vz]` 笛卡尔零状态，平面残差直接取 z。
+    pub fn cartesian_null(mut self) -> Self { self.model = IntegrationModel::CartesianNull; self }
 
     /// 构造仅含通用算术、资源读写和有界控制流的程序。
     pub fn build(self) -> Result<Program, String> {
@@ -107,7 +135,7 @@ impl SchwarzschildEventLocalizationBuilder {
         let end = snapshot(&mut builder, std::array::from_fn(|index| load(index as u32 + 8)));
         let step = load(16);
         let [mass, kind, radius, tolerance]: [Expr; 4] = std::array::from_fn(|slot| builder.load_uniform(slot as u32));
-        let values = emit_localization(&mut builder, start, end, step, [mass, kind, radius, tolerance], self.maximum_bisections);
+        let values = emit_localization_model(&mut builder, start, end, step, [mass, kind, radius, tolerance], self.maximum_bisections, self.model);
         for (index, value) in values.iter().cloned().enumerate() {
             builder.store_buffer(2, b(&builder, BinOp::Add, output_base.clone(), builder.const_u32(index as u32)), value);
         }
@@ -117,17 +145,11 @@ impl SchwarzschildEventLocalizationBuilder {
     }
 }
 
-pub(crate) fn emit_localization(
-    builder: &mut StructuredFunctionBuilder, start: [Expr; 8], end: [Expr; 8], step: Expr,
-    uniforms: [Expr; 4], maximum_bisections: u32,
-) -> [Expr; 11] {
-    emit_localization_model(builder, start, end, step, uniforms, maximum_bisections, false)
-}
-
 pub(crate) fn emit_localization_model(
     builder: &mut StructuredFunctionBuilder, start: [Expr; 8], end: [Expr; 8], step: Expr,
-    uniforms: [Expr; 4], maximum_bisections: u32, null_energy: bool,
+    uniforms: [Expr; 4], maximum_bisections: u32, model: impl Into<IntegrationModel>,
 ) -> [Expr; 11] {
+        let model = model.into();
         let [mass, kind, radius, tolerance] = uniforms;
         let mut valid = Expr::ConstBool(true);
         for value in start.iter().chain(end.iter()).chain([&step, &mass, &kind, &radius, &tolerance]) {
@@ -137,13 +159,13 @@ pub(crate) fn emit_localization_model(
             valid = and(&builder, valid, b(&builder, BinOp::Gt, value.clone(), builder.const_f32(0.0)));
         }
         for state in [&start, &end] {
-            valid = and(&builder, valid, b(&builder, BinOp::Gt, state[1].clone(), b(&builder, BinOp::Mul, mass.clone(), builder.const_f32(2.0))));
+            valid = and(&builder, valid, b(&builder, BinOp::Gt, model.radius(builder, state), b(&builder, BinOp::Mul, mass.clone(), builder.const_f32(2.0))));
         }
         let sphere_valid = and(&builder, b(&builder, BinOp::Eq, kind.clone(), builder.const_f32(0.0)),
             b(&builder, BinOp::Gt, radius.clone(), b(&builder, BinOp::Mul, mass.clone(), builder.const_f32(2.0))));
         valid = and(&builder, valid, builder.select(b(&builder, BinOp::Eq, kind.clone(), builder.const_f32(1.0)), Expr::ConstBool(true), sphere_valid));
-        let before = surface(&builder, &start, &kind, &radius);
-        let after = surface(&builder, &end, &kind, &radius);
+        let before = surface(&builder, &start, &kind, &radius, model);
+        let after = surface(&builder, &end, &kind, &radius, model);
         let opposite = b(&builder, BinOp::Ne,
             b(&builder, BinOp::Ge, before.clone(), builder.const_f32(0.0)),
             b(&builder, BinOp::Ge, after.clone(), builder.const_f32(0.0)));
@@ -169,9 +191,9 @@ pub(crate) fn emit_localization_model(
             let middle = builder.let_value(Ty::f32(), b(builder, BinOp::Mul,
                 b(builder, BinOp::Add, Expr::LoadLocal(lower), Expr::LoadLocal(upper)), builder.const_f32(0.5)));
             let half_step = b(builder, BinOp::Mul, b(builder, BinOp::Mul, step.clone(), Expr::LoadLocal(middle)), builder.const_f32(0.5));
-            let half = rk4_model(builder, &start, &mass, half_step.clone(), null_energy);
-            let state = rk4_model(builder, &half, &mass, half_step, null_energy);
-            let value = builder.let_value(Ty::f32(), surface(builder, &state, &kind, &radius));
+            let half = rk4_model(builder, &start, &mass, half_step.clone(), model);
+            let state = rk4_model(builder, &half, &mass, half_step, model);
+            let value = builder.let_value(Ty::f32(), surface(builder, &state, &kind, &radius, model));
             let mut finite = Expr::ConstBool(true);
             for component in &state { finite = and(builder, finite, builder.unary(UnOp::IsFinite, component.clone())); }
             let found = builder.let_value(Ty::Scalar(super::ScalarTy::Bool), and(builder, finite.clone(),

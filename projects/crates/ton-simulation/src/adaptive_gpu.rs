@@ -436,4 +436,59 @@ mod tests {
             assert!(escaped);
         }
     }
+
+    #[test]
+    fn cartesian_event_localization_cpu_and_vulkan_match_independent_reference() {
+        use ton_geodesic::{SchwarzschildCartesianNullState, SchwarzschildStepEventKind};
+        for (position, direction, surface_kind, capture, escape, expected_kind) in [
+            (Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0), 0.0f32, 9.98, 80.0, SchwarzschildStepEventKind::Capture),
+            (Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, 1.0), 0.0, 2.0002, 10.02, SchwarzschildStepEventKind::Escape),
+            (Vec3::new(10.0, 0.0, 0.001), Vec3::new(1.0, 0.0, -1.0), 1.0, 2.0002, 80.0, SchwarzschildStepEventKind::DiskCrossing),
+        ] {
+            let initial = SchwarzschildCartesianNullState::from_ray(1.0, position, direction).unwrap();
+            let accepted = ton_geodesic::schwarzschild_cartesian_adaptive_rk4_step(1.0, initial, 0.04,
+                ton_geodesic::AdaptiveRk4Config::builder().build().unwrap()).unwrap();
+            let config = ton_geodesic::SchwarzschildEventConfig::builder(1.0).radial_boundaries(capture, escape);
+            let config = if surface_kind == 1.0 { config.equatorial_disk(6.0, 20.0) } else { config };
+            let config = config.build().unwrap();
+            let events = ton_geodesic::schwarzschild_cartesian_accepted_step_events(initial, accepted, config).unwrap();
+            let expected = events.iter().find(|event| event.kind == expected_kind).unwrap();
+            let pack = |state: SchwarzschildCartesianNullState| [state.t, state.position.x, state.position.y,
+                state.position.z, state.energy, state.velocity.x, state.velocity.y, state.velocity.z].map(|value| value as f32);
+            let mut input = pack(initial).to_vec();
+            input.extend(pack(accepted.state));
+            input.push(accepted.step_used as f32);
+            let program = ton_ucf_frontend::SchwarzschildEventLocalizationBuilder::new().cartesian_null().build().unwrap();
+            let radius = if expected_kind == SchwarzschildStepEventKind::Escape { escape } else { capture };
+            let uniforms = [1.0f32, surface_kind, radius as f32, 1.0e-5];
+            let mut interpreter = ton_ucf_frontend::CpuInterpreter::new();
+            for (slot, value) in uniforms.into_iter().enumerate() { interpreter.with_uniform(slot as u32, ton_ucf_frontend::Value::F32(value)); }
+            interpreter.with_buffer(1, input.iter().copied().map(ton_ucf_frontend::Value::F32).collect());
+            interpreter.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 11]);
+            interpreter.run_parallel(&program, 1).unwrap();
+            let cpu = interpreter.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap() as f32).collect::<Vec<_>>();
+            let mut params = uniforms.into_iter().enumerate().map(|(slot, value)|
+                (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+            params.insert("buffer_2".into(), ParamValue::I64(2));
+            let task = crate::ucf_physics::dispatch_task(71, &program, 1, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+            let graph = Graph { resources: ResourceGraph { nodes: [(1, 17, Access::Read), (2, 11, Access::Write), (3, 1, Access::Write)]
+                .into_iter().map(|(id, elements, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
+                    domain: Domain::Vram, access, byte_size: Some(elements * 4) }).collect() },
+                tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+            graph.validate().unwrap();
+            let mut backend = VulkanBackend::new().unwrap();
+            backend.prepare(&graph).unwrap();
+            backend.write_f32(ResourceId(1), &input).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            let gpu = backend.read_f32(ResourceId(2)).unwrap();
+            for output in [&cpu, &gpu] {
+                assert_eq!(output[10], 1.0);
+                assert!(output[9] <= 1.0e-5);
+                assert!((output[8] as f64 - expected.fraction).abs() < 1.0e-3);
+                for (actual, expected) in output[..8].iter().zip(pack(expected.state)) {
+                    assert!((*actual - expected).abs() < 2.0e-4, "kind={expected_kind:?}");
+                }
+            }
+        }
+    }
 }
