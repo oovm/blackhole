@@ -61,11 +61,12 @@ pub struct SchwarzschildSpectralGpuBuilder {
     exposure: f64,
     step: f64,
     maximum_steps: u32,
+    wavelength_step_nm: u32,
 }
 
 impl SchwarzschildSpectralGpuBuilder {
     /// 默认峰值 6500K、曝光 1e-10、最大步长 0.02M。
-    pub fn new(mass: f64) -> Self { Self { mass, peak_kelvin: 6500.0, exposure: 1.0e-10, step: 0.02 * mass, maximum_steps: 32768 } }
+    pub fn new(mass: f64) -> Self { Self { mass, peak_kelvin: 6500.0, exposure: 1.0e-10, step: 0.02 * mass, maximum_steps: 32768, wavelength_step_nm: 5 } }
     /// 设置物理发射温度峰值。
     pub fn peak_temperature(mut self, value: f64) -> Self { self.peak_kelvin = value; self }
     /// 设置显示曝光，不改变几何或频移。
@@ -74,11 +75,15 @@ impl SchwarzschildSpectralGpuBuilder {
     pub fn maximum_step(mut self, value: f64) -> Self { self.step = value; self }
     /// 设置 F64 轨迹总预算。
     pub fn maximum_steps(mut self, value: u32) -> Self { self.maximum_steps = value; self }
+    /// 控制谱积分采样，范围 1..20nm 且须整除 400nm，不改变几何。
+    pub fn wavelength_step_nm(mut self, value: u32) -> Self { self.wavelength_step_nm = value; self }
     /// 执行完整原生程序链，失败直接返回，不 fallback。
     pub fn execute(self, camera: Camera, width: u32, height: u32) -> TonResult<SpectralGpuFrame> {
         if !self.peak_kelvin.is_finite() || self.peak_kelvin <= 0.0 || !self.exposure.is_finite() || self.exposure <= 0.0 {
             return Err(TonError::Domain("invalid spectral disk temperature or exposure".into()));
         }
+        let spectrum = ton_ucf_frontend::VisibleSpectrumColorBuilder::new().wavelength_step_nm(self.wavelength_step_nm);
+        let table = spectrum.response_table().map_err(TonError::Domain)?;
         let trace = SchwarzschildF64GpuTraceBuilder::new(self.mass).maximum_step(self.step).maximum_steps(self.maximum_steps).execute_camera(camera, width, height)?;
         trace.require_renderable()?;
         let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create spectral backend: {error}")))?;
@@ -90,9 +95,8 @@ impl SchwarzschildSpectralGpuBuilder {
         let inputs = execute_stage(&mut backend, &temperature, &frequency.iter().flatten().copied().collect::<Vec<_>>(), 4, 3, 101,
             &[6.0 * self.mass, self.peak_kelvin, self.exposure], None)?;
         hashes.push(ton_ucf_frontend::program_hash(&temperature));
-        let spectrum = ton_ucf_frontend::VisibleSpectrumColorBuilder::new();
         let color = spectrum.build().map_err(TonError::Domain)?;
-        let colors = execute_stage(&mut backend, &color, &inputs, 3, 7, 111, &[], Some(&spectrum.response_table().map_err(TonError::Domain)?))?;
+        let colors = execute_stage(&mut backend, &color, &inputs, 3, 7, 111, &[], Some(&table))?;
         hashes.push(ton_ucf_frontend::program_hash(&color));
         let hdr = colors.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
         let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
@@ -108,6 +112,53 @@ impl SchwarzschildSpectralGpuBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spectral_gpu_same_frame_step_and_sampling_converge_without_postprocessing() {
+        let inclination = 80.0f64.to_radians();
+        let camera = Camera::look_at(ton_types::Vec3::new(50.0 * inclination.sin(), 0.0, 50.0 * inclination.cos()),
+            ton_types::Vec3::ZERO, ton_types::Vec3::new(0.0, 0.0, 1.0), 0.58);
+        let frames = [0.04, 0.02, 0.01].map(|step| SchwarzschildSpectralGpuBuilder::new(1.0)
+            .maximum_step(step).execute(camera, 32, 18).unwrap());
+        let finest = &frames[2];
+        let mut radius_errors = [0.0f64; 2];
+        let mut hdr_errors = [0.0f64; 2];
+        let mut hits = 0;
+        for pixel in 0..finest.hdr.len() {
+            for level in 0..2 {
+                assert_eq!(frames[level].trace.terminations[pixel], finest.trace.terminations[pixel], "termination pixel {pixel}");
+                assert_eq!(frames[level].trace.records[pixel][13], finest.trace.records[pixel][13], "crossing count pixel {pixel}");
+                radius_errors[level] = radius_errors[level].max((frames[level].trace.records[pixel][14] - finest.trace.records[pixel][14]).abs());
+                for channel in 0..3 {
+                    hdr_errors[level] = hdr_errors[level].max((frames[level].hdr[pixel][channel] - finest.hdr[pixel][channel]).abs() as f64);
+                }
+            }
+            if finest.trace.records[pixel][13] > 0.0 { hits += 1; }
+        }
+        assert!(hits > 0);
+        assert!(radius_errors[0] < 1.0e-5 && radius_errors[1] < 1.0e-6, "radius_errors={radius_errors:?}");
+        assert!(radius_errors[1] < radius_errors[0], "refinement must reduce geometric error: {radius_errors:?}");
+        assert!(hdr_errors.iter().all(|error| *error < 1.0e-5), "linear HDR errors={hdr_errors:?}");
+        let sampled = SchwarzschildSpectralGpuBuilder::new(1.0).maximum_step(0.01).wavelength_step_nm(1).execute(camera, 32, 18).unwrap();
+        assert_eq!(sampled.trace.records, finest.trace.records);
+        assert_eq!(sampled.shading_program_hashes[0..2], finest.shading_program_hashes[0..2]);
+        assert_ne!(sampled.shading_program_hashes[2], finest.shading_program_hashes[2]);
+        let mut relative_spectrum_error = 0.0f64;
+        let mut display_error = 0.0f64;
+        for pixel in 0..finest.hdr.len() {
+            let scale = sampled.hdr[pixel].iter().fold(1.0e-10f64, |scale, value| scale.max((*value as f64).abs()));
+            for channel in 0..3 {
+                relative_spectrum_error = relative_spectrum_error.max((finest.hdr[pixel][channel] - sampled.hdr[pixel][channel]).abs() as f64 / scale);
+            }
+            let actual = finest.framebuffer.pixels[pixel];
+            let expected = sampled.framebuffer.pixels[pixel];
+            display_error = display_error.max((actual.r - expected.r).abs()).max((actual.g - expected.g).abs()).max((actual.b - expected.b).abs());
+        }
+        assert!(relative_spectrum_error < 5.0e-4, "5nm/1nm linear HDR error={relative_spectrum_error}");
+        assert!(display_error < 1.0 / 255.0, "encoded display error={display_error}");
+        eprintln!("32x18 native convergence: disk_pixels={hits}, radius_errors={radius_errors:?}, hdr_absolute_errors={hdr_errors:?}, 5nm/1nm_hdr_relative={relative_spectrum_error}, display_absolute={display_error}");
+        assert!(SchwarzschildSpectralGpuBuilder::new(1.0).wavelength_step_nm(3).execute(camera, 32, 18).is_err());
+    }
 
     #[test]
     fn spectral_gpu_temperature_and_display_match_independent_formulas() {
