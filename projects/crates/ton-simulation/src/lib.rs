@@ -9,7 +9,7 @@ mod ucf_cpu;
 mod ucf_physics;
 
 pub use convergence::{capture_convergence_samples, CaptureStepSample};
-pub use adaptive_gpu::{SchwarzschildGpuTraceBuilder, GpuTraceBatch, GpuTraceTermination};
+pub use adaptive_gpu::{SchwarzschildGpuTraceBuilder, GpuTraceBatch, GpuTraceTermination, GpuTraceStateLayout};
 pub use params::black_hole_for_render;
 pub use scene::{Scene, SceneBuilder};
 pub use ton_renderer::RenderMode;

@@ -1,7 +1,7 @@
 //! TON 自适应追踪的原生 GPU 编排，不调用物理参考实现。
 
 use std::collections::BTreeMap;
-use ton_geodesic::SphericalState;
+use ton_geodesic::{SphericalState, SchwarzschildCartesianNullState};
 use ton_types::{TonError, TonResult};
 use ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder;
 use ucf_backend_vulkan::VulkanBackend;
@@ -26,9 +26,20 @@ pub enum GpuTraceTermination {
     InvalidInput,
 }
 
+/// TON 输出状态布局，不进入 UCF 核心。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuTraceStateLayout {
+    /// `[t,r,theta,phi,ut,ur,utheta,uphi]`。
+    SphericalFourVelocity,
+    /// `[t,x,y,z,E,vx,vy,vz]`。
+    CartesianNullEnergy,
+}
+
 /// 真实原生执行后的数据和实际执行程序哈希。
 #[derive(Debug)]
 pub struct GpuTraceBatch {
+    /// 主状态与首盘面状态的共同布局，禁止按另一坐标契约解码。
+    pub state_layout: GpuTraceStateLayout,
     /// 原生程序的二十九标量输出，不混入 CPU 物理计算。
     pub records: Vec<[f32; 29]>,
     /// 每实例终止原因。
@@ -112,7 +123,8 @@ impl SchwarzschildGpuTraceBuilder {
     pub fn execute(self, states: &[SphericalState]) -> TonResult<GpuTraceBatch> {
         self.validate()?;
         if states.is_empty() {
-            return Ok(GpuTraceBatch { records: Vec::new(), terminations: Vec::new(), executed_program_hashes: Vec::new() });
+            return Ok(GpuTraceBatch { state_layout: GpuTraceStateLayout::SphericalFourVelocity,
+                records: Vec::new(), terminations: Vec::new(), executed_program_hashes: Vec::new() });
         }
         let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create adaptive Vulkan backend: {error}")))?;
         self.execute_with_backend(&mut backend, states)
@@ -120,14 +132,36 @@ impl SchwarzschildGpuTraceBuilder {
 
     pub(crate) fn execute_with_backend(self, backend: &mut VulkanBackend, states: &[SphericalState]) -> TonResult<GpuTraceBatch> {
         self.validate()?;
-        let count = u32::try_from(states.len()).map_err(|_| TonError::Domain("adaptive batch exceeds u32 capacity".into()))?;
-        let mut records = states.iter().map(|state| {
+        let records = states.iter().map(|state| {
             let mut record = [0.0; 29];
             record[..8].copy_from_slice(&[state.t, state.r, state.theta, state.phi, state.ut,
                 state.ur, state.utheta, state.uphi].map(|value| value as f32));
             record[9] = self.initial_step;
             record
         }).collect::<Vec<_>>();
+        self.execute_packed(backend, records, GpuTraceStateLayout::SphericalFourVelocity)
+    }
+
+    /// 原生追踪笛卡尔零状态，坐标布局和能量定义与球坐标入口显式分离。
+    pub fn execute_cartesian(self, states: &[SchwarzschildCartesianNullState]) -> TonResult<GpuTraceBatch> {
+        self.validate()?;
+        if states.is_empty() {
+            return Ok(GpuTraceBatch { state_layout: GpuTraceStateLayout::CartesianNullEnergy,
+                records: Vec::new(), terminations: Vec::new(), executed_program_hashes: Vec::new() });
+        }
+        let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create adaptive Vulkan backend: {error}")))?;
+        let records = states.iter().map(|state| {
+            let mut record = [0.0; 29];
+            record[..8].copy_from_slice(&[state.t, state.position.x, state.position.y, state.position.z, state.energy,
+                state.velocity.x, state.velocity.y, state.velocity.z].map(|value| value as f32));
+            record[9] = self.initial_step;
+            record
+        }).collect();
+        self.execute_packed(&mut backend, records, GpuTraceStateLayout::CartesianNullEnergy)
+    }
+
+    fn execute_packed(self, backend: &mut VulkanBackend, mut records: Vec<[f32; 29]>, state_layout: GpuTraceStateLayout) -> TonResult<GpuTraceBatch> {
+        let count = u32::try_from(records.len()).map_err(|_| TonError::Domain("adaptive batch exceeds u32 capacity".into()))?;
         let mut hashes = Vec::new();
         let mut scheduled = 0;
         let mut prepared_steps = 0;
@@ -135,8 +169,12 @@ impl SchwarzschildGpuTraceBuilder {
         while scheduled < self.maximum_steps && records.iter().any(|record| record[8] == 0.0) {
             let steps = self.chunk_steps.min(self.maximum_steps - scheduled);
             if steps != prepared_steps {
-                let program = SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(steps).conserved_null_energy()
-                    .build().map_err(|error| TonError::Domain(format!("build adaptive program: {error}")))?;
+                let builder = SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(steps);
+                let builder = match state_layout {
+                    GpuTraceStateLayout::SphericalFourVelocity => builder.conserved_null_energy(),
+                    GpuTraceStateLayout::CartesianNullEnergy => builder.cartesian_null(),
+                };
+                let program = builder.build().map_err(|error| TonError::Domain(format!("build adaptive program: {error}")))?;
                 let uniforms = [self.mass, self.absolute, self.relative, 1.0e-8 * self.mass,
                     self.maximum_step, 2.0002 * self.mass, self.escape, self.inner, self.outer, 1.0e-5 * self.mass];
                 let mut params = uniforms.into_iter().enumerate().map(|(slot, value)|
@@ -175,7 +213,7 @@ impl SchwarzschildGpuTraceBuilder {
             5.0 => Ok(GpuTraceTermination::InvalidInput),
             status => Err(TonError::Domain(format!("unknown adaptive GPU status: {status}"))),
         }).collect::<TonResult<Vec<_>>>()?;
-        Ok(GpuTraceBatch { records, terminations, executed_program_hashes: hashes })
+        Ok(GpuTraceBatch { state_layout, records, terminations, executed_program_hashes: hashes })
     }
 }
 
@@ -322,7 +360,7 @@ mod tests {
 
     #[test]
     fn render_gate_rejects_terminal_but_inaccurate_records() {
-        let mut batch = GpuTraceBatch { records: vec![[0.0; 29]],
+        let mut batch = GpuTraceBatch { state_layout: GpuTraceStateLayout::SphericalFourVelocity, records: vec![[0.0; 29]],
             terminations: vec![GpuTraceTermination::Escaped], executed_program_hashes: Vec::new() };
         assert!(batch.require_renderable().is_ok());
         for (component, value) in [(16, 0.035), (17, 0.01), (18, 0.075), (16, f32::NAN)] {
@@ -490,5 +528,146 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn cartesian_fused_gpu_trace_matches_independent_events_and_invariants() {
+        let camera = ton_types::Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let mut states = (0..5).flat_map(|y| (0..7).map(move |x| {
+            let direction = camera.ray_direction(((x as f64 + 0.5) / 7.0 * 2.0 - 1.0) * 7.0 / 5.0,
+                1.0 - (y as f64 + 0.5) / 5.0 * 2.0);
+            SchwarzschildCartesianNullState::from_ray(1.0, camera.position, direction).unwrap()
+        })).collect::<Vec<_>>();
+        for index in [1712usize, 7503] {
+            let u = (((index % 128) as f64 + 0.5) / 128.0 * 2.0 - 1.0) * 128.0 / 72.0;
+            let v = 1.0 - ((index / 128) as f64 + 0.5) / 72.0 * 2.0;
+            states.push(SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(u, v)).unwrap());
+        }
+        let result = SchwarzschildGpuTraceBuilder::new(1.0).execute_cartesian(&states).unwrap();
+        assert_eq!(result.state_layout, GpuTraceStateLayout::CartesianNullEnergy);
+        result.require_renderable().unwrap();
+        let expected_hash = ton_ucf_frontend::program_hash(&SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).cartesian_null().build().unwrap());
+        assert!(result.executed_program_hashes.iter().all(|hash| *hash == expected_hash));
+        let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).events(events).build().unwrap();
+        let mut disk_count = 0;
+        let mut multiple = 0;
+        for (index, ((record, termination), initial)) in result.records.iter().zip(&result.terminations).zip(states).enumerate() {
+            let reference = ton_geodesic::schwarzschild_cartesian_adaptive_trace(initial, config).unwrap();
+            let expected = match reference.termination {
+                ton_geodesic::AdaptiveTraceTermination::Captured => GpuTraceTermination::Captured,
+                ton_geodesic::AdaptiveTraceTermination::Escaped => GpuTraceTermination::Escaped,
+                other => panic!("reference {index}: {other:?}, {:?}", reference.failure),
+            };
+            assert_eq!(*termination, expected, "instance={index}");
+            assert_eq!(record[13], reference.disk_events.len() as f32, "instance={index}");
+            let radius = Vec3::new(record[1] as f64, record[2] as f64, record[3] as f64).length();
+            assert!((radius - reference.state.position.length()).abs() < 2.0e-5, "instance={index}, radius={radius}");
+            if let Some(first) = reference.disk_events.first() {
+                assert!((record[14] as f64 - first.event.state.position.length()).abs() < 2.0e-3, "instance={index}");
+                assert!((record[15] as f64 - first.affine_parameter).abs() < 2.0e-3, "instance={index}");
+                assert!(record[24].abs() <= 1.0e-5);
+                assert!((record[25] as f64 - first.event.state.energy).abs() < 1.0e-5);
+            }
+            disk_count += reference.disk_events.len();
+            multiple += usize::from(reference.disk_events.len() > 1);
+        }
+        eprintln!("Cartesian fused GPU instances={}, disk_count={disk_count}, multiple={multiple}, dispatches={}", result.records.len(), result.executed_program_hashes.len());
+        assert!(disk_count > 0 && multiple > 0);
+    }
+
+    #[test]
+    fn cartesian_fused_gpu_trace_obeys_exact_non_multiple_budget() {
+        let state = SchwarzschildCartesianNullState::from_ray(1.0, Vec3::new(10.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)).unwrap();
+        let result = SchwarzschildGpuTraceBuilder::new(1.0).maximum_steps(5).chunk_steps(3).execute_cartesian(&[state]).unwrap();
+        assert_eq!(result.terminations, [GpuTraceTermination::StepBudgetExhausted]);
+        assert_eq!(result.records[0][10], 5.0);
+        assert!(result.require_renderable().is_err());
+        assert_eq!(result.executed_program_hashes.len(), 2);
+        assert_ne!(result.executed_program_hashes[0], result.executed_program_hashes[1]);
+    }
+
+    #[test]
+    fn cartesian_fused_cpu_trace_executes_decoded_program_and_matches_reference() {
+        let camera = ton_types::Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let mut states = [1712usize, 7503].map(|index| {
+            let u = (((index % 128) as f64 + 0.5) / 128.0 * 2.0 - 1.0) * 128.0 / 72.0;
+            let v = 1.0 - ((index / 128) as f64 + 0.5) / 72.0 * 2.0;
+            SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(u, v)).unwrap()
+        }).to_vec();
+        states.push(SchwarzschildCartesianNullState::from_ray(1.0, Vec3::new(10.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)).unwrap());
+        states.push(SchwarzschildCartesianNullState::from_ray(1.0, Vec3::new(10.0, 0.0, 0.001), Vec3::new(1.0, 0.0, -1.0)).unwrap());
+        let program = SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).cartesian_null().build().unwrap();
+        let encoded = serde_json::to_string(&program).unwrap();
+        let decoded: ton_ucf_frontend::Program = serde_json::from_str(&encoded).unwrap();
+        ton_ucf_frontend::validate_program(&decoded).unwrap();
+        assert_eq!(ton_ucf_frontend::program_hash(&decoded), ton_ucf_frontend::program_hash(&program));
+        let mut input = states.iter().flat_map(|state| {
+            let mut record = [0.0f32; 29];
+            record[..8].copy_from_slice(&[state.t, state.position.x, state.position.y, state.position.z, state.energy,
+                state.velocity.x, state.velocity.y, state.velocity.z].map(|value| value as f32));
+            record[9] = 0.08;
+            record
+        }).collect::<Vec<_>>();
+        let execute = |input: &[f32]| {
+            let mut interpreter = ton_ucf_frontend::CpuInterpreter::new();
+            for (slot, value) in [1.0, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 80.0, 6.0, 20.0, 1.0e-5].into_iter().enumerate() {
+                interpreter.with_uniform(slot as u32, ton_ucf_frontend::Value::F32(value));
+            }
+            interpreter.with_buffer(1, input.iter().copied().map(ton_ucf_frontend::Value::F32).collect());
+            interpreter.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); input.len()]);
+            interpreter.run_parallel(&decoded, states.len() as u32).unwrap();
+            interpreter.buffer(2).unwrap().iter().map(|value| {
+                let ton_ucf_frontend::Value::F32(value) = value else { panic!("fused Cartesian trace lost F32 type"); };
+                *value
+            }).collect::<Vec<_>>()
+        };
+        for _ in 0..256 {
+            input = execute(&input);
+            if input.chunks_exact(29).all(|record| record[8] != 0.0) { break; }
+        }
+        let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).events(events).build().unwrap();
+        for (record, state) in input.chunks_exact(29).zip(states.iter()) {
+            let reference = ton_geodesic::schwarzschild_cartesian_adaptive_trace(*state, config).unwrap();
+            assert_eq!(record[8], match reference.termination {
+                ton_geodesic::AdaptiveTraceTermination::Captured => 1.0,
+                ton_geodesic::AdaptiveTraceTermination::Escaped => 2.0,
+                other => panic!("unexpected reference status: {other:?}"),
+            });
+            assert_eq!(record[13], reference.disk_events.len() as f32);
+            assert!(record[16] < 1.0e-3 && record[17] < 1.0e-3 && record[18] < 2.0e-3);
+            if let Some(first) = reference.disk_events.first() {
+                assert!((record[14] as f64 - first.event.state.position.length()).abs() < 2.0e-3);
+            }
+        }
+        assert_eq!(execute(&input), input);
+    }
+
+    #[test]
+    fn cartesian_fused_gpu_frame_passes_invariants_and_analytic_capture() {
+        let bh = ton_types::BlackHole::schwarzschild(1.0);
+        let camera = ton_types::Camera::cinematic(bh);
+        let (width, height) = (128, 72);
+        let rays = (0..height).flat_map(|y| (0..width).map(move |x|
+            camera.ray_direction(((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * width as f64 / height as f64,
+                1.0 - (y as f64 + 0.5) / height as f64 * 2.0))).collect::<Vec<_>>();
+        let states = rays.iter().map(|direction| SchwarzschildCartesianNullState::from_ray(1.0,
+            camera.position, *direction).unwrap()).collect::<Vec<_>>();
+        let result = SchwarzschildGpuTraceBuilder::new(1.0).execute_cartesian(&states).unwrap();
+        result.require_renderable().unwrap();
+        let mut captured = 0;
+        let mut maxima = [0.0f32; 3];
+        for (index, ((record, termination), direction)) in result.records.iter().zip(&result.terminations).zip(rays).enumerate() {
+            let expected = if ton_metric::schwarzschild_geodesic_analytic_captured(bh, camera.position, direction) {
+                captured += 1;
+                GpuTraceTermination::Captured
+            } else { GpuTraceTermination::Escaped };
+            assert_eq!(*termination, expected, "pixel={index}");
+            for component in 0..3 { maxima[component] = maxima[component].max(record[16 + component]); }
+        }
+        eprintln!("Cartesian fused GPU frame {width}x{height}: captured={captured}, escaped={}, maxima={maxima:?}, dispatches={}",
+            states.len() - captured, result.executed_program_hashes.len());
+        assert!(captured > 0 && captured < states.len());
     }
 }

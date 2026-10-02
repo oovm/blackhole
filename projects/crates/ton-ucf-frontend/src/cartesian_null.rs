@@ -31,6 +31,7 @@ pub(crate) fn derivative(builder: &StructuredFunctionBuilder, state: &[Expr; 8],
 }
 
 /// 输入 `[t,x,y,z,E,vx,vy,vz,step]`，输出八标量状态及 status、已用步长、下步步长、误差、累计拒绝次数、最大零约束残差、最大角动量平方漂移、初始角动量平方。
+/// 角动量平方误差按 `max(L0²,(M E0)²)` 归一化，L0 与 E0 为当前 chunk 输入。
 /// 此程序只做积分，不负责视界或盘面事件，调用方必须独立检查终止与守恒门禁。
 #[derive(Debug, Clone, Copy)]
 pub struct SchwarzschildCartesianAdaptiveChunkBuilder {
@@ -82,8 +83,10 @@ impl SchwarzschildCartesianAdaptiveChunkBuilder {
             let [null, angular] = invariants(builder, &state, &uniforms[0]);
             let difference = b(builder, BinOp::Sub, angular, Expr::LoadLocal(initial_angular));
             let absolute = builder.unary(UnOp::Abs, difference);
-            let drift = builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(initial_angular), builder.const_f32(0.0)),
-                absolute.clone(), b(builder, BinOp::Div, absolute, Expr::LoadLocal(initial_angular)));
+            let energy_scale = b(builder, BinOp::Mul, uniforms[0].clone(), initial[4].clone());
+            let angular_scale = b(builder, BinOp::Max, Expr::LoadLocal(initial_angular),
+                b(builder, BinOp::Mul, energy_scale.clone(), energy_scale));
+            let drift = b(builder, BinOp::Div, absolute, angular_scale);
             builder.store_local(max_null, b(builder, BinOp::Max, Expr::LoadLocal(max_null), null));
             builder.store_local(max_angular, b(builder, BinOp::Max, Expr::LoadLocal(max_angular), drift));
             for index in 0..13 {
@@ -103,7 +106,7 @@ impl SchwarzschildCartesianAdaptiveChunkBuilder {
     }
 }
 
-fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr) -> [Expr; 2] {
+pub(crate) fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr) -> [Expr; 2] {
     let radius = radius(builder, state);
     let cross = |first: usize, second: usize, third: usize, fourth: usize| b(builder, BinOp::Sub,
         b(builder, BinOp::Mul, state[first].clone(), state[second].clone()),

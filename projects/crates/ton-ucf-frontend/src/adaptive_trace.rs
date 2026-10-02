@@ -1,7 +1,7 @@
 //! 自适应积分与事件定位在同一个通用 UCF 程序中的组合。
 
 use super::{b, BinOp, Expr, Program, ScalarTy, StructuredFunctionBuilder, Ty, UnOp};
-use super::adaptive::{emit_integration_model, snapshot};
+use super::adaptive::{emit_integration_model, snapshot, IntegrationModel};
 use super::events::emit_localization_model;
 
 /// 构造逐接受步检查事件的追踪 chunk，不执行参考函数或 shader 模板。
@@ -20,12 +20,38 @@ pub struct SchwarzschildAdaptiveTraceChunkBuilder {
     maximum_retries: u32,
     maximum_bisections: u32,
     null_energy: bool,
+    cartesian: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{CpuInterpreter, Value};
+
+    #[test]
+    fn cartesian_trace_localizes_capture_and_preserves_terminal_record() {
+        let program = SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(4).cartesian_null().build().unwrap();
+        let mut input = vec![Value::F32(0.0); 29];
+        for (index, value) in [(3, 10.0), (4, 1.0), (7, -1.0), (9, 0.04)] { input[index] = Value::F32(value); }
+        for iteration in 0..2 {
+            let previous = input.clone();
+            let mut cpu = CpuInterpreter::new();
+            for (slot, value) in [1.0, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 9.98, 80.0, 10.1, 20.0, 1.0e-5].into_iter().enumerate() {
+                cpu.with_uniform(slot as u32, Value::F32(value));
+            }
+            cpu.with_buffer(1, input);
+            cpu.with_buffer(2, vec![Value::F32(0.0); 29]);
+            cpu.run_parallel(&program, 1).unwrap();
+            input = cpu.buffer(2).unwrap().to_vec();
+            assert_eq!(input[8].as_f64().unwrap(), 1.0);
+            assert!((input[3].as_f64().unwrap() - 9.98).abs() < 1.0e-5);
+            assert_eq!(input[4].as_f64().unwrap(), 1.0);
+            assert_eq!(input[10].as_f64().unwrap(), 1.0);
+            assert!(input[16].as_f64().unwrap() < 1.0e-6);
+            assert!(input[18].as_f64().unwrap() < 1.0e-6);
+            if iteration == 1 { assert_eq!(input, previous); }
+        }
+    }
 
     #[test]
     fn null_energy_formulation_preserves_null_input_and_rejects_non_null_input() {
@@ -95,7 +121,7 @@ mod tests {
 }
 
 impl Default for SchwarzschildAdaptiveTraceChunkBuilder {
-    fn default() -> Self { Self { maximum_steps: 16, maximum_retries: 16, maximum_bisections: 48, null_energy: false } }
+    fn default() -> Self { Self { maximum_steps: 16, maximum_retries: 16, maximum_bisections: 48, null_energy: false, cartesian: false } }
 }
 
 fn and(builder: &StructuredFunctionBuilder, left: Expr, right: Expr) -> Expr {
@@ -110,7 +136,12 @@ fn square(builder: &StructuredFunctionBuilder, value: Expr) -> Expr {
     b(builder, BinOp::Mul, value.clone(), value)
 }
 
-fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr, null_energy: bool) -> [Expr; 3] {
+fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr, model: IntegrationModel) -> [Expr; 3] {
+    if matches!(model, IntegrationModel::CartesianNull) {
+        let [null, angular] = super::cartesian_null::invariants(builder, state, mass);
+        return [state[4].clone(), angular, null];
+    }
+    let null_energy = matches!(model, IntegrationModel::NullEnergy);
     let f = b(builder, BinOp::Div, b(builder, BinOp::Sub, state[1].clone(),
         b(builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())), state[1].clone());
     let angular = b(builder, BinOp::Add, square(builder, state[6].clone()),
@@ -125,11 +156,17 @@ fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Exp
             b(builder, BinOp::Add, abs(builder, spatial), abs(builder, temporal)))]
 }
 
-fn observe(builder: &mut StructuredFunctionBuilder, locals: &[u32; 29], state: &[Expr; 8], mass: &Expr, enabled: Expr, null_energy: bool) {
-    let [energy, angular, null] = invariants(builder, state, mass, null_energy);
+fn observe(builder: &mut StructuredFunctionBuilder, locals: &[u32; 29], state: &[Expr; 8], mass: &Expr, enabled: Expr, model: IntegrationModel) {
+    let [energy, angular, null] = invariants(builder, state, mass, model);
     let energy_drift = abs(builder, b(builder, BinOp::Div, b(builder, BinOp::Sub, energy, Expr::LoadLocal(locals[19])), Expr::LoadLocal(locals[19])));
-    let angular_drift = builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(locals[20]), builder.const_f32(0.0)), abs(builder, angular.clone()),
-        abs(builder, b(builder, BinOp::Div, b(builder, BinOp::Sub, angular, Expr::LoadLocal(locals[20])), Expr::LoadLocal(locals[20]))));
+    let angular_drift = if matches!(model, IntegrationModel::CartesianNull) {
+        let scale = b(builder, BinOp::Max, Expr::LoadLocal(locals[20]), square(builder,
+            b(builder, BinOp::Mul, mass.clone(), Expr::LoadLocal(locals[19]))));
+        b(builder, BinOp::Div, abs(builder, b(builder, BinOp::Sub, angular, Expr::LoadLocal(locals[20]))), scale)
+    } else {
+        builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(locals[20]), builder.const_f32(0.0)), abs(builder, angular.clone()),
+            abs(builder, b(builder, BinOp::Div, b(builder, BinOp::Sub, angular, Expr::LoadLocal(locals[20])), Expr::LoadLocal(locals[20]))))
+    };
     for (index, value) in [(16, null), (17, energy_drift), (18, angular_drift)] {
         builder.store_local(locals[index], builder.select(enabled.clone(), b(builder, BinOp::Max, Expr::LoadLocal(locals[index]), value), Expr::LoadLocal(locals[index])));
     }
@@ -147,10 +184,15 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
 
     /// 使用守恒能量降阶零测地线模型，拒绝初始归一化零约束残差大于 `1e-4` 的输入。
     /// 对外状态仍是时间四速度布局。它不适用于一般时类或非零测地线。
-    pub fn conserved_null_energy(mut self) -> Self { self.null_energy = true; self }
+    pub fn conserved_null_energy(mut self) -> Self { self.null_energy = true; self.cartesian = false; self }
+
+    /// 使用 `[t,x,y,z,E,vx,vy,vz]` 状态，角动量漂移按 `max(L0²,(M E0)²)` 归一化。
+    /// 外部状态与首盘交点均保持此笛卡尔布局，不能当作球坐标或时间四速度。
+    pub fn cartesian_null(mut self) -> Self { self.cartesian = true; self.null_energy = false; self }
 
     /// 组合通用程序片段，保留终止状态与首次盘命中跨 chunk 的一致性。
     pub fn build(self) -> Result<Program, String> {
+        let model = if self.cartesian { IntegrationModel::CartesianNull } else { self.null_energy.into() };
         if self.maximum_steps == 0 || self.maximum_steps > 65_536 || self.maximum_retries > 64
             || self.maximum_bisections == 0 || self.maximum_bisections > 64
         { return Err("invalid adaptive trace chunk loop bounds".into()); }
@@ -175,7 +217,8 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
             (uniforms[6].clone(), uniforms[5].clone()), (uniforms[7].clone(), uniforms[5].clone()), (uniforms[8].clone(), uniforms[7].clone())] {
             valid = and(&builder, valid, b(&builder, BinOp::Gt, left, right));
         }
-        valid = and(&builder, valid, b(&builder, BinOp::Gt, Expr::LoadLocal(locals[1]), b(&builder, BinOp::Mul, mass.clone(), builder.const_f32(2.0))));
+        let initial: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(locals[index]));
+        valid = and(&builder, valid, b(&builder, BinOp::Gt, model.radius(&builder, &initial), b(&builder, BinOp::Mul, mass.clone(), builder.const_f32(2.0))));
         valid = and(&builder, valid, b(&builder, BinOp::Gt, Expr::LoadLocal(locals[4]), builder.const_f32(0.0)));
         let status_valid = (0..=5).fold(Expr::ConstBool(false), |found, status| builder.select(found, Expr::ConstBool(true),
             b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(status as f32))));
@@ -183,8 +226,9 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
         let valid_local = builder.let_value(Ty::Scalar(ScalarTy::Bool), valid);
         valid = Expr::LoadLocal(valid_local);
         let initial: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(locals[index]));
-        let [physical_energy, _, initial_null] = invariants(&builder, &initial, &mass, false);
-        if self.null_energy {
+        let initial_model = if self.cartesian { model } else { IntegrationModel::Spherical };
+        let [physical_energy, _, initial_null] = invariants(&builder, &initial, &mass, initial_model);
+        if self.null_energy || self.cartesian {
             let null_valid = and(&builder, builder.unary(UnOp::IsFinite, initial_null.clone()),
                 b(&builder, BinOp::Le, initial_null, builder.const_f32(1.0e-4)));
             valid = and(&builder, valid, builder.select(b(&builder, BinOp::Eq, Expr::LoadLocal(locals[10]), builder.const_f32(0.0)),
@@ -201,46 +245,48 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
             b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(0.0)));
         let initialized = builder.let_value(Ty::Scalar(ScalarTy::Bool), initialized);
         let initial: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(locals[index]));
-        let [energy, angular, null] = invariants(&builder, &initial, &mass, self.null_energy);
+        let [energy, angular, null] = invariants(&builder, &initial, &mass, model);
         for (index, value) in [(19, energy), (20, angular), (16, null)] {
             builder.store_local(locals[index], builder.select(Expr::LoadLocal(initialized), value, Expr::LoadLocal(locals[index])));
         }
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(0.0));
-        let captured = b(&builder, BinOp::Le, Expr::LoadLocal(locals[1]), uniforms[5].clone());
-        let escaped = and(&builder, b(&builder, BinOp::Ge, Expr::LoadLocal(locals[1]), uniforms[6].clone()),
-            b(&builder, BinOp::Gt, Expr::LoadLocal(locals[5]), builder.const_f32(0.0)));
+        let radius = model.radius(&builder, &initial);
+        let captured = b(&builder, BinOp::Le, radius.clone(), uniforms[5].clone());
+        let escaped = and(&builder, b(&builder, BinOp::Ge, radius, uniforms[6].clone()), outgoing(&builder, &initial, model));
         builder.store_local(locals[8], builder.select(running, builder.select(captured, builder.const_f32(1.0),
             builder.select(escaped, builder.const_f32(2.0), builder.const_f32(0.0))), Expr::LoadLocal(locals[8])));
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(0.0));
         builder.bounded_while(running, self.maximum_steps, |builder| {
             let start = snapshot(builder, std::array::from_fn(|index| Expr::LoadLocal(locals[index])));
-            let integrated = emit_integration_model(builder, start.clone(), Expr::LoadLocal(locals[9]), std::array::from_fn(|index| uniforms[index].clone()), 1, self.maximum_retries, self.null_energy);
+            let integrated = emit_integration_model(builder, start.clone(), Expr::LoadLocal(locals[9]), std::array::from_fn(|index| uniforms[index].clone()), 1, self.maximum_retries, model);
             let end: [Expr; 8] = std::array::from_fn(|index| integrated[index].clone());
             let capture = emit_localization_model(builder, start.clone(), end.clone(), integrated[9].clone(),
-                [mass.clone(), builder.const_f32(0.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections, self.null_energy);
+                [mass.clone(), builder.const_f32(0.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections, model);
             let escape = emit_localization_model(builder, start.clone(), end.clone(), integrated[9].clone(),
-                [mass.clone(), builder.const_f32(0.0), uniforms[6].clone(), uniforms[9].clone()], self.maximum_bisections, self.null_energy);
+                [mass.clone(), builder.const_f32(0.0), uniforms[6].clone(), uniforms[9].clone()], self.maximum_bisections, model);
             let disk = emit_localization_model(builder, start, end.clone(), integrated[9].clone(),
-                [mass.clone(), builder.const_f32(1.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections, self.null_energy);
+                [mass.clone(), builder.const_f32(1.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections, model);
             let accepted = b(builder, BinOp::Eq, integrated[8].clone(), builder.const_f32(1.0));
             let event_failure = [capture[10].clone(), escape[10].clone(), disk[10].clone()].into_iter().fold(Expr::ConstBool(false), |failed, status|
                 builder.select(failed, Expr::ConstBool(true), b(builder, BinOp::Gt, status, builder.const_f32(2.0))));
             let usable = builder.let_value(Ty::Scalar(ScalarTy::Bool), and(builder, accepted.clone(), builder.select(event_failure.clone(), Expr::ConstBool(false), Expr::ConstBool(true))));
             let captured = builder.let_value(Ty::Scalar(ScalarTy::Bool), and(builder, b(builder, BinOp::Eq, capture[10].clone(), builder.const_f32(1.0)),
-                b(builder, BinOp::Le, end[1].clone(), uniforms[5].clone())));
+                b(builder, BinOp::Le, model.radius(builder, &end), uniforms[5].clone())));
             let escaped = builder.let_value(Ty::Scalar(ScalarTy::Bool), and(builder, b(builder, BinOp::Eq, escape[10].clone(), builder.const_f32(1.0)),
-                b(builder, BinOp::Gt, end[5].clone(), builder.const_f32(0.0))));
+                outgoing(builder, &end, model)));
             let fraction = builder.let_value(Ty::f32(), builder.select(Expr::LoadLocal(captured), capture[8].clone(),
                 builder.select(Expr::LoadLocal(escaped), escape[8].clone(), builder.const_f32(1.0))));
+            let disk_state: [Expr; 8] = std::array::from_fn(|index| disk[index].clone());
+            let disk_radius = model.radius(builder, &disk_state);
             let hit = and(builder, Expr::LoadLocal(usable), and(builder,
                 b(builder, BinOp::Eq, disk[10].clone(), builder.const_f32(1.0)), and(builder,
-                    b(builder, BinOp::Ge, disk[1].clone(), uniforms[7].clone()), and(builder,
-                        b(builder, BinOp::Le, disk[1].clone(), uniforms[8].clone()), b(builder, BinOp::Le, disk[8].clone(), Expr::LoadLocal(fraction))))));
+                    b(builder, BinOp::Ge, disk_radius.clone(), uniforms[7].clone()), and(builder,
+                        b(builder, BinOp::Le, disk_radius.clone(), uniforms[8].clone()), b(builder, BinOp::Le, disk[8].clone(), Expr::LoadLocal(fraction))))));
             let hit = builder.let_value(Ty::Scalar(ScalarTy::Bool), hit);
             let first_hit = builder.let_value(Ty::Scalar(ScalarTy::Bool), and(builder, Expr::LoadLocal(hit),
                 b(builder, BinOp::Eq, Expr::LoadLocal(locals[13]), builder.const_f32(0.0))));
             let event_affine = b(builder, BinOp::Add, Expr::LoadLocal(locals[12]), b(builder, BinOp::Mul, integrated[9].clone(), disk[8].clone()));
-            for (index, value) in [(14, disk[1].clone()), (15, event_affine)] {
+            for (index, value) in [(14, disk_radius), (15, event_affine)] {
                 builder.store_local(locals[index], builder.select(Expr::LoadLocal(first_hit), value, Expr::LoadLocal(locals[index])));
             }
             for index in 0..8 {
@@ -253,8 +299,8 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
             builder.store_local(locals[13], builder.select(Expr::LoadLocal(hit), b(builder, BinOp::Add, Expr::LoadLocal(locals[13]), builder.const_f32(1.0)), Expr::LoadLocal(locals[13])));
             let final_state = snapshot(builder, std::array::from_fn(|index| builder.select(Expr::LoadLocal(captured), capture[index].clone(),
                 builder.select(Expr::LoadLocal(escaped), escape[index].clone(), end[index].clone()))));
-            observe(builder, &locals, &final_state, &mass, Expr::LoadLocal(usable), self.null_energy);
-            observe(builder, &locals, &std::array::from_fn(|index| disk[index].clone()), &mass, Expr::LoadLocal(hit), self.null_energy);
+            observe(builder, &locals, &final_state, &mass, Expr::LoadLocal(usable), model);
+            observe(builder, &locals, &disk_state, &mass, Expr::LoadLocal(hit), model);
             for index in 0..8 { builder.store_local(locals[index], builder.select(Expr::LoadLocal(usable), final_state[index].clone(), Expr::LoadLocal(locals[index]))); }
             for (index, value) in [(9, integrated[10].clone()),
                 (10, b(builder, BinOp::Add, Expr::LoadLocal(locals[10]), builder.const_f32(1.0))),
@@ -278,4 +324,12 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
         super::validate_program(&program).map_err(|error| error.to_string())?;
         Ok(program)
     }
+}
+
+fn outgoing(builder: &StructuredFunctionBuilder, state: &[Expr; 8], model: IntegrationModel) -> Expr {
+    let radial = if matches!(model, IntegrationModel::CartesianNull) {
+        (1..=3).fold(builder.const_f32(0.0), |sum, index| b(builder, BinOp::Add, sum,
+            b(builder, BinOp::Mul, state[index].clone(), state[index + 4].clone())))
+    } else { state[5].clone() };
+    b(builder, BinOp::Gt, radial, builder.const_f32(0.0))
 }
