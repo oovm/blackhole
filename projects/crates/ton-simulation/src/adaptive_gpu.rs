@@ -37,6 +37,27 @@ pub struct GpuTraceBatch {
     pub executed_program_hashes: Vec<u64>,
 }
 
+impl GpuTraceBatch {
+    /// 渲染前同时检查终止原因与全轨迹不变量，不把正常终止视为物理正确。
+    pub fn require_renderable(&self) -> TonResult<()> {
+        if self.records.len() != self.terminations.len() {
+            return Err(TonError::Domain("adaptive trace record/status count mismatch".into()));
+        }
+        for (index, (record, termination)) in self.records.iter().zip(&self.terminations).enumerate() {
+            if !matches!(termination, GpuTraceTermination::Captured | GpuTraceTermination::Escaped)
+                || record.iter().any(|value| !value.is_finite())
+                || record[16] < 0.0 || record[16] >= 1.0e-3
+                || record[17] < 0.0 || record[17] >= 1.0e-3
+                || record[18] < 0.0 || record[18] >= 2.0e-3 {
+                return Err(TonError::Domain(format!(
+                    "adaptive trace instance {index} cannot enter Beauty: termination={termination:?}, null={}, energy_drift={}, angular_squared_drift={}",
+                    record[16], record[17], record[18])));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 显式设置物理边界、F32 误差预算与有界执行预算。
 #[derive(Debug, Clone, Copy)]
 pub struct SchwarzschildGpuTraceBuilder {
@@ -244,5 +265,73 @@ mod tests {
         }
         eprintln!("adaptive GPU frame {width}x{height}: captured={captured}, escaped={escaped}, dispatches={}", result.executed_program_hashes.len());
         assert!(captured > 0 && escaped > 0);
+    }
+
+    #[test]
+    fn adaptive_gpu_frame_gate_matches_per_instance_diagnostics() {
+        let camera = ton_types::Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let (width, height) = (128, 72);
+        let uv = (0..height).flat_map(|y| (0..width).map(move |x|
+            (((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * width as f64 / height as f64,
+             1.0 - (y as f64 + 0.5) / height as f64 * 2.0))).collect::<Vec<_>>();
+        let directions = crate::ucf_physics::camera_ray_ucf_vulkan_batch(camera, &uv).unwrap();
+        let rays = directions.iter().map(|direction| (camera.position, *direction)).collect::<Vec<_>>();
+        let states = crate::ucf_physics::schwarzschild_initial_state_ucf_vulkan_batch(1.0,
+            3.0 * 3.0f64.sqrt(), &rays).unwrap();
+        let result = SchwarzschildGpuTraceBuilder::new(1.0).execute(&states).unwrap();
+        let mut failures = Vec::new();
+        let mut maxima = [0.0f32; 3];
+        for (index, (record, status)) in result.records.iter().zip(&result.terminations).enumerate() {
+            for component in 0..3 { maxima[component] = maxima[component].max(record[16 + component]); }
+            if !matches!(status, GpuTraceTermination::Captured | GpuTraceTermination::Escaped)
+                || record[16] >= 1.0e-3 || record[17] >= 1.0e-3 || record[18] >= 2.0e-3 {
+                failures.push((index, *status, record[1], record[10], record[16], record[17], record[18]));
+            }
+        }
+        eprintln!("native frame {width}x{height}: invariant maxima={maxima:?}, failures={}, dispatches={}", failures.len(), result.executed_program_hashes.len());
+        assert_eq!(result.require_renderable().is_ok(), failures.is_empty());
+    }
+
+    #[test]
+    fn adaptive_gpu_near_axis_tolerance_sweep_enforces_accuracy_gate() {
+        let camera = ton_types::Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let states = [1712usize, 7503].map(|index| {
+            let u = (((index % 128) as f64 + 0.5) / 128.0 * 2.0 - 1.0) * 128.0 / 72.0;
+            let v = 1.0 - ((index / 128) as f64 + 0.5) / 72.0 * 2.0;
+            ton_geodesic::schwarzschild_geodesic_initial_state(1.0, camera.position, camera.ray_direction(u, v)).unwrap()
+        });
+        for (index, state) in states.iter().enumerate() {
+            let reference = ton_geodesic::schwarzschild_adaptive_trace(*state,
+                ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).build().unwrap()).unwrap();
+            eprintln!("axis reference ray={index}, termination={:?}, null={}, angular={}",
+                reference.termination, reference.maximum_null_residual, reference.maximum_angular_squared_drift);
+            assert_eq!(reference.termination, ton_geodesic::AdaptiveTraceTermination::Escaped);
+            assert!(reference.maximum_null_residual < 1.0e-3 && reference.maximum_angular_squared_drift < 2.0e-3);
+        }
+        for (absolute, relative) in [(1.0e-6, 1.0e-5), (1.0e-7, 1.0e-6)] {
+            let result = SchwarzschildGpuTraceBuilder::new(1.0).tolerances(absolute, relative).execute(&states).unwrap();
+            for (index, record) in result.records.iter().enumerate() {
+                eprintln!("axis ray={index} tolerances={absolute}/{relative}, status={}, steps={}, null={}, angular={}", record[8], record[10], record[16], record[18]);
+                assert_eq!(record[8], 2.0);
+            }
+            let reliable = result.records.iter().all(|record| record[16] < 1.0e-3
+                && record[17] < 1.0e-3 && record[18] < 2.0e-3);
+            assert_eq!(result.require_renderable().is_ok(), reliable);
+        }
+    }
+
+    #[test]
+    fn render_gate_rejects_terminal_but_inaccurate_records() {
+        let mut batch = GpuTraceBatch { records: vec![[0.0; 29]],
+            terminations: vec![GpuTraceTermination::Escaped], executed_program_hashes: Vec::new() };
+        assert!(batch.require_renderable().is_ok());
+        for (component, value) in [(16, 0.035), (17, 0.01), (18, 0.075), (16, f32::NAN)] {
+            batch.records[0] = [0.0; 29];
+            batch.records[0][component] = value;
+            assert!(batch.require_renderable().is_err());
+        }
+        batch.records[0] = [0.0; 29];
+        batch.terminations[0] = GpuTraceTermination::StepBudgetExhausted;
+        assert!(batch.require_renderable().is_err());
     }
 }
