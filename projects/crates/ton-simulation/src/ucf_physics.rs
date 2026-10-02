@@ -1032,8 +1032,16 @@ pub fn schwarzschild_beauty_ucf_vulkan(
         .enumerate()
         .find(|(_, status)| **status == 3 || **status == 4)
     {
+        let mut histogram = BTreeMap::<u32, usize>::new();
+        for status in &statuses {
+            *histogram.entry(*status).or_default() += 1;
+        }
+        let state = states[index];
         return Err(TonError::Domain(format!(
-            "Vulkan Beauty contains non-beauty geodesic instance {index} with status {status}"
+            "Vulkan Beauty contains non-beauty geodesic instance {index} with status {status}. \
+             histogram={histogram:?}, steps={completed_steps}/{max_steps}, step={step}, escape_radius={escape_radius}, \
+             r={}, ur={}, theta={}, ut={}, bound_infall={}, disk_hit={}",
+            state.r, state.ur, state.theta, state.ut, bound_flags[index], disk_hits[index],
         )));
     }
     let state_buffer = states

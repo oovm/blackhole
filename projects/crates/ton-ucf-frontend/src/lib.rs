@@ -363,9 +363,9 @@ pub fn schwarzschild_initial_state_batch() -> Program {
     let spatial = bin(BinOp::Add, bin(BinOp::Add, bin(BinOp::Div, square(local(20)), local(23)), bin(BinOp::Mul, square(local(7)), square(local(21)))), bin(BinOp::Mul, square(local(7)), bin(BinOp::Mul, square(local(15)), square(local(22)))));
     body.push(Stmt::Let { id: 24, ty: Ty::f32(), init: bin(BinOp::Div, unary(UnOp::Sqrt, spatial), unary(UnOp::Sqrt, local(23))) });
     let angular = unary(UnOp::Sqrt, bin(BinOp::Add, bin(BinOp::Mul, square(local(7)), square(local(21))), bin(BinOp::Mul, square(local(7)), bin(BinOp::Mul, square(local(15)), square(local(22))))));
-    let impact = bin(BinOp::Div, angular, bin(BinOp::Mul, local(23), local(24)));
+    let impact = bin(BinOp::Div, bin(BinOp::Mul, local(7), angular), bin(BinOp::Mul, local(23), local(24)));
     body.push(Stmt::Let { id: 25, ty: Ty::f32(), init: impact });
-    body.push(Stmt::Let { id: 26, ty: Ty::f32(), init: select(bin(BinOp::Lt, local(25), Expr::LoadUniform(1)), f32(1.0), f32(0.0)) });
+    body.push(Stmt::Let { id: 26, ty: Ty::f32(), init: select(bin(BinOp::Lt, local(20), f32(0.0)), select(bin(BinOp::Lt, local(25), Expr::LoadUniform(1)), f32(1.0), f32(0.0)), f32(0.0)) });
     let outputs = [f32(0.0), local(7), local(10), local(11), local(24), local(20), local(21), local(22), f32(0.0), local(26)];
     for (offset, value) in outputs.into_iter().enumerate() {
         body.push(Stmt::StoreBuffer { resource: 2, index: index(output_base.clone(), offset as u32), value });
@@ -1285,6 +1285,25 @@ mod integration_tests {
         assert_eq!(output[10], Value::F32(1.0));
         let radius = output[11].as_f64().unwrap();
         assert!(radius > 11.8 && radius < 12.0, "crossing radius={radius}");
+    }
+
+    #[test]
+    fn initial_state_distinguishes_capture_scattering_and_outgoing_rays() {
+        let input = [
+            0.0, 0.0, 20.0, 0.0, 0.0, -1.0,
+            0.0, 0.0, 20.0, 0.4, 0.0, -1.0,
+            0.0, 0.0, 20.0, 0.0, 0.0, 1.0,
+        ].into_iter().map(Value::F32).collect::<Vec<_>>();
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(1.0));
+        interpreter.with_uniform(1, Value::F32(3.0 * 3.0f32.sqrt()));
+        interpreter.with_buffer(1, input);
+        interpreter.with_buffer(2, vec![Value::F32(0.0); 30]);
+        interpreter.run_parallel(&schwarzschild_initial_state_batch(), 3).unwrap();
+        let output = interpreter.buffer(2).unwrap();
+        assert_eq!(output[9], Value::F32(1.0));
+        assert_eq!(output[19], Value::F32(0.0));
+        assert_eq!(output[29], Value::F32(0.0));
     }
 
     #[test]
