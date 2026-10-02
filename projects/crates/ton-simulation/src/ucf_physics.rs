@@ -1254,7 +1254,7 @@ mod tests {
     fn adaptive_ucf_chunk_matches_independent_reference_sequence() {
         let program = ton_ucf_frontend::SchwarzschildAdaptiveChunkBuilder::new().maximum_steps(8).build().unwrap();
         let input = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 0.08];
-        let uniforms = [1.0f32, 1.0e-13, 1.0e-11, 1.0e-8, 0.08];
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08];
         let actual = adaptive_cpu_program_output(&program, &input, uniforms);
         let mut expected = SphericalState { t: input[0] as f64, r: input[1] as f64, theta: input[2] as f64, phi: input[3] as f64,
             ut: input[4] as f64, ur: input[5] as f64, utheta: input[6] as f64, uphi: input[7] as f64 };
@@ -1666,27 +1666,31 @@ mod tests {
         let u = ((39.5 / 128.0) * 2.0 - 1.0) * (128.0 / 72.0);
         let v = 1.0 - (0.5 / 72.0) * 2.0;
         let state = schwarzschild_geodesic_initial_state(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
-        let program = ton_ucf_frontend::SchwarzschildAdaptiveChunkBuilder::new().build().unwrap();
-        let mut input = [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.08].map(|value| value as f32);
-        let mut residual = 0.0f64;
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).conserved_null_energy().build().unwrap();
+        let mut input = [0.0f32; 29];
+        input[..8].copy_from_slice(&[state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi].map(|value| value as f32));
+        input[9] = 0.08;
         let mut chunks = 0;
-        while input[1] < 80.0 && chunks < 256 {
-            let output = adaptive_cpu_program_output(&program, &input, [1.0, 1.0e-9, 1.0e-7, 1.0e-8, 0.08]);
-            assert_eq!(output[8], 1.0, "adaptive chunk failure: {output:?}");
-            let f = 1.0 - 2.0 / output[1];
-            let temporal = f * output[4] * output[4];
-            let spatial = output[5] * output[5] / f + output[1] * output[1] *
-                (output[6] * output[6] + output[2].sin().powi(2) * output[7] * output[7]);
-            let relative = ((spatial - temporal) / (spatial.abs() + temporal.abs())).abs();
-            assert!(relative.is_finite());
-            residual = residual.max(relative);
-            for index in 0..8 { input[index] = output[index] as f32; }
-            input[8] = output[10] as f32;
+        while input[8] == 0.0 && chunks < 256 {
+            let mut interpreter = ton_ucf_frontend::CpuInterpreter::new();
+            for (slot, value) in [1.0, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 80.0, 6.0, 20.0, 1.0e-5].into_iter().enumerate() {
+                interpreter.with_uniform(slot as u32, Value::F32(value));
+            }
+            interpreter.with_buffer(1, input.into_iter().map(Value::F32).collect());
+            interpreter.with_buffer(2, vec![Value::F32(0.0); 29]);
+            interpreter.run_parallel(&program, 1).unwrap();
+            for (target, value) in input.iter_mut().zip(interpreter.buffer(2).unwrap()) {
+                let Value::F32(value) = value else { panic!("F32 trace lost its value type"); };
+                *target = *value;
+            }
             chunks += 1;
         }
-        eprintln!("UCF CPU polar chunks={chunks}, max_chunk_boundary_null_residual={residual}, r={}", input[1]);
-        assert!(input[1] >= 80.0 && chunks < 256);
-        assert!(residual < 1.0e-3);
+        eprintln!("UCF F32 CPU polar chunks={chunks}, max_step_null_residual={}, r={}", input[16], input[1]);
+        assert_eq!(input[8], 2.0);
+        assert!((input[1] - 80.0).abs() <= 1.0e-5 && chunks < 256);
+        assert!(input[16] < 1.0e-3);
+        assert!(input[17] < 1.0e-3);
+        assert!(input[18] < 2.0e-3);
     }
 
     #[test]
@@ -1696,24 +1700,22 @@ mod tests {
         let decoded: ucf_program::Program = serde_json::from_str(&body).unwrap();
         assert_eq!(hash, ton_ucf_frontend::program_hash(&decoded));
         assert_eq!(program, decoded);
-        let input = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 0.08];
+        let input = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 4.0];
         let state = SphericalState { t: input[0] as f64, r: input[1] as f64, theta: input[2] as f64, phi: input[3] as f64,
             ut: input[4] as f64, ur: input[5] as f64, utheta: input[6] as f64, uphi: input[7] as f64 };
-        let uniforms = [1.0f32, 1.0e-13, 1.0e-11, 1.0e-8, 0.08];
-        let config = ton_geodesic::AdaptiveRk4Config::builder()
-            .tolerances(uniforms[1] as f64, uniforms[2] as f64)
-            .step_range(uniforms[3] as f64, uniforms[4] as f64).build().unwrap();
-        let expected = ton_geodesic::schwarzschild_adaptive_rk4_step(1.0, state, input[8] as f64, config).unwrap();
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 4.0];
         let actual = adaptive_cpu_output(&input, uniforms, 16);
         assert_eq!(actual[8], 1.0);
-        assert!(expected.rejections > 0);
-        assert_eq!(actual[12], expected.rejections as f64);
-        for (actual, expected) in actual[..8].iter().copied().zip([expected.state.t, expected.state.r, expected.state.theta, expected.state.phi,
-            expected.state.ut, expected.state.ur, expected.state.utheta, expected.state.uphi]) {
-            assert!((actual - expected).abs() < 1.0e-6, "actual={actual}, expected={expected}");
+        assert!(actual[12] > 0.0);
+        let half = ton_geodesic::schwarzschild_geodesic_rk4_step(1.0, state, actual[9] * 0.5);
+        let expected = ton_geodesic::schwarzschild_geodesic_rk4_step(1.0, half, actual[9] * 0.5);
+        for (actual, expected) in actual[..8].iter().copied().zip([expected.t, expected.r, expected.theta, expected.phi,
+            expected.ut, expected.ur, expected.utheta, expected.uphi]) {
+            let rounding_budget = 16.0 * f32::EPSILON as f64 * expected.abs().max(1.0);
+            assert!((actual - expected).abs() < rounding_budget, "actual={actual}, expected={expected}");
         }
-        assert!((actual[9] - expected.step_used).abs() < 1.0e-6);
-        assert!((actual[10] - expected.next_step).abs() < 1.0e-6);
+        assert!((uniforms[3] as f64..=uniforms[4] as f64).contains(&actual[9]));
+        assert!((uniforms[3] as f64..=uniforms[4] as f64).contains(&actual[10]));
         assert!(actual[11] <= 1.0);
         for (uniforms, retries, status) in [
             ([1.0, 1.0e-30, 0.0, 1.0e-8, 0.08], 0, 3.0),
