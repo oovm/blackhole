@@ -8,6 +8,7 @@ pub use adaptive::{SchwarzschildAdaptiveChunkBuilder, SchwarzschildAdaptiveStepB
 mod events;
 pub use events::SchwarzschildEventLocalizationBuilder;
 mod adaptive_trace;
+mod null_energy;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
@@ -645,8 +646,7 @@ pub fn schwarzschild_geodesic_rk4_chunk_with_disk(max_steps: u32) -> Program {
         let inv_r = b(builder, BinOp::Div, one.clone(), r.clone());
         let inv_r2 = b(builder, BinOp::Div, one.clone(), r2);
         let two_mass = b(builder, BinOp::Mul, two.clone(), mass.clone());
-        let compactness = b(builder, BinOp::Mul, two_mass, inv_r.clone());
-        let f = b(builder, BinOp::Sub, one.clone(), compactness);
+        let f = b(builder, BinOp::Div, b(builder, BinOp::Sub, r.clone(), two_mass), r.clone());
         let fp = b(builder, BinOp::Mul, builder.binary(BinOp::Mul, builder.const_f32(2.0), mass.clone()), inv_r2.clone());
         let two_f = b(builder, BinOp::Mul, two.clone(), f.clone());
         let gamma_t_tr = b(builder, BinOp::Div, fp.clone(), two_f);

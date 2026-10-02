@@ -1,8 +1,8 @@
 //! 自适应积分与事件定位在同一个通用 UCF 程序中的组合。
 
 use super::{b, BinOp, Expr, Program, ScalarTy, StructuredFunctionBuilder, Ty, UnOp};
-use super::adaptive::{emit_integration, snapshot};
-use super::events::emit_localization;
+use super::adaptive::{emit_integration_model, snapshot};
+use super::events::emit_localization_model;
 
 /// 构造逐接受步检查事件的追踪 chunk，不执行参考函数或 shader 模板。
 ///
@@ -19,12 +19,41 @@ pub struct SchwarzschildAdaptiveTraceChunkBuilder {
     maximum_steps: u32,
     maximum_retries: u32,
     maximum_bisections: u32,
+    null_energy: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{CpuInterpreter, Value};
+
+    #[test]
+    fn null_energy_formulation_preserves_null_input_and_rejects_non_null_input() {
+        let program = SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(1).conserved_null_energy().build().unwrap();
+        let mut input = [0.0f32; 29];
+        input[..8].copy_from_slice(&[0.0, 10.0, 1.2, 0.3, 1.25, -1.0, 0.0, 0.0]);
+        input[9] = 0.04;
+        for (utheta, status) in [(0.0, 0.0), (0.1, 5.0)] {
+            input[6] = utheta;
+            let mut cpu = CpuInterpreter::new();
+            for (slot, value) in [1.0, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 80.0, 6.0, 20.0, 1.0e-5].into_iter().enumerate() {
+                cpu.with_uniform(slot as u32, Value::F32(value));
+            }
+            cpu.with_buffer(1, input.into_iter().map(Value::F32).collect());
+            cpu.with_buffer(2, vec![Value::F32(0.0); 29]);
+            cpu.run_parallel(&program, 1).unwrap();
+            let output = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+            assert_eq!(output[8], status);
+            if status == 0.0 {
+                assert_eq!(output[10], 1.0);
+                assert!(output[16] < 1.0e-6);
+                assert!(output[17] < 1.0e-6);
+            } else {
+                assert_eq!(output[10], 0.0);
+                for (actual, expected) in output[..8].iter().zip(&input[..8]) { assert_eq!(*actual, *expected as f64); }
+            }
+        }
+    }
 
     #[test]
     fn trace_chunk_distinguishes_budget_integration_event_and_input_failures() {
@@ -66,7 +95,7 @@ mod tests {
 }
 
 impl Default for SchwarzschildAdaptiveTraceChunkBuilder {
-    fn default() -> Self { Self { maximum_steps: 16, maximum_retries: 16, maximum_bisections: 48 } }
+    fn default() -> Self { Self { maximum_steps: 16, maximum_retries: 16, maximum_bisections: 48, null_energy: false } }
 }
 
 fn and(builder: &StructuredFunctionBuilder, left: Expr, right: Expr) -> Expr {
@@ -81,22 +110,23 @@ fn square(builder: &StructuredFunctionBuilder, value: Expr) -> Expr {
     b(builder, BinOp::Mul, value.clone(), value)
 }
 
-fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr) -> [Expr; 3] {
-    let f = b(builder, BinOp::Sub, builder.const_f32(1.0), b(builder, BinOp::Div,
-        b(builder, BinOp::Mul, builder.const_f32(2.0), mass.clone()), state[1].clone()));
+fn invariants(builder: &StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr, null_energy: bool) -> [Expr; 3] {
+    let f = b(builder, BinOp::Div, b(builder, BinOp::Sub, state[1].clone(),
+        b(builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())), state[1].clone());
     let angular = b(builder, BinOp::Add, square(builder, state[6].clone()),
         b(builder, BinOp::Mul, square(builder, builder.unary(UnOp::Sin, state[2].clone())), square(builder, state[7].clone())));
     let radius_squared = square(builder, state[1].clone());
-    let temporal = b(builder, BinOp::Mul, f.clone(), square(builder, state[4].clone()));
-    let spatial = b(builder, BinOp::Add, b(builder, BinOp::Div, square(builder, state[5].clone()), f.clone()),
-        b(builder, BinOp::Mul, radius_squared.clone(), angular.clone()));
-    [b(builder, BinOp::Mul, f, state[4].clone()), b(builder, BinOp::Mul, square(builder, radius_squared), angular),
+    let energy = if null_energy { state[4].clone() } else { b(builder, BinOp::Mul, f.clone(), state[4].clone()) };
+    let temporal = square(builder, energy.clone());
+    let spatial = b(builder, BinOp::Add, square(builder, state[5].clone()),
+        b(builder, BinOp::Mul, f, b(builder, BinOp::Mul, radius_squared.clone(), angular.clone())));
+    [energy, b(builder, BinOp::Mul, square(builder, radius_squared), angular),
         b(builder, BinOp::Div, abs(builder, b(builder, BinOp::Sub, spatial.clone(), temporal.clone())),
             b(builder, BinOp::Add, abs(builder, spatial), abs(builder, temporal)))]
 }
 
-fn observe(builder: &mut StructuredFunctionBuilder, locals: &[u32; 29], state: &[Expr; 8], mass: &Expr, enabled: Expr) {
-    let [energy, angular, null] = invariants(builder, state, mass);
+fn observe(builder: &mut StructuredFunctionBuilder, locals: &[u32; 29], state: &[Expr; 8], mass: &Expr, enabled: Expr, null_energy: bool) {
+    let [energy, angular, null] = invariants(builder, state, mass, null_energy);
     let energy_drift = abs(builder, b(builder, BinOp::Div, b(builder, BinOp::Sub, energy, Expr::LoadLocal(locals[19])), Expr::LoadLocal(locals[19])));
     let angular_drift = builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(locals[20]), builder.const_f32(0.0)), abs(builder, angular.clone()),
         abs(builder, b(builder, BinOp::Div, b(builder, BinOp::Sub, angular, Expr::LoadLocal(locals[20])), Expr::LoadLocal(locals[20]))));
@@ -114,6 +144,10 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
     pub fn maximum_retries(mut self, retries: u32) -> Self { self.maximum_retries = retries; self }
     /// 设置每个事件的二分定位预算。
     pub fn maximum_bisections(mut self, iterations: u32) -> Self { self.maximum_bisections = iterations; self }
+
+    /// 使用守恒能量降阶零测地线模型，拒绝初始归一化零约束残差大于 `1e-4` 的输入。
+    /// 对外状态仍是时间四速度布局。它不适用于一般时类或非零测地线。
+    pub fn conserved_null_energy(mut self) -> Self { self.null_energy = true; self }
 
     /// 组合通用程序片段，保留终止状态与首次盘命中跨 chunk 的一致性。
     pub fn build(self) -> Result<Program, String> {
@@ -146,14 +180,28 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
         let status_valid = (0..=5).fold(Expr::ConstBool(false), |found, status| builder.select(found, Expr::ConstBool(true),
             b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(status as f32))));
         valid = and(&builder, valid, status_valid);
+        let valid_local = builder.let_value(Ty::Scalar(ScalarTy::Bool), valid);
+        valid = Expr::LoadLocal(valid_local);
+        let initial: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(locals[index]));
+        let [physical_energy, _, initial_null] = invariants(&builder, &initial, &mass, false);
+        if self.null_energy {
+            let null_valid = and(&builder, builder.unary(UnOp::IsFinite, initial_null.clone()),
+                b(&builder, BinOp::Le, initial_null, builder.const_f32(1.0e-4)));
+            valid = and(&builder, valid, builder.select(b(&builder, BinOp::Eq, Expr::LoadLocal(locals[10]), builder.const_f32(0.0)),
+                null_valid, Expr::ConstBool(true)));
+        }
         valid = and(&builder, valid, builder.select(b(&builder, BinOp::Eq, Expr::LoadLocal(locals[10]), builder.const_f32(0.0)),
             Expr::ConstBool(true), b(&builder, BinOp::Gt, Expr::LoadLocal(locals[19]), builder.const_f32(0.0))));
         builder.store_local(locals[8], builder.select(valid, Expr::LoadLocal(locals[8]), builder.const_f32(5.0)));
+        let converted = builder.let_value(Ty::Scalar(ScalarTy::Bool), b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(0.0)));
+        if self.null_energy {
+            builder.store_local(locals[4], builder.select(Expr::LoadLocal(converted), physical_energy, Expr::LoadLocal(locals[4])));
+        }
         let initialized = and(&builder, b(&builder, BinOp::Eq, Expr::LoadLocal(locals[10]), builder.const_f32(0.0)),
             b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(0.0)));
         let initialized = builder.let_value(Ty::Scalar(ScalarTy::Bool), initialized);
         let initial: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(locals[index]));
-        let [energy, angular, null] = invariants(&builder, &initial, &mass);
+        let [energy, angular, null] = invariants(&builder, &initial, &mass, self.null_energy);
         for (index, value) in [(19, energy), (20, angular), (16, null)] {
             builder.store_local(locals[index], builder.select(Expr::LoadLocal(initialized), value, Expr::LoadLocal(locals[index])));
         }
@@ -166,14 +214,14 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(locals[8]), builder.const_f32(0.0));
         builder.bounded_while(running, self.maximum_steps, |builder| {
             let start = snapshot(builder, std::array::from_fn(|index| Expr::LoadLocal(locals[index])));
-            let integrated = emit_integration(builder, start.clone(), Expr::LoadLocal(locals[9]), std::array::from_fn(|index| uniforms[index].clone()), 1, self.maximum_retries);
+            let integrated = emit_integration_model(builder, start.clone(), Expr::LoadLocal(locals[9]), std::array::from_fn(|index| uniforms[index].clone()), 1, self.maximum_retries, self.null_energy);
             let end: [Expr; 8] = std::array::from_fn(|index| integrated[index].clone());
-            let capture = emit_localization(builder, start.clone(), end.clone(), integrated[9].clone(),
-                [mass.clone(), builder.const_f32(0.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections);
-            let escape = emit_localization(builder, start.clone(), end.clone(), integrated[9].clone(),
-                [mass.clone(), builder.const_f32(0.0), uniforms[6].clone(), uniforms[9].clone()], self.maximum_bisections);
-            let disk = emit_localization(builder, start, end.clone(), integrated[9].clone(),
-                [mass.clone(), builder.const_f32(1.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections);
+            let capture = emit_localization_model(builder, start.clone(), end.clone(), integrated[9].clone(),
+                [mass.clone(), builder.const_f32(0.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections, self.null_energy);
+            let escape = emit_localization_model(builder, start.clone(), end.clone(), integrated[9].clone(),
+                [mass.clone(), builder.const_f32(0.0), uniforms[6].clone(), uniforms[9].clone()], self.maximum_bisections, self.null_energy);
+            let disk = emit_localization_model(builder, start, end.clone(), integrated[9].clone(),
+                [mass.clone(), builder.const_f32(1.0), uniforms[5].clone(), uniforms[9].clone()], self.maximum_bisections, self.null_energy);
             let accepted = b(builder, BinOp::Eq, integrated[8].clone(), builder.const_f32(1.0));
             let event_failure = [capture[10].clone(), escape[10].clone(), disk[10].clone()].into_iter().fold(Expr::ConstBool(false), |failed, status|
                 builder.select(failed, Expr::ConstBool(true), b(builder, BinOp::Gt, status, builder.const_f32(2.0))));
@@ -195,12 +243,18 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
             for (index, value) in [(14, disk[1].clone()), (15, event_affine)] {
                 builder.store_local(locals[index], builder.select(Expr::LoadLocal(first_hit), value, Expr::LoadLocal(locals[index])));
             }
-            for index in 0..8 { builder.store_local(locals[21 + index], builder.select(Expr::LoadLocal(first_hit), disk[index].clone(), Expr::LoadLocal(locals[21 + index]))); }
+            for index in 0..8 {
+                let value = if self.null_energy && index == 4 {
+                    b(builder, BinOp::Div, disk[4].clone(), b(builder, BinOp::Div,
+                        b(builder, BinOp::Sub, disk[1].clone(), b(builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())), disk[1].clone()))
+                } else { disk[index].clone() };
+                builder.store_local(locals[21 + index], builder.select(Expr::LoadLocal(first_hit), value, Expr::LoadLocal(locals[21 + index])));
+            }
             builder.store_local(locals[13], builder.select(Expr::LoadLocal(hit), b(builder, BinOp::Add, Expr::LoadLocal(locals[13]), builder.const_f32(1.0)), Expr::LoadLocal(locals[13])));
             let final_state = snapshot(builder, std::array::from_fn(|index| builder.select(Expr::LoadLocal(captured), capture[index].clone(),
                 builder.select(Expr::LoadLocal(escaped), escape[index].clone(), end[index].clone()))));
-            observe(builder, &locals, &final_state, &mass, Expr::LoadLocal(usable));
-            observe(builder, &locals, &std::array::from_fn(|index| disk[index].clone()), &mass, Expr::LoadLocal(hit));
+            observe(builder, &locals, &final_state, &mass, Expr::LoadLocal(usable), self.null_energy);
+            observe(builder, &locals, &std::array::from_fn(|index| disk[index].clone()), &mass, Expr::LoadLocal(hit), self.null_energy);
             for index in 0..8 { builder.store_local(locals[index], builder.select(Expr::LoadLocal(usable), final_state[index].clone(), Expr::LoadLocal(locals[index]))); }
             for (index, value) in [(9, integrated[10].clone()),
                 (10, b(builder, BinOp::Add, Expr::LoadLocal(locals[10]), builder.const_f32(1.0))),
@@ -211,6 +265,12 @@ impl SchwarzschildAdaptiveTraceChunkBuilder {
             builder.store_local(locals[8], builder.select(accepted, builder.select(event_failure, builder.const_f32(4.0),
                 builder.select(Expr::LoadLocal(captured), builder.const_f32(1.0), builder.select(Expr::LoadLocal(escaped), builder.const_f32(2.0), builder.const_f32(0.0)))), builder.const_f32(3.0)));
         });
+        if self.null_energy {
+            let f = b(&builder, BinOp::Div, b(&builder, BinOp::Sub, Expr::LoadLocal(locals[1]),
+                b(&builder, BinOp::Mul, builder.const_f32(2.0), mass)), Expr::LoadLocal(locals[1]));
+            builder.store_local(locals[4], builder.select(Expr::LoadLocal(converted),
+                b(&builder, BinOp::Div, Expr::LoadLocal(locals[4]), f), Expr::LoadLocal(locals[4])));
+        }
         for (index, id) in locals.into_iter().enumerate() {
             builder.store_buffer(2, b(&builder, BinOp::Add, base.clone(), builder.const_u32(index as u32)), Expr::LoadLocal(id));
         }

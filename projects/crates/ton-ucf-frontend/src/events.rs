@@ -1,7 +1,7 @@
 //! 接受步事件定位的通用程序构造，不注册 UCF 领域能力。
 
 use super::{b, BinOp, Expr, Program, StructuredFunctionBuilder, Ty, UnOp};
-use super::adaptive::{rk4, snapshot};
+use super::adaptive::{rk4_model, snapshot};
 
 /// 通过两个半步重积分与有界二分定位括住的事件。
 ///
@@ -121,6 +121,13 @@ pub(crate) fn emit_localization(
     builder: &mut StructuredFunctionBuilder, start: [Expr; 8], end: [Expr; 8], step: Expr,
     uniforms: [Expr; 4], maximum_bisections: u32,
 ) -> [Expr; 11] {
+    emit_localization_model(builder, start, end, step, uniforms, maximum_bisections, false)
+}
+
+pub(crate) fn emit_localization_model(
+    builder: &mut StructuredFunctionBuilder, start: [Expr; 8], end: [Expr; 8], step: Expr,
+    uniforms: [Expr; 4], maximum_bisections: u32, null_energy: bool,
+) -> [Expr; 11] {
         let [mass, kind, radius, tolerance] = uniforms;
         let mut valid = Expr::ConstBool(true);
         for value in start.iter().chain(end.iter()).chain([&step, &mass, &kind, &radius, &tolerance]) {
@@ -162,8 +169,8 @@ pub(crate) fn emit_localization(
             let middle = builder.let_value(Ty::f32(), b(builder, BinOp::Mul,
                 b(builder, BinOp::Add, Expr::LoadLocal(lower), Expr::LoadLocal(upper)), builder.const_f32(0.5)));
             let half_step = b(builder, BinOp::Mul, b(builder, BinOp::Mul, step.clone(), Expr::LoadLocal(middle)), builder.const_f32(0.5));
-            let half = rk4(builder, &start, &mass, half_step.clone());
-            let state = rk4(builder, &half, &mass, half_step);
+            let half = rk4_model(builder, &start, &mass, half_step.clone(), null_energy);
+            let state = rk4_model(builder, &half, &mass, half_step, null_energy);
             let value = builder.let_value(Ty::f32(), surface(builder, &state, &kind, &radius));
             let mut finite = Expr::ConstBool(true);
             for component in &state { finite = and(builder, finite, builder.unary(UnOp::IsFinite, component.clone())); }

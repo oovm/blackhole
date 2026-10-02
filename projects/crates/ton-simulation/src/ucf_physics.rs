@@ -1282,6 +1282,115 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_null_energy_trace_vulkan_preserves_multiple_disk_crossings() {
+        let camera = Camera::cinematic(BlackHole::schwarzschild(1.0));
+        let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).events(events).build().unwrap();
+        let mut selected = None;
+        'search: for u in [-0.9, -0.7, -0.5, 0.0, 0.5, 0.7, 0.9] {
+            for v in [-0.4, -0.2, 0.0, 0.2, 0.4] {
+                let initial = schwarzschild_geodesic_initial_state(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
+                let reference = ton_geodesic::schwarzschild_adaptive_trace(initial, config).unwrap();
+                if reference.disk_events.len() > 1 { selected = Some((initial, reference)); break 'search; }
+            }
+        }
+        let (initial, reference) = selected.expect("independent reference must contain a multiple-crossing ray");
+        let mut input = [0.0f32; 29];
+        input[..8].copy_from_slice(&[initial.t, initial.r, initial.theta, initial.phi, initial.ut, initial.ur, initial.utheta, initial.uphi].map(|value| value as f32));
+        input[9] = 0.08;
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).conserved_null_energy().build().unwrap();
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 80.0, 6.0, 20.0, 1.0e-5];
+        let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(2));
+        let task = dispatch_task(57, &program, 1, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(1, 29, Access::Read), (2, 29, Access::Write), (3, 1, Access::Write)]
+                .into_iter().map(|(id, elements, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        let mut backend = VulkanBackend::new().expect("Vulkan multiple disk crossings");
+        backend.prepare(&graph).unwrap();
+        let mut chunks = 0;
+        while input[8] == 0.0 && chunks < 256 {
+            backend.write_f32(ResourceId(1), &input).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            input.copy_from_slice(&backend.read_f32(ResourceId(2)).unwrap());
+            chunks += 1;
+        }
+        let expected_status = match reference.termination {
+            ton_geodesic::AdaptiveTraceTermination::Captured => 1.0,
+            ton_geodesic::AdaptiveTraceTermination::Escaped => 2.0,
+            other => panic!("reference termination={other:?}"),
+        };
+        eprintln!("multiple disk crossings GPU={}, reference={}, first_radius={}, reference_first_radius={}",
+            input[13], reference.disk_events.len(), input[14], reference.disk_events[0].event.state.r);
+        assert_eq!(input[8], expected_status);
+        assert_eq!(input[13], reference.disk_events.len() as f32);
+        assert!((input[14] as f64 - reference.disk_events[0].event.state.r).abs() < 3.0e-3);
+        assert!((input[15] as f64 - reference.disk_events[0].affine_parameter).abs() < 3.0e-3);
+        assert!((input[22] as f64 - reference.disk_events[0].event.state.r).abs() < 3.0e-3);
+        assert!(input.iter().all(|value| value.is_finite()));
+        assert!(input[16] < 1.0e-3 && input[17] < 1.0e-3 && input[18] < 2.0e-3);
+    }
+
+    #[test]
+    fn adaptive_trace_vulkan_batch_matches_capture_reference_and_invariants() {
+        let angles = [0.0f64, 0.1, 0.19, 0.21, 0.23, 0.25, 0.4];
+        let origin = Vec3::new(24.0, 0.0, 0.0);
+        let mut input = Vec::new();
+        let mut expected = Vec::new();
+        for angle in angles {
+            let initial = schwarzschild_geodesic_initial_state(1.0, origin, Vec3::new(-angle.cos(), angle.sin(), 0.0)).unwrap();
+            let reference = ton_geodesic::schwarzschild_adaptive_trace(initial,
+                ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).build().unwrap()).unwrap();
+            expected.push(match reference.termination {
+                ton_geodesic::AdaptiveTraceTermination::Captured => 1.0f32,
+                ton_geodesic::AdaptiveTraceTermination::Escaped => 2.0,
+                other => panic!("reference angle={angle}, termination={other:?}"),
+            });
+            let mut ray = [0.0f32; 29];
+            ray[..8].copy_from_slice(&[initial.t, initial.r, initial.theta, initial.phi, initial.ut, initial.ur, initial.utheta, initial.uphi].map(|value| value as f32));
+            ray[9] = 0.08;
+            input.extend(ray);
+        }
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).conserved_null_energy().build().unwrap();
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 80.0, 6.0, 20.0, 1.0e-5];
+        let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(2));
+        let count = angles.len() as u32;
+        let task = dispatch_task(56, &program, count, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(1, count as u64 * 29, Access::Read), (2, count as u64 * 29, Access::Write), (3, count as u64, Access::Write)]
+                .into_iter().map(|(id, elements, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        let mut backend = VulkanBackend::new().expect("Vulkan adaptive trace capture batch");
+        backend.prepare(&graph).unwrap();
+        let mut chunks = 0;
+        while input.chunks_exact(29).any(|ray| ray[8] == 0.0) && chunks < 256 {
+            backend.write_f32(ResourceId(1), &input).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            input = backend.read_f32(ResourceId(2)).unwrap();
+            chunks += 1;
+        }
+        for ((ray, expected), angle) in input.chunks_exact(29).zip(expected).zip(angles) {
+            eprintln!("capture batch angle={angle}, status={}, r={}, steps={}, max_null={}, energy={}, angular={}", ray[8], ray[1], ray[10], ray[16], ray[17], ray[18]);
+            assert_eq!(ray[8], expected, "angle={angle}, state={ray:?}");
+            assert!(ray.iter().all(|value| value.is_finite()));
+            assert!(ray[16] < 1.0e-3, "angle={angle}, null={}", ray[16]);
+            assert!(ray[17] < 1.0e-3, "angle={angle}, energy={}", ray[17]);
+            assert!(ray[18] < 2.0e-3, "angle={angle}, angular={}", ray[18]);
+        }
+        backend.write_f32(ResourceId(1), &input).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        assert_eq!(backend.read_f32(ResourceId(2)).unwrap(), input);
+    }
+
+    #[test]
     fn adaptive_trace_vulkan_polar_ray_escapes_with_per_step_diagnostics() {
         let camera = Camera::cinematic(BlackHole::schwarzschild(1.0));
         let u = ((39.5 / 128.0) * 2.0 - 1.0) * (128.0 / 72.0);
@@ -1290,7 +1399,7 @@ mod tests {
         let mut input = [0.0f32; 29];
         input[..8].copy_from_slice(&[initial.t, initial.r, initial.theta, initial.phi, initial.ut, initial.ur, initial.utheta, initial.uphi].map(|value| value as f32));
         input[9] = 0.08;
-        let program = ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).build().unwrap();
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveTraceChunkBuilder::new().maximum_steps(64).conserved_null_energy().build().unwrap();
         let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08, 2.0002, 80.0, 6.0, 20.0, 1.0e-5];
         let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
         params.insert("buffer_2".into(), ParamValue::I64(2));

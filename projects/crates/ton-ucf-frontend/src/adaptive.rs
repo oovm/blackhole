@@ -52,15 +52,19 @@ pub(crate) fn snapshot(builder: &mut StructuredFunctionBuilder, values: [Expr; 8
     values.map(|value| Expr::LoadLocal(builder.let_value(Ty::f32(), value)))
 }
 
-pub(crate) fn rk4(builder: &mut StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr, step: Expr) -> [Expr; 8] {
+pub(crate) fn rk4_model(builder: &mut StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr, step: Expr, null_energy: bool) -> [Expr; 8] {
+    let derivative = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr| {
+        if null_energy { super::null_energy::derivative(builder, values, mass) }
+        else { schwarzschild_derivative(builder, values, mass) }
+    };
     let half_step = b(builder, BinOp::Mul, step.clone(), builder.const_f32(0.5));
-    let k1 = snapshot(builder, schwarzschild_derivative(builder, values, mass));
+    let k1 = snapshot(builder, derivative(builder, values, mass));
     let middle = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, k1[index].clone(), half_step.clone()))));
-    let k2 = snapshot(builder, schwarzschild_derivative(builder, &middle, mass));
+    let k2 = snapshot(builder, derivative(builder, &middle, mass));
     let middle = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, k2[index].clone(), half_step.clone()))));
-    let k3 = snapshot(builder, schwarzschild_derivative(builder, &middle, mass));
+    let k3 = snapshot(builder, derivative(builder, &middle, mass));
     let end = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, k3[index].clone(), step.clone()))));
-    let k4 = snapshot(builder, schwarzschild_derivative(builder, &end, mass));
+    let k4 = snapshot(builder, derivative(builder, &end, mass));
     let next = std::array::from_fn(|index| {
         let weighted = b(builder, BinOp::Add,
             b(builder, BinOp::Add, k1[index].clone(), b(builder, BinOp::Mul, builder.const_f32(2.0), k2[index].clone())),
@@ -116,6 +120,13 @@ pub(crate) fn emit_integration(
     builder: &mut StructuredFunctionBuilder, initial: [Expr; 8], request: Expr,
     uniforms: [Expr; 5], maximum_steps: u32, maximum_retries: u32,
 ) -> [Expr; 13] {
+    emit_integration_model(builder, initial, request, uniforms, maximum_steps, maximum_retries, false)
+}
+
+pub(crate) fn emit_integration_model(
+    builder: &mut StructuredFunctionBuilder, initial: [Expr; 8], request: Expr,
+    uniforms: [Expr; 5], maximum_steps: u32, maximum_retries: u32, null_energy: bool,
+) -> [Expr; 13] {
         let [mass, absolute, relative, minimum, maximum] = uniforms;
         let mut valid = Expr::ConstBool(true);
         for value in initial.iter().chain([&request, &mass, &absolute, &relative, &minimum, &maximum]) {
@@ -144,9 +155,9 @@ pub(crate) fn emit_integration(
         let running = b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0));
         builder.bounded_while(running, maximum_retries + 1, |builder| {
             let current_step = Expr::LoadLocal(step);
-            let full = rk4(builder, &initial, &mass, current_step.clone());
-            let half = rk4(builder, &initial, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)));
-            let refined = rk4(builder, &half, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)));
+            let full = rk4_model(builder, &initial, &mass, current_step.clone(), null_energy);
+            let half = rk4_model(builder, &initial, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)), null_energy);
+            let refined = rk4_model(builder, &half, &mass, b(builder, BinOp::Mul, current_step.clone(), builder.const_f32(0.5)), null_energy);
             let mut ratio = builder.const_f32(0.0);
             let mut finite = Expr::ConstBool(true);
             for index in 0..8 {
