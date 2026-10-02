@@ -334,4 +334,106 @@ mod tests {
         batch.terminations[0] = GpuTraceTermination::StepBudgetExhausted;
         assert!(batch.require_renderable().is_err());
     }
+
+    #[test]
+    fn cartesian_adaptive_program_matches_reference_single_step() {
+        let initial = ton_geodesic::SchwarzschildCartesianNullState::from_ray(1.0,
+            Vec3::new(12.0, 3.0, 5.0), Vec3::new(-1.0, 0.2, -0.1)).unwrap();
+        let input = [initial.t, initial.position.x, initial.position.y, initial.position.z, initial.energy,
+            initial.velocity.x, initial.velocity.y, initial.velocity.z, 0.08].map(|value| value as f32);
+        let program = ton_ucf_frontend::SchwarzschildCartesianAdaptiveChunkBuilder::new().build().unwrap();
+        let mut interpreter = ton_ucf_frontend::CpuInterpreter::new();
+        for (slot, value) in [1.0, 1.0e-6, 1.0e-5, 1.0e-8, 0.08].into_iter().enumerate() {
+            interpreter.with_uniform(slot as u32, ton_ucf_frontend::Value::F32(value));
+        }
+        interpreter.with_buffer(1, input.into_iter().map(ton_ucf_frontend::Value::F32).collect());
+        interpreter.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 16]);
+        interpreter.run_parallel(&program, 1).unwrap();
+        let output = interpreter.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(output[8], 1.0);
+        let rounded = ton_geodesic::SchwarzschildCartesianNullState { t: input[0] as f64,
+            position: Vec3::new(input[1] as f64, input[2] as f64, input[3] as f64), energy: input[4] as f64,
+            velocity: Vec3::new(input[5] as f64, input[6] as f64, input[7] as f64) };
+        let half = ton_geodesic::schwarzschild_cartesian_null_rk4_step(1.0, rounded, output[9] * 0.5).unwrap();
+        let expected = ton_geodesic::schwarzschild_cartesian_null_rk4_step(1.0, half, output[9] * 0.5).unwrap();
+        for (actual, expected) in output[..8].iter().zip([expected.t, expected.position.x, expected.position.y,
+            expected.position.z, expected.energy, expected.velocity.x, expected.velocity.y, expected.velocity.z]) {
+            assert!((*actual - expected).abs() < 16.0 * f32::EPSILON as f64 * expected.abs().max(1.0));
+        }
+        assert!(output[13] < 1.0e-5 && output[14] < 1.0e-5);
+    }
+
+    #[test]
+    fn cartesian_adaptive_cpu_and_vulkan_problem_rays_preserve_invariants() {
+        let camera = ton_types::Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let initial = [1712usize, 7503].map(|index| {
+            let u = (((index % 128) as f64 + 0.5) / 128.0 * 2.0 - 1.0) * 128.0 / 72.0;
+            let v = 1.0 - ((index / 128) as f64 + 0.5) / 72.0 * 2.0;
+            ton_geodesic::SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(u, v)).unwrap()
+        });
+        let seed = initial.into_iter().flat_map(|state| [state.t, state.position.x, state.position.y, state.position.z,
+            state.energy, state.velocity.x, state.velocity.y, state.velocity.z, 0.08].map(|value| value as f32)).collect::<Vec<_>>();
+        let program = ton_ucf_frontend::SchwarzschildCartesianAdaptiveChunkBuilder::new().maximum_steps(64).build().unwrap();
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08];
+        let mut params = uniforms.into_iter().enumerate().map(|(slot, value)|
+            (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(2));
+        let task = crate::ucf_physics::dispatch_task(70, &program, 2, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+        let graph = Graph { resources: ResourceGraph { nodes: [(1, 18, Access::Read), (2, 32, Access::Write), (3, 2, Access::Write)]
+            .into_iter().map(|(id, elements, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
+                domain: Domain::Vram, access, byte_size: Some(elements * 4) }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+        graph.validate().unwrap();
+        let mut backend = VulkanBackend::new().unwrap();
+        backend.prepare(&graph).unwrap();
+        for native in [false, true] {
+            let mut input = seed.clone();
+            let mut maxima = [0.0f64; 2];
+            let mut escaped = false;
+            let mut chunks = 0;
+            for _ in 0..256 {
+                let output = if native {
+                    backend.write_f32(ResourceId(1), &input).unwrap();
+                    backend.run_prepared(&graph).unwrap();
+                    backend.read_f32(ResourceId(2)).unwrap()
+                } else {
+                    let mut interpreter = ton_ucf_frontend::CpuInterpreter::new();
+                    for (slot, value) in uniforms.into_iter().enumerate() { interpreter.with_uniform(slot as u32, ton_ucf_frontend::Value::F32(value)); }
+                    interpreter.with_buffer(1, input.iter().copied().map(ton_ucf_frontend::Value::F32).collect());
+                    interpreter.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 32]);
+                    interpreter.run_parallel(&program, 2).unwrap();
+                    interpreter.buffer(2).unwrap().iter().map(|value| {
+                        let ton_ucf_frontend::Value::F32(value) = value else { panic!("Cartesian program lost F32 precision"); };
+                        *value
+                    }).collect()
+                };
+                chunks += 1;
+                assert!(output.iter().all(|value| value.is_finite()));
+                let mut all_escaped = true;
+                input.clear();
+                for (record, original) in output.chunks_exact(16).zip(initial) {
+                    assert_eq!(record[8], 1.0);
+                    let state = ton_geodesic::SchwarzschildCartesianNullState { t: record[0] as f64,
+                        position: Vec3::new(record[1] as f64, record[2] as f64, record[3] as f64), energy: record[4] as f64,
+                        velocity: Vec3::new(record[5] as f64, record[6] as f64, record[7] as f64) };
+                    let angular = state.angular_momentum();
+                    let original_angular = original.angular_momentum();
+                    let drift = (angular.dot(angular) / original_angular.dot(original_angular) - 1.0).abs();
+                    maxima[0] = maxima[0].max(record[13] as f64).max(state.null_residual(1.0));
+                    let initial_squared = original_angular.dot(original_angular);
+                    let chunk_baseline_ratio = record[15] as f64 / initial_squared;
+                    let global_drift_bound = (chunk_baseline_ratio - 1.0).abs()
+                        + chunk_baseline_ratio.abs() * record[14] as f64;
+                    maxima[1] = maxima[1].max(global_drift_bound).max(drift);
+                    assert!(maxima[0] < 1.0e-3 && maxima[1] < 2.0e-3, "native={native}, maxima={maxima:?}");
+                    all_escaped &= state.position.length() >= 80.0 && state.position.dot(state.velocity) > 0.0;
+                    input.extend_from_slice(&record[..8]);
+                    input.push(record[10]);
+                }
+                if all_escaped { escaped = true; break; }
+            }
+            eprintln!("Cartesian native={native}, chunks={chunks}, maxima={maxima:?}");
+            assert!(escaped);
+        }
+    }
 }
