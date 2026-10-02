@@ -60,6 +60,23 @@ pub struct F64GpuEventTraceBatch {
     pub executed_program_hashes: Vec<u64>,
 }
 
+impl F64GpuEventTraceBatch {
+    /// 检查事件包是否允许进入辐射阶段。
+    pub fn require_radiative(&self) -> TonResult<()> {
+        if self.records.len() != self.events.len() || self.records.len() != self.terminations.len() {
+            return Err(TonError::Domain("F64 event record and packet count mismatch".into()));
+        }
+        for (index, ((record, event), termination)) in self.records.iter().zip(&self.events).zip(&self.terminations).enumerate() {
+            if !matches!(termination, GpuTraceTermination::Captured | GpuTraceTermination::Escaped)
+                || record.iter().any(|value| !value.is_finite()) || event.iter().any(|value| !value.is_finite())
+                || event[0] < 0.0 || event[0] > 4.0 || event[0].fract() != 0.0 || event[1] != 0.0 {
+                return Err(TonError::Domain(format!("F64 event instance {index} cannot enter radiative stage: termination={termination:?}, count={}, overflow={}", event[0], event[1])));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl F64GpuTraceBatch {
     /// 检查终止和不变量，不能替代独立轨迹及步长收敛验证。
     pub fn require_renderable(&self) -> TonResult<()> {
@@ -457,6 +474,7 @@ mod tests {
         assert!(result.events.iter().all(|event| event[0] >= 0.0 && event[0] <= 4.0 && event[1] == 0.0));
         assert!(result.events.iter().flatten().all(|value| value.is_finite()));
         assert!(result.events.iter().any(|event| event[0] > 0.0));
+        result.require_radiative().unwrap();
     }
 
     #[test]
