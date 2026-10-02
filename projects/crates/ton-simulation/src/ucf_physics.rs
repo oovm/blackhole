@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_geodesic_initial_state, schwarzschild_geodesic_
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -551,6 +551,76 @@ fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_program(mass: f64, sta
     Ok(states.iter().enumerate().map(|(index, _)| {
         let base = index * 10;
         (SphericalState { t: output[base] as f64, r: output[base + 1] as f64, theta: output[base + 2] as f64, phi: output[base + 3] as f64, ut: output[base + 4] as f64, ur: output[base + 5] as f64, utheta: output[base + 6] as f64, uphi: output[base + 7] as f64 }, output[base + 8] as u32)
+    }).collect())
+}
+
+/// 由 Vulkan UCF backend 执行带盘面交点元数据的批量 chunk。
+///
+/// 每个实例使用十四个 `f32`，尾部为 `[disk_hit, disk_radius, disk_doppler, reserved]`。
+pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+    mass: f64,
+    states: &[SphericalState],
+    bound_flags: &[bool],
+    disk_hits: &[bool],
+    disk_radii: &[f64],
+    disk_dopplers: &[f64],
+    inner_radius: f64,
+    outer_radius: f64,
+    step: f64,
+    escape_radius: f64,
+    max_steps: u32,
+) -> TonResult<Vec<(SphericalState, u32, bool, f64, f64)>> {
+    if states.is_empty() {
+        return Ok(Vec::new());
+    }
+    if states.len() != bound_flags.len()
+        || states.len() != disk_hits.len()
+        || states.len() != disk_radii.len()
+        || states.len() != disk_dopplers.len()
+    {
+        return Err(TonError::Domain("Vulkan disk geodesic metadata differs in length".into()));
+    }
+    let count = u32::try_from(states.len()).map_err(|_| TonError::Domain("geodesic disk batch exceeds u32 capacity".into()))?;
+    let program = schwarzschild_geodesic_rk4_chunk_with_disk(max_steps);
+    let task = dispatch_task(34, &program, count, ResourceId(17), Some(ResourceId(18)), BTreeMap::from([
+        ("uniform_0".into(), ParamValue::F64(mass)),
+        ("uniform_1".into(), ParamValue::F64(step)),
+        ("uniform_2".into(), ParamValue::F64(escape_radius)),
+        ("uniform_3".into(), ParamValue::F64(inner_radius)),
+        ("uniform_4".into(), ParamValue::F64(outer_radius)),
+    ]))?;
+    let graph = Graph {
+        resources: ResourceGraph {
+            nodes: vec![
+                ResourceNode { id: ResourceId(17), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 4) },
+                ResourceNode { id: ResourceId(18), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::ReadWrite, byte_size: Some(u64::from(count) * 14 * 4) },
+            ],
+        },
+        tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+    };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan disk geodesic graph: {e}")))?;
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan disk geodesic backend: {e}")))?;
+    backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan disk geodesic graph: {e}")))?;
+    let input = states.iter().enumerate().flat_map(|(index, state)| [
+        state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi,
+        0.0, bound_flags[index] as u8 as f64,
+        disk_hits[index] as u8 as f64, disk_radii[index], disk_dopplers[index], 0.0,
+    ]).map(|value| value as f32).collect::<Vec<_>>();
+    backend.write_f32(ResourceId(18), &input).map_err(|e| TonError::Domain(format!("upload Vulkan disk geodesic state: {e}")))?;
+    backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan disk geodesic graph: {e}")))?;
+    let output = backend.read_f32(ResourceId(18)).map_err(|e| TonError::Domain(format!("read Vulkan disk geodesic state: {e}")))?;
+    if output.len() < states.len() * 14 {
+        return Err(TonError::Domain("Vulkan disk geodesic output is short".into()));
+    }
+    Ok(states.iter().enumerate().map(|(index, _)| {
+        let base = index * 14;
+        (
+            SphericalState { t: output[base] as f64, r: output[base + 1] as f64, theta: output[base + 2] as f64, phi: output[base + 3] as f64, ut: output[base + 4] as f64, ur: output[base + 5] as f64, utheta: output[base + 6] as f64, uphi: output[base + 7] as f64 },
+            output[base + 8] as u32,
+            output[base + 10] >= 0.5,
+            output[base + 11] as f64,
+            output[base + 12] as f64,
+        )
     }).collect())
 }
 
