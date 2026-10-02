@@ -4,7 +4,10 @@ use ton_renderer::{
     apply_tone_map_ucf, bloom_pass_ucf, Framebuffer, Graph, DEFAULT_BLOOM_INTENSITY,
     DEFAULT_BLOOM_THRESHOLD,
 };
-use ton_types::{DiskModelKind, TonError, TonResult};
+use ton_types::{Camera, DiskModelKind, TonError, TonResult, Vec3};
+use ton_ucf_frontend::program_hash;
+use ucf_backend_cpu::CpuBackend;
+use ucf_program::Value;
 use ucf_types::ParamValue;
 
 use crate::Scene;
@@ -14,6 +17,113 @@ use crate::Scene;
 pub struct CpuGraphExecution {
     /// 按拓扑顺序记录的任务 `op` 名。
     pub executed_ops: Vec<String>,
+}
+
+/// 一次真实 UCF 相机 Program 执行的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraProgramExecution {
+    /// 实际执行的 Program hash。
+    pub program_hash: u64,
+    /// 输出 ray buffer 解码后的方向。
+    pub rays: Vec<Vec3>,
+}
+
+fn camera_uniforms(camera: Camera) -> Vec<(u32, Value)> {
+    [
+        camera.forward.x,
+        camera.forward.y,
+        camera.forward.z,
+        camera.right.x,
+        camera.right.y,
+        camera.right.z,
+        camera.up.x,
+        camera.up.y,
+        camera.up.z,
+        (camera.fov_y * 0.5).tan(),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(slot, value)| (slot as u32, Value::F32(value as f32)))
+    .collect()
+}
+
+/// 从帧图节点取出并执行相机 Program，不调用 TON 原生相机实现替代执行。
+pub fn execute_camera_program_cpu(
+    scene: &Scene,
+    graph: &Graph,
+) -> TonResult<CameraProgramExecution> {
+    graph
+        .validate()
+        .map_err(|error| TonError::Domain(format!("camera graph validate: {error}")))?;
+    let task = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|node| node.id.0 == 11)
+        .ok_or_else(|| TonError::Domain("camera task 11 is missing".into()))?;
+    let ParamValue::Program { hash, body, .. } = task
+        .params
+        .get("program")
+        .ok_or_else(|| TonError::Domain("camera task has no UCF program body".into()))?
+    else {
+        return Err(TonError::Domain("camera task program binding has invalid type".into()));
+    };
+    let program: ucf_program::Program = serde_json::from_str(body)
+        .map_err(|error| TonError::Domain(format!("decode camera UCF program: {error}")))?;
+    let actual_hash = program_hash(&program);
+    if actual_hash != *hash {
+        return Err(TonError::Domain(format!(
+            "camera program hash mismatch: expected {hash}, actual {actual_hash}"
+        )));
+    }
+    let input_resource = match task.params.get("input_resource") {
+        Some(ParamValue::I64(id)) => *id as u32,
+        _ => return Err(TonError::Domain("camera input resource binding is missing".into())),
+    };
+    let output_resource = match task.params.get("output_resource") {
+        Some(ParamValue::I64(id)) => *id as u32,
+        _ => return Err(TonError::Domain("camera output resource binding is missing".into())),
+    };
+    let count = scene.width.saturating_mul(scene.height);
+    let uv = (0..scene.height)
+        .flat_map(|y| {
+            (0..scene.width).map(move |x| {
+                let aspect = scene.width.max(1) as f32 / scene.height.max(1) as f32;
+                let u = ((x as f32 / scene.width.max(1) as f32) * 2.0 - 1.0) * aspect;
+                let v = 1.0 - (y as f32 / scene.height.max(1) as f32) * 2.0;
+                [u, v]
+            })
+        })
+        .flatten()
+        .map(Value::F32)
+        .collect::<Vec<_>>();
+    let output_seed = vec![Value::F32(0.0); count as usize * 3];
+    let report = CpuBackend::new()
+        .execute_program_with_buffers(
+            &program,
+            count,
+            camera_uniforms(scene.camera),
+            [(input_resource, uv), (output_resource, output_seed)],
+        )
+        .map_err(TonError::Domain)?;
+    let output = report
+        .buffers
+        .get(&output_resource)
+        .ok_or_else(|| TonError::Domain("camera output resource was not written".into()))?;
+    if output.len() != count as usize * 3 {
+        return Err(TonError::Domain("camera output resource has invalid length".into()));
+    }
+    let rays = output
+        .chunks_exact(3)
+        .map(|value| {
+            Ok(Vec3::new(
+                value[0].as_f64().map_err(|error| TonError::Domain(error.to_string()))?,
+                value[1].as_f64().map_err(|error| TonError::Domain(error.to_string()))?,
+                value[2].as_f64().map_err(|error| TonError::Domain(error.to_string()))?,
+            ))
+        })
+        .collect::<TonResult<Vec<_>>>()?;
+    Ok(CameraProgramExecution { program_hash: actual_hash, rays })
 }
 
 fn task_op(graph: &Graph, task_id: u64) -> TonResult<&str> {
@@ -64,95 +174,10 @@ pub fn execute_frame_graph_cpu(
     graph
         .validate()
         .map_err(|e| TonError::Domain(format!("graph validate: {e}")))?;
-
-    let chain = task_chain(scene.post_bloom);
-    let mut executed_ops = Vec::with_capacity(chain.len());
-    for id in chain {
-        executed_ops.push(task_op(graph, *id)?.to_string());
-    }
-
-    let trace_op = scene.integrator.ucf_op_name();
-    if executed_ops[2] != trace_op {
-        return Err(TonError::Domain(format!(
-            "trace op mismatch: graph `{}` vs scene `{trace_op}`",
-            executed_ops[2]
-        )));
-    }
-    let shade_op = expected_disk_op(scene.disk_model);
-    if executed_ops[3] != shade_op {
-        return Err(TonError::Domain(format!(
-            "shade op mismatch: graph `{}` vs scene `{shade_op}`",
-            executed_ops[3]
-        )));
-    }
-
-    let trace_node = graph
-        .tasks
-        .nodes
-        .iter()
-        .find(|n| n.id.0 == 12)
-        .ok_or_else(|| TonError::Domain("missing trace task 12".into()))?;
-    if !trace_node.params.contains_key("program_hash") {
-        return Err(TonError::Domain(
-            "trace task missing program_hash (KernelBinding)".into(),
-        ));
-    }
-
-    let rays_node = graph
-        .tasks
-        .nodes
-        .iter()
-        .find(|n| n.id.0 == 11)
-        .ok_or_else(|| TonError::Domain("missing generate_rays task 11".into()))?;
-    if !rays_node.params.contains_key("program_hash") {
-        return Err(TonError::Domain(
-            "generate_rays task missing program_hash (KernelBinding)".into(),
-        ));
-    }
-
-    let shade_node = graph
-        .tasks
-        .nodes
-        .iter()
-        .find(|n| n.id.0 == 13)
-        .ok_or_else(|| TonError::Domain("missing shade task 13".into()))?;
-    if !shade_node.params.contains_key("program_hash") {
-        return Err(TonError::Domain(
-            "shade task missing program_hash (KernelBinding)".into(),
-        ));
-    }
-
-    let tone_task_id = if scene.post_bloom { 15 } else { 14 };
-    let tone_node = graph
-        .tasks
-        .nodes
-        .iter()
-        .find(|n| n.id.0 == tone_task_id)
-        .ok_or_else(|| TonError::Domain(format!("missing tone_map task {tone_task_id}")))?;
-    if !tone_node.params.contains_key("program_hash") {
-        return Err(TonError::Domain(
-            "tone_map task missing program_hash (KernelBinding)".into(),
-        ));
-    }
-    if scene.post_bloom {
-        let bloom_node = graph
-            .tasks
-            .nodes
-            .iter()
-            .find(|n| n.id.0 == 14)
-            .ok_or_else(|| TonError::Domain("missing bloom task 14".into()))?;
-        if !bloom_node.params.contains_key("program_hash") {
-            return Err(TonError::Domain(
-                "bloom task missing program_hash (KernelBinding)".into(),
-            ));
-        }
-    }
-
-    let mut frame = scene
-        .render_frame_with_histogram_opts(true)
-        .framebuffer;
-    apply_post_ops(&mut frame, &executed_ops);
-    Ok((frame, CpuGraphExecution { executed_ops }))
+    let _ = scene;
+    Err(TonError::Domain(
+        "UCF CPU frame execution is unavailable until the graph is bound to real UCF programs and resources".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -161,24 +186,19 @@ mod tests {
     use ton_types::{BlackHole, IntegratorKind};
 
     #[test]
-    fn cpu_executor_runs_full_chain_for_sem_classical() {
+    fn cpu_executor_does_not_claim_label_only_execution() {
         let scene = Scene::builder(BlackHole::schwarzschild(1.0))
             .with_default_disk()
             .with_integrator(IntegratorKind::SemiClassicalRayMarch)
             .with_disk_model(DiskModelKind::ProceduralFbm)
             .with_resolution(32, 24)
             .build();
-        let (frame, report) = scene.render_frame_ucf_cpu().expect("execute");
-        assert_eq!(report.executed_ops.len(), 6);
-        assert_eq!(report.executed_ops[2], "ton_trace_sem_classical");
-        assert_eq!(report.executed_ops[3], "ton_shade_procedural_fbm");
-        assert_eq!(report.executed_ops[4], "ton_tone_map");
-        assert_eq!(frame.width, 32);
-        assert!(frame.to_rgba8().iter().any(|&b| b > 0));
+        let error = scene.render_frame_ucf_cpu().expect_err("must reject fake execution");
+        assert!(error.to_string().contains("real UCF programs"));
     }
 
     #[test]
-    fn cpu_executor_applies_bloom_when_enabled() {
+    fn cpu_executor_rejects_bloom_label_chain() {
         let scene = Scene::builder(BlackHole::schwarzschild(1.0))
             .with_default_disk()
             .with_integrator(IntegratorKind::SchwarzschildOrbit)
@@ -186,11 +206,8 @@ mod tests {
             .with_post_bloom(true)
             .with_resolution(32, 24)
             .build();
-        let (frame, report) = scene.render_frame_ucf_cpu().expect("execute");
-        assert_eq!(report.executed_ops.len(), 7);
-        assert_eq!(report.executed_ops[4], "ton_bloom");
-        assert_eq!(report.executed_ops[5], "ton_tone_map");
-        assert!(frame.to_rgba8().iter().any(|&b| b > 0));
+        let error = scene.render_frame_ucf_cpu().expect_err("must reject fake execution");
+        assert!(error.to_string().contains("real UCF programs"));
     }
 
     #[test]
@@ -210,5 +227,24 @@ mod tests {
                 "pixel {i} native={a:?} ucf={b:?}"
             );
         }
+    }
+
+    #[test]
+    fn cpu_graph_executes_bound_camera_program() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_resolution(4, 3)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let execution = execute_camera_program_cpu(&scene, &graph)
+            .expect("bound camera program must execute through UCF CPU backend");
+        assert_eq!(execution.rays.len(), 12);
+        let center = execution.rays[1 + 4];
+        let expected = scene.camera.ray_direction(
+            (1.0 / 4.0 * 2.0 - 1.0) * 4.0 / 3.0,
+            1.0 - 1.0 / 3.0 * 2.0,
+        );
+        assert!((center.x - expected.x).abs() < 2.0e-5);
+        assert!((center.y - expected.y).abs() < 2.0e-5);
+        assert!((center.z - expected.z).abs() < 2.0e-5);
     }
 }

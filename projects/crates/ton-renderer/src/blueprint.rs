@@ -62,12 +62,12 @@ pub fn build_frame_graph_for_resolution(
     }
     let mut graph = b.build();
     let resource_sizes = [
-        (1, 256),
-        (2, pixel_count.saturating_mul(2 * 4)),
-        (3, pixel_count.saturating_mul(3 * 4)),
-        (4, pixel_count.saturating_mul(10 * 4)),
-        (5, pixel_count.saturating_mul(3 * 4)),
-        (6, pixel_count.saturating_mul(4)),
+        (1, pixel_count.saturating_mul(2 * 4)),
+        (2, pixel_count.saturating_mul(3 * 4)),
+        (3, pixel_count.saturating_mul(10 * 4)),
+        (4, pixel_count.saturating_mul(3 * 4)),
+        (5, pixel_count.saturating_mul(4)),
+        (6, 256),
     ];
     for node in &mut graph.resources.nodes {
         if let Some((_, byte_size)) = resource_sizes.iter().find(|(id, _)| *id == node.id.0) {
@@ -75,13 +75,13 @@ pub fn build_frame_graph_for_resolution(
         }
     }
     let task_resources = [
-        (10, None, Some(1)),
-        (11, Some(2), Some(3)),
-        (12, Some(3), Some(4)),
-        (13, Some(4), Some(5)),
-        (14, Some(5), Some(if bloom { 5 } else { 6 })),
-        (15, Some(if bloom { 5 } else { 6 }), Some(6)),
-        (16, Some(6), Some(6)),
+        (10, None, Some(6)),
+        (11, Some(1), Some(2)),
+        (12, Some(2), Some(3)),
+        (13, Some(3), Some(4)),
+        (14, Some(4), Some(if bloom { 4 } else { 5 })),
+        (15, Some(if bloom { 4 } else { 5 }), Some(5)),
+        (16, Some(5), Some(5)),
     ];
     for task in &mut graph.tasks.nodes {
         task.dispatch = Dispatch::Explicit {
@@ -332,10 +332,10 @@ mod tests {
         );
         let rays = graph.tasks.nodes.iter().find(|node| node.id.0 == 11).expect("ray task");
         assert_eq!(rays.dispatch, Dispatch::Explicit { x: 144, y: 1, z: 1 });
-        assert_eq!(rays.params.get("input_resource"), Some(&ParamValue::I64(2)));
-        assert_eq!(rays.params.get("output_resource"), Some(&ParamValue::I64(3)));
+        assert_eq!(rays.params.get("input_resource"), Some(&ParamValue::I64(1)));
+        assert_eq!(rays.params.get("output_resource"), Some(&ParamValue::I64(2)));
         assert_eq!(
-            graph.resources.nodes.iter().find(|node| node.id.0 == 3).expect("ray buffer").byte_size,
+            graph.resources.nodes.iter().find(|node| node.id.0 == 2).expect("ray buffer").byte_size,
             Some(144 * 3 * 4)
         );
     }

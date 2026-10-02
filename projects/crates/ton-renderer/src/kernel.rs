@@ -2,7 +2,7 @@
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ton_ucf_frontend::{
-    disk_shade_novikov, generate_camera_ray, geodesic_capture_classify, geodesic_radial_infall_steps,
+    camera_ray_batch, disk_shade_novikov, geodesic_capture_classify, geodesic_radial_infall_steps,
     equatorial_orbit_rk4_step, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk,
     tone_map_aces, vector_math_normalize,
     Program,
@@ -83,8 +83,8 @@ pub fn shade_kernel(disk: DiskModelKind) -> KernelBinding {
 
 /// 相机射线生成任务程序绑定。
 pub fn generate_rays_kernel() -> KernelBinding {
-    let p = generate_camera_ray();
-    KernelBinding::from_program("generate_camera_ray", p)
+    let p = camera_ray_batch();
+    KernelBinding::from_program("camera_ray_batch", p)
 }
 
 /// 色调映射任务程序绑定（ACES 拟合）。
