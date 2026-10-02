@@ -601,16 +601,29 @@ pub fn schwarzschild_geodesic_rk4_step() -> Program {
 /// uniform `0` 是质量，`1` 是步长，`2` 是逃逸半径。终止码为
 /// `1=captured`、`2=escaped`、`3=budget_exhausted`、`4=non_finite`。
 pub fn schwarzschild_geodesic_rk4_integrate(max_steps: u32) -> Program {
-    schwarzschild_geodesic_rk4_integrate_mode(max_steps, true)
+    schwarzschild_geodesic_rk4_integrate_mode(max_steps, true, false)
 }
 
 /// 构建一个有界积分 chunk。未达到物理终止条件时返回状态码 `0=running`，
 /// 由外部任务图决定是否提交下一个 chunk。
 pub fn schwarzschild_geodesic_rk4_chunk(max_steps: u32) -> Program {
-    schwarzschild_geodesic_rk4_integrate_mode(max_steps, false)
+    schwarzschild_geodesic_rk4_integrate_mode(max_steps, false, false)
 }
 
-fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhaustion: bool) -> Program {
+/// 构建带赤道薄盘交点输出的有界积分 chunk。
+///
+/// 输入状态仍为十个 `f32`，输出扩展为十四个 `f32`，尾部依次为
+/// `[disk_hit, disk_radius, disk_doppler, reserved]`。交点判定和半径
+/// 插值在 UCF 程序内完成，宿主只负责绑定资源和调度。
+pub fn schwarzschild_geodesic_rk4_chunk_with_disk(max_steps: u32) -> Program {
+    schwarzschild_geodesic_rk4_integrate_mode(max_steps, false, true)
+}
+
+fn schwarzschild_geodesic_rk4_integrate_mode(
+    max_steps: u32,
+    report_budget_exhaustion: bool,
+    detect_disk: bool,
+) -> Program {
     fn b(builder: &StructuredFunctionBuilder, op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
         builder.binary(op, lhs, rhs)
     }
@@ -663,9 +676,14 @@ fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhau
             b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), b(builder, BinOp::Div, u(builder, UnOp::Cos, values[2].clone()), b(builder, BinOp::Max, u(builder, UnOp::Sin, values[2].clone()), builder.const_f32(1.0e-6)))), b(builder, BinOp::Mul, utheta.clone(), uphi.clone())));
         [ut, ur, utheta, uphi, du_t, du_r, du_theta, u(builder, UnOp::Neg, phi)]
     }
-    let mut builder = StructuredFunctionBuilder::new("schwarzschild_geodesic_rk4_integrate");
+    let mut builder = StructuredFunctionBuilder::new(if detect_disk {
+        "schwarzschild_geodesic_rk4_chunk_with_disk"
+    } else {
+        "schwarzschild_geodesic_rk4_integrate"
+    });
     let gid = builder.global_id();
-    let base = b(&builder, BinOp::Mul, gid, builder.const_u32(10));
+    let stride = if detect_disk { 14 } else { 10 };
+    let base = b(&builder, BinOp::Mul, gid, builder.const_u32(stride));
     let state: [u32; 8] = std::array::from_fn(|offset| {
         let index = b(&builder, BinOp::Add, base.clone(), builder.const_u32(offset as u32));
         builder.let_value(ucf_program::Ty::f32(), builder.load_buffer(0, index))
@@ -678,6 +696,13 @@ fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhau
         ucf_program::Ty::f32(),
         builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(8))),
     );
+    let disk_hit = detect_disk.then(|| {
+        builder.let_value(
+            ucf_program::Ty::f32(),
+            builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(10))),
+        )
+    });
+    let disk_radius = detect_disk.then(|| builder.let_value(ucf_program::Ty::f32(), builder.const_f32(0.0)));
     let mass = builder.load_uniform(0);
     let step = builder.load_uniform(1);
     let horizon = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
@@ -721,6 +746,44 @@ fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhau
             let weighted = b(builder, BinOp::Add, b(builder, BinOp::Add, k1[index].clone(), b(builder, BinOp::Mul, k2[index].clone(), builder.const_f32(2.0))), b(builder, BinOp::Add, b(builder, BinOp::Mul, k3[index].clone(), builder.const_f32(2.0)), k4[index].clone()));
             let next = b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, step.clone(), b(builder, BinOp::Div, weighted, builder.const_f32(6.0))));
             builder.store_local(state[index], next);
+        }
+        if detect_disk {
+            let previous_z = b(
+                builder,
+                BinOp::Mul,
+                values[1].clone(),
+                u(builder, UnOp::Cos, values[2].clone()),
+            );
+            let next_z = b(
+                builder,
+                BinOp::Mul,
+                Expr::LoadLocal(state[1]),
+                u(builder, UnOp::Cos, Expr::LoadLocal(state[2])),
+            );
+            let product = b(builder, BinOp::Mul, previous_z.clone(), next_z.clone());
+            let crossed = b(builder, BinOp::Le, product, builder.const_f32(0.0));
+            let previous_nonzero = b(builder, BinOp::Ne, previous_z.clone(), builder.const_f32(0.0));
+            let next_nonzero = b(builder, BinOp::Ne, next_z.clone(), builder.const_f32(0.0));
+            let previous_abs = b(builder, BinOp::Max, previous_z.clone(), u(builder, UnOp::Neg, previous_z));
+            let next_abs = b(builder, BinOp::Max, next_z.clone(), u(builder, UnOp::Neg, next_z));
+            let alpha = b(builder, BinOp::Div, previous_abs.clone(), b(builder, BinOp::Add, previous_abs, next_abs));
+            let radius_delta = b(builder, BinOp::Sub, Expr::LoadLocal(state[1]), values[1].clone());
+            let crossing_radius = b(builder, BinOp::Add, values[1].clone(), b(builder, BinOp::Mul, alpha, radius_delta));
+            let in_range = builder.select(
+                b(builder, BinOp::Ge, crossing_radius.clone(), builder.load_uniform(3)),
+                b(builder, BinOp::Le, crossing_radius.clone(), builder.load_uniform(4)),
+                Expr::ConstBool(false),
+            );
+            let first_hit = b(builder, BinOp::Eq, Expr::LoadLocal(*disk_hit.as_ref().expect("disk hit local")), builder.const_f32(0.0));
+            let record = builder.select(crossed, builder.select(previous_nonzero, builder.select(next_nonzero, builder.select(in_range, first_hit, Expr::ConstBool(false)), Expr::ConstBool(false)), Expr::ConstBool(false)), Expr::ConstBool(false));
+            builder.store_local(
+                *disk_hit.as_ref().expect("disk hit local"),
+                builder.select(record.clone(), builder.const_f32(1.0), Expr::LoadLocal(*disk_hit.as_ref().expect("disk hit local"))),
+            );
+            builder.store_local(
+                *disk_radius.as_ref().expect("disk radius local"),
+                builder.select(record, crossing_radius, Expr::LoadLocal(*disk_radius.as_ref().expect("disk radius local"))),
+            );
         }
         let mut finite = builder.unary(UnOp::IsFinite, Expr::LoadLocal(state[0]));
         for index in 1..8 {
@@ -766,7 +829,13 @@ fn schwarzschild_geodesic_rk4_integrate_mode(max_steps: u32, report_budget_exhau
         builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(offset as u32)), Expr::LoadLocal(state[offset]));
     }
     builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(8)), final_status);
-    builder.store_buffer(0, b(&builder, BinOp::Add, base, builder.const_u32(9)), Expr::LoadLocal(bound_infall));
+    builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(9)), Expr::LoadLocal(bound_infall));
+    if detect_disk {
+        builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(10)), Expr::LoadLocal(*disk_hit.as_ref().expect("disk hit local")));
+        builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(11)), Expr::LoadLocal(*disk_radius.as_ref().expect("disk radius local")));
+        builder.store_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(12)), builder.const_f32(1.0));
+        builder.store_buffer(0, b(&builder, BinOp::Add, base, builder.const_u32(13)), builder.const_f32(0.0));
+    }
     ProgramBuilder::new().structured_entry(builder, ucf_program::Ty::f32(), Expr::LoadLocal(state[0])).expect("valid structured integration builder").finish().expect("valid structured integration program")
 }
 
@@ -1016,6 +1085,37 @@ mod integration_tests {
         interpreter.with_buffer(0, state);
         interpreter.run_parallel(&program, 1).expect("non-finite state execution");
         assert_eq!(interpreter.buffer(0).expect("state output")[8], Value::F32(4.0));
+    }
+
+    #[test]
+    fn disk_geodesic_chunk_validates_and_preserves_extended_layout() {
+        let program = schwarzschild_geodesic_rk4_chunk_with_disk(4);
+        validate_program(&program).expect("disk geodesic program must satisfy UCF validation");
+        let state = vec![
+            Value::F32(0.0),
+            Value::F32(12.0),
+            Value::F32(1.3),
+            Value::F32(0.3),
+            Value::F32(1.2),
+            Value::F32(-0.7),
+            Value::F32(0.22),
+            Value::F32(0.01),
+            Value::F32(0.0),
+            Value::F32(0.0),
+            Value::F32(0.0),
+            Value::F32(0.0),
+            Value::F32(0.0),
+            Value::F32(0.0),
+        ];
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(1.0));
+        interpreter.with_uniform(1, Value::F32(0.02));
+        interpreter.with_uniform(2, Value::F32(100.0));
+        interpreter.with_uniform(3, Value::F32(6.0));
+        interpreter.with_uniform(4, Value::F32(40.0));
+        interpreter.with_buffer(0, state);
+        interpreter.run_parallel(&program, 1).expect("disk geodesic execution");
+        assert_eq!(interpreter.buffer(0).expect("extended state output").len(), 14);
     }
 
     #[test]
