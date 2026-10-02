@@ -231,6 +231,7 @@ impl SchwarzschildSpectralGpuBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ton_ucf_frontend::{CpuInterpreter, Value};
 
     #[test]
     fn spectral_gpu_same_frame_step_and_sampling_converge_without_postprocessing() {
@@ -440,6 +441,40 @@ mod tests {
         assert_eq!(base.shading_program_hashes.len(), 6);
         assert_eq!(bloom.shading_program_hashes.len(), 15);
         assert!(base.hdr.iter().zip(&bloom.hdr).any(|(a, b)| a != b));
+    }
+
+    #[test]
+    fn bloom_scale_programs_match_cpu_and_vulkan() {
+        let input = (1..=24).map(|value| value as f32).collect::<Vec<_>>();
+        let downsample = ton_ucf_frontend::UcfDownsample2xRgbBuilder::new(4, 2).build().unwrap();
+        let mut cpu = CpuInterpreter::new();
+        cpu.with_buffer(1, input.iter().copied().map(Value::F32).collect())
+            .with_buffer(2, vec![Value::F32(0.0); 6]);
+        cpu.run_parallel(&downsample, 2).unwrap();
+        let expected_down = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap() as f32).collect::<Vec<_>>();
+        let mut backend = match VulkanBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("skip bloom scale parity (no usable Vulkan device): {error}");
+                return;
+            }
+        };
+        let actual_down = execute_stage(&mut backend, &downsample, &input, 3, 3, 181, &[], None).unwrap();
+        for (actual, expected) in actual_down.iter().zip(expected_down) {
+            assert!((actual - expected).abs() < 1.0e-5, "downsample mismatch: {actual} vs {expected}");
+        }
+
+        let upsample = ton_ucf_frontend::UcfUpsampleRgbBuilder::new(2, 1, 4, 2, 0.5).build().unwrap();
+        let source = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0];
+        let mut cpu = CpuInterpreter::new();
+        cpu.with_buffer(1, source.iter().copied().map(Value::F32).collect())
+            .with_buffer(2, vec![Value::F32(0.0); 24]);
+        cpu.run_parallel(&upsample, 8).unwrap();
+        let expected_up = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap() as f32).collect::<Vec<_>>();
+        let actual_up = execute_stage(&mut backend, &upsample, &source, 3, 3, 184, &[], None).unwrap();
+        for (actual, expected) in actual_up.iter().zip(expected_up) {
+            assert!((actual - expected).abs() < 1.0e-5, "upsample mismatch: {actual} vs {expected}");
+        }
     }
 
     #[test]
