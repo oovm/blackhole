@@ -97,11 +97,11 @@ impl SchwarzschildSpectralGpuBuilder {
         }
         let spectrum = ton_ucf_frontend::VisibleSpectrumColorBuilder::new().wavelength_step_nm(self.wavelength_step_nm);
         let table = spectrum.response_table().map_err(TonError::Domain)?;
-        let trace = SchwarzschildF64GpuTraceBuilder::new(self.mass).maximum_step(self.step).maximum_steps(self.maximum_steps).execute_camera(camera, width, height)?;
-        trace.require_renderable()?;
         let event_trace = SchwarzschildF64GpuTraceBuilder::new(self.mass).maximum_step(self.step).maximum_steps(self.maximum_steps)
             .execute_event_camera(camera, width, height)?;
         event_trace.require_radiative()?;
+        let trace = event_trace.render_trace();
+        trace.require_renderable()?;
         let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create spectral backend: {error}")))?;
         let records = trace.records.iter().map(|record| record.map(|value| value as f32)).collect::<Vec<_>>();
         if records.iter().flatten().any(|value| !value.is_finite()) { return Err(TonError::Domain("F64 trajectory cannot be represented by F32 radiance inputs".into())); }

@@ -61,6 +61,18 @@ pub struct F64GpuEventTraceBatch {
 }
 
 impl F64GpuEventTraceBatch {
+    /// 将同一份已执行记录投影为普通渲染轨迹，不重新执行 GPU 程序。
+    pub fn render_trace(&self) -> F64GpuTraceBatch {
+        F64GpuTraceBatch {
+            records: self.records.clone(),
+            terminations: self.terminations.clone(),
+            executed_program_hashes: self.executed_program_hashes.clone(),
+            padded_instances: 0,
+            timing: F64TraceTiming::default(),
+            program_cache: ProgramCacheStats::default(),
+        }
+    }
+
     /// 检查事件包是否允许进入辐射阶段。
     pub fn require_radiative(&self) -> TonResult<()> {
         if self.records.len() != self.events.len() || self.records.len() != self.terminations.len() {
