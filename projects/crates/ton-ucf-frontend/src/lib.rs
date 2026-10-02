@@ -300,6 +300,68 @@ pub fn camera_ray_batch() -> Program {
     ProgramBuilder::new().entry(builder).expect("valid camera builder").finish().expect("valid camera program")
 }
 
+/// 从笛卡尔光线生成 Schwarzschild 球坐标零测地线初态。
+///
+/// 输入资源 `1` 每实例为 `[origin.xyz, direction.xyz]`，输出资源 `2` 每实例为：
+/// `[t, r, theta, phi, ut, ur, utheta, uphi, status, bound_infall]`。
+/// uniform `0` 为质量，uniform `1` 为临界冲击参数。所有计算均由通用 UCF
+/// 算术、比较、选择和有限控制流表达，UCF 不知道这些字段的物理含义。
+pub fn schwarzschild_initial_state_batch() -> Program {
+    fn local(id: u32) -> Expr { Expr::LoadLocal(id) }
+    fn f32(value: f32) -> Expr { Expr::ConstF32(value) }
+    fn load(resource: u32, index: Expr) -> Expr { Expr::LoadBuffer { resource, index: Box::new(index) } }
+    fn index(base: Expr, offset: u32) -> Expr { bin(BinOp::Add, base, Expr::ConstU32(offset)) }
+    fn unary(op: UnOp, arg: Expr) -> Expr { un(op, arg) }
+    fn square(value: Expr) -> Expr { bin(BinOp::Mul, value.clone(), value) }
+    let gid = Expr::GlobalId;
+    let input_base = bin(BinOp::Mul, gid.clone(), Expr::ConstU32(6));
+    let output_base = bin(BinOp::Mul, gid, Expr::ConstU32(10));
+    let input = |offset| load(1, index(input_base.clone(), offset));
+    let mut body = Vec::new();
+    for offset in 0..6 { body.push(Stmt::Let { id: offset, ty: Ty::f32(), init: input(offset) }); }
+    let x = local(0); let y = local(1); let z = local(2);
+    let direction = v3(local(3), local(4), local(5));
+    body.push(Stmt::Let { id: 6, ty: Ty::f32(), init: bin(BinOp::Add, bin(BinOp::Add, square(x.clone()), square(y.clone())), square(z.clone())) });
+    body.push(Stmt::Let { id: 7, ty: Ty::f32(), init: unary(UnOp::Sqrt, local(6)) });
+    body.push(Stmt::Let { id: 8, ty: Ty::f32(), init: bin(BinOp::Add, square(x.clone()), square(y.clone())) });
+    body.push(Stmt::Let { id: 9, ty: Ty::f32(), init: unary(UnOp::Sqrt, local(8)) });
+    let eps = f32(1.0e-6); let neg_eps = unary(UnOp::Neg, eps.clone());
+    let theta_pos = unary(UnOp::Atan, bin(BinOp::Div, local(9), bin(BinOp::Max, z.clone(), eps.clone())));
+    let theta_neg = bin(BinOp::Add, unary(UnOp::Atan, bin(BinOp::Div, local(9), bin(BinOp::Min, z.clone(), neg_eps.clone()))), f32(std::f32::consts::PI));
+    let theta = select(bin(BinOp::Gt, z.clone(), eps.clone()), theta_pos, select(bin(BinOp::Lt, z, neg_eps.clone()), theta_neg, f32(std::f32::consts::FRAC_PI_2)));
+    body.push(Stmt::Let { id: 10, ty: Ty::f32(), init: theta });
+    let phi_pos = unary(UnOp::Atan, bin(BinOp::Div, y.clone(), bin(BinOp::Max, x.clone(), eps.clone())));
+    let phi_neg_base = unary(UnOp::Atan, bin(BinOp::Div, y.clone(), bin(BinOp::Min, x.clone(), neg_eps.clone())));
+    let phi_neg = select(bin(BinOp::Ge, y.clone(), f32(0.0)), bin(BinOp::Add, phi_neg_base.clone(), f32(std::f32::consts::PI)), bin(BinOp::Sub, phi_neg_base, f32(std::f32::consts::PI)));
+    let phi_axis = select(bin(BinOp::Ge, y.clone(), f32(0.0)), f32(std::f32::consts::FRAC_PI_2), unary(UnOp::Neg, f32(std::f32::consts::FRAC_PI_2)));
+    body.push(Stmt::Let { id: 11, ty: Ty::f32(), init: select(bin(BinOp::Gt, x.clone(), eps.clone()), phi_pos, select(bin(BinOp::Lt, x, neg_eps), phi_neg, phi_axis)) });
+    body.push(Stmt::Let { id: 12, ty: Ty::Vec3, init: unary(UnOp::Normalize, direction) });
+    let sin_t = unary(UnOp::Sin, local(10)); let cos_t = unary(UnOp::Cos, local(10));
+    let sin_p = unary(UnOp::Sin, local(11)); let cos_p = unary(UnOp::Cos, local(11));
+    body.push(Stmt::Let { id: 13, ty: Ty::f32(), init: bin(BinOp::Max, sin_t.clone(), eps.clone()) });
+    body.push(Stmt::Let { id: 14, ty: Ty::f32(), init: bin(BinOp::Mul, local(7), local(13)) });
+    body.push(Stmt::Let { id: 15, ty: Ty::Vec3, init: v3(bin(BinOp::Mul, sin_t.clone(), cos_p.clone()), bin(BinOp::Mul, sin_t, sin_p.clone()), cos_t.clone()) });
+    body.push(Stmt::Let { id: 16, ty: Ty::Vec3, init: v3(bin(BinOp::Mul, cos_t.clone(), cos_p), bin(BinOp::Mul, cos_t, sin_p), unary(UnOp::Neg, unary(UnOp::Sin, local(10)))) });
+    body.push(Stmt::Let { id: 17, ty: Ty::Vec3, init: v3(unary(UnOp::Neg, unary(UnOp::Sin, local(11))), unary(UnOp::Cos, local(11)), f32(0.0)) });
+    body.push(Stmt::Let { id: 18, ty: Ty::f32(), init: bin(BinOp::Dot, local(12), local(15)) });
+    body.push(Stmt::Let { id: 19, ty: Ty::f32(), init: bin(BinOp::Div, bin(BinOp::Dot, local(12), local(16)), local(7)) });
+    body.push(Stmt::Let { id: 20, ty: Ty::f32(), init: bin(BinOp::Div, bin(BinOp::Dot, local(12), local(17)), local(14)) });
+    let mass = Expr::LoadUniform(0); let metric = bin(BinOp::Sub, f32(1.0), bin(BinOp::Div, bin(BinOp::Mul, f32(2.0), mass), local(7)));
+    body.push(Stmt::Let { id: 21, ty: Ty::f32(), init: metric });
+    let spatial = bin(BinOp::Add, bin(BinOp::Add, bin(BinOp::Div, square(local(18)), local(21)), bin(BinOp::Mul, square(local(7)), square(local(19)))), bin(BinOp::Mul, square(local(14)), square(local(20))));
+    body.push(Stmt::Let { id: 22, ty: Ty::f32(), init: bin(BinOp::Div, unary(UnOp::Sqrt, spatial), unary(UnOp::Sqrt, local(21))) });
+    let angular = unary(UnOp::Sqrt, bin(BinOp::Add, bin(BinOp::Mul, square(local(7)), square(local(19))), bin(BinOp::Mul, square(local(14)), square(local(20)))));
+    let impact = bin(BinOp::Div, angular, bin(BinOp::Mul, local(21), local(22)));
+    body.push(Stmt::Let { id: 23, ty: Ty::f32(), init: impact });
+    body.push(Stmt::Let { id: 24, ty: Ty::f32(), init: select(bin(BinOp::Lt, local(23), Expr::LoadUniform(1)), f32(1.0), f32(0.0)) });
+    let outputs = [f32(0.0), local(7), local(10), local(11), local(22), local(18), local(19), local(20), f32(0.0), local(24)];
+    for (offset, value) in outputs.into_iter().enumerate() {
+        body.push(Stmt::StoreBuffer { resource: 2, index: index(output_base.clone(), offset as u32), value });
+    }
+    body.push(Stmt::Return(local(7)));
+    f("schwarzschild_initial_state_batch", body, (0..25).map(|id| (id, if id == 12 || id == 15 || id == 16 || id == 17 { Ty::Vec3 } else { Ty::f32() })).collect(), Ty::f32())
+}
+
 /// 构建 Schwarzschild 径向零测地线的四阶 Runge-Kutta 单步程序。
 ///
 /// 状态 buffer 的每个实例占四个 `f32`，布局为 `[t, r, u^t, u^r]`。
@@ -821,6 +883,14 @@ pub fn orbit_loop_accumulate() -> Program {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+
+    #[test]
+    fn schwarzschild_initial_state_program_is_valid_and_stable() {
+        let program = schwarzschild_initial_state_batch();
+        validate_program(&program).expect("initial state program must satisfy UCF validation");
+        assert_eq!(program.functions[0].name, "schwarzschild_initial_state_batch");
+        assert_ne!(program_hash(&program), 0);
+    }
 
     #[test]
     fn structured_geodesic_integration_writes_state_and_status() {
