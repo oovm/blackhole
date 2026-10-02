@@ -45,7 +45,7 @@ fn execute_stage(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Progra
     Ok(output)
 }
 
-/// 当前无纹理不透明薄盘基线，尚无星空、透射或 Bloom。
+/// 当前无纹理不透明薄盘基线，支持可选星空、透射和 HDR Bloom。
 #[derive(Debug)]
 pub struct SpectralGpuFrame {
     /// 已经 sRGB 编码的显示帧，不可再执行一次色调映射。
@@ -72,12 +72,13 @@ pub struct SchwarzschildSpectralGpuBuilder {
     maximum_steps: u32,
     wavelength_step_nm: u32,
     pattern: ton_disk::GraybodyDiskPattern,
+    bloom: bool,
 }
 
 impl SchwarzschildSpectralGpuBuilder {
     /// 默认峰值 6500K、曝光 1e-10、最大步长 0.02M。
     pub fn new(mass: f64) -> Self { Self { mass, peak_kelvin: 6500.0, exposure: 1.0e-10, step: 0.02 * mass, maximum_steps: 32768, wavelength_step_nm: 5,
-        pattern: ton_disk::GraybodyDiskPattern::builder().build().expect("default graybody pattern must be valid") } }
+        pattern: ton_disk::GraybodyDiskPattern::builder().build().expect("default graybody pattern must be valid"), bloom: false } }
     /// 设置物理发射温度峰值。
     pub fn peak_temperature(mut self, value: f64) -> Self { self.peak_kelvin = value; self }
     /// 设置显示曝光，不改变几何或频移。
@@ -90,6 +91,8 @@ impl SchwarzschildSpectralGpuBuilder {
     pub fn wavelength_step_nm(mut self, value: u32) -> Self { self.wavelength_step_nm = value; self }
     /// 设置有界盘面结构，零对比度可恢复平滑参考基线。
     pub fn graybody_pattern(mut self, pattern: ton_disk::GraybodyDiskPattern) -> Self { self.pattern = pattern; self }
+    /// 在 HDR 显示编码前启用亮部提取和泛光合成。
+    pub fn bloom(mut self, enabled: bool) -> Self { self.bloom = enabled; self }
     /// 执行完整原生程序链，失败直接返回，不 fallback。
     pub fn execute(self, camera: Camera, width: u32, height: u32) -> TonResult<SpectralGpuFrame> {
         if !self.peak_kelvin.is_finite() || self.peak_kelvin <= 0.0 || !self.exposure.is_finite() || self.exposure <= 0.0 {
@@ -156,9 +159,24 @@ impl SchwarzschildSpectralGpuBuilder {
         }
         let composed = execute_stage(&mut backend, &composite, &composite_input, 15, 7, 137, &[1.0e-12], None)?;
         hashes.push(ton_ucf_frontend::program_hash(&composite));
-        let hdr = composed.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
+        let mut display_input = composed.clone();
+        if self.bloom {
+            let bright_builder = ton_ucf_frontend::HdrBrightExtractBuilder::new().build().map_err(TonError::Domain)?;
+            let bright_input = composed.chunks_exact(7).flat_map(|record| record[3..6].iter().copied()).collect::<Vec<_>>();
+            let bright_output = execute_stage(&mut backend, &bright_builder, &bright_input, 3, 3, 149, &[0.08], None)?;
+            let bright = bright_output.chunks_exact(3).map(|record| Rgb::new(record[0] as f64, record[1] as f64, record[2] as f64)).collect::<Vec<_>>();
+            let mut linear = Framebuffer { width, height,
+                pixels: display_input.chunks_exact(7).map(|record| Rgb::new(record[3] as f64, record[4] as f64, record[5] as f64)).collect(),
+                encoding: FramebufferEncoding::LinearHdr };
+            ton_renderer::composite_bloom_from_bright(&mut linear, &bright, 0.08);
+            for (record, pixel) in display_input.chunks_exact_mut(7).zip(linear.pixels) {
+                record[3] = pixel.r as f32; record[4] = pixel.g as f32; record[5] = pixel.b as f32;
+            }
+            hashes.push(ton_ucf_frontend::program_hash(&bright_builder));
+        }
+        let hdr = display_input.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
         let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
-        let pixels = execute_stage(&mut backend, &display, &composed, 7, 3, 121, &[], None)?;
+        let pixels = execute_stage(&mut backend, &display, &display_input, 7, 3, 121, &[], None)?;
         if pixels.iter().any(|value| *value < 0.0 || *value > 1.0) { return Err(TonError::Domain("spectral display exceeds encoded sRGB range".into())); }
         hashes.push(ton_ucf_frontend::program_hash(&display));
         let framebuffer = Framebuffer { width, height, encoding: FramebufferEncoding::Display,
@@ -369,6 +387,16 @@ mod tests {
             assert!((actual[1] as f64 - expected.transmittance).abs() < 2.0e-5);
             assert_eq!(actual[2], expected.event_count as f32);
         }
+    }
+
+    #[test]
+    fn spectral_gpu_bloom_is_an_explicit_optional_ucf_stage() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let base = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).execute(camera, 8, 4).unwrap();
+        let bloom = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).bloom(true).execute(camera, 8, 4).unwrap();
+        assert_eq!(base.shading_program_hashes.len(), 6);
+        assert_eq!(bloom.shading_program_hashes.len(), 7);
+        assert!(base.hdr.iter().zip(&bloom.hdr).any(|(a, b)| a != b));
     }
 
     #[test]

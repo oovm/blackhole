@@ -93,14 +93,15 @@ fn main() -> ExitCode {
     );
 
     let (fb, failure_pct) = if ucf_spectral {
-        if render_mode != RenderMode::Beauty || spin.abs() > f64::EPSILON || bloom || overlay_shadow || ucf_vulkan || ucf_tone {
+        if render_mode != RenderMode::Beauty || spin.abs() > f64::EPSILON || overlay_shadow || ucf_vulkan || ucf_tone {
             eprintln!("--ucf-spectral requires Schwarzschild Beauty without Bloom, overlays or other backend flags");
             return ExitCode::from(4);
         }
         let mut renderer = ton_simulation::SchwarzschildSpectralGpuBuilder::new(mass)
             .maximum_step(step_size).maximum_steps(max_steps.unwrap_or(32768))
             .peak_temperature(parse_f64_arg(&args, "--peak-kelvin", 6500.0))
-            .exposure(parse_f64_arg(&args, "--exposure", 1.0e-10));
+            .exposure(parse_f64_arg(&args, "--exposure", 1.0e-10))
+            .bloom(bloom);
         if graybody {
             let pattern = ton_disk::GraybodyDiskPattern::builder().contrast(0.62).arms(3).pitch(8.0).radial_frequency(18.0)
                 .build().expect("built-in graybody pattern must be valid");

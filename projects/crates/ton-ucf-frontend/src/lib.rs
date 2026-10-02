@@ -35,6 +35,8 @@ mod radiative_transfer;
 pub use radiative_transfer::{PackedRadiativeTransferBuilder, RadiativeTransferBuilder};
 mod radiance_composite;
 pub use radiance_composite::RadianceCompositeBuilder;
+mod bloom_extract;
+pub use bloom_extract::HdrBrightExtractBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
