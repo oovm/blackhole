@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_geodesic_initial_state, schwarzschild_geodesic_
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -107,6 +107,67 @@ pub fn camera_ray_ucf_vulkan_batch(camera: Camera, uv: &[(f64, f64)]) -> TonResu
     let output = backend.read_f32(ResourceId(12)).map_err(|e| TonError::Domain(format!("read camera output: {e}")))?;
     if output.len() < uv.len() * 3 { return Err(TonError::Domain("Vulkan camera output is short".into())); }
     Ok(output.chunks_exact(3).take(uv.len()).map(|v| Vec3::new(v[0] as f64, v[1] as f64, v[2] as f64)).collect())
+}
+
+/// 由 UCF CPU Interpreter 从笛卡尔射线批量构造 Schwarzschild 球坐标初态。
+///
+/// 该函数只负责绑定通用程序和解码通用 buffer。物理参考结果仍由
+/// `ton_geodesic::schwarzschild_geodesic_initial_state` 独立计算。
+pub fn schwarzschild_initial_state_ucf_cpu_batch(
+    mass: f64,
+    critical_impact: f64,
+    rays: &[(Vec3, Vec3)],
+) -> TonResult<Vec<SphericalState>> {
+    if rays.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = rays
+        .iter()
+        .flat_map(|(origin, direction)| {
+            [origin.x, origin.y, origin.z, direction.x, direction.y, direction.z]
+                .into_iter()
+                .map(|value| Value::F32(value as f32))
+        })
+        .collect::<Vec<_>>();
+    let output_seed = vec![Value::F32(0.0); rays.len() * 10];
+    let report = CpuBackend::new()
+        .execute_program_with_buffers(
+            &schwarzschild_initial_state_batch(),
+            u32::try_from(rays.len()).map_err(|_| TonError::Domain("ray batch exceeds u32 capacity".into()))?,
+            [
+                (0, Value::F32(mass as f32)),
+                (1, Value::F32(critical_impact as f32)),
+            ],
+            [(1, input), (2, output_seed)],
+        )
+        .map_err(TonError::Domain)?;
+    let output = report
+        .buffers
+        .get(&2)
+        .ok_or_else(|| TonError::Domain("UCF initial state output buffer missing".into()))?;
+    if output.len() != rays.len() * 10 {
+        return Err(TonError::Domain("UCF initial state output has invalid length".into()));
+    }
+    output
+        .chunks_exact(10)
+        .map(|values| {
+            let scalar = |index: usize| {
+                values[index]
+                    .as_f64()
+                    .map_err(|error| TonError::Domain(format!("UCF initial state value {index}: {error}")))
+            };
+            Ok(SphericalState {
+                t: scalar(0)?,
+                r: scalar(1)?,
+                theta: scalar(2)?,
+                phi: scalar(3)?,
+                ut: scalar(4)?,
+                ur: scalar(5)?,
+                utheta: scalar(6)?,
+                uphi: scalar(7)?,
+            })
+        })
+        .collect()
 }
 
 /// 由 UCF CPU Interpreter 批量计算 Schwarzschild 守恒冲击参数。
@@ -548,6 +609,36 @@ mod tests {
         let output = schwarzschild_geodesic_integrate_ucf_cpu_rays(1.0, &rays, 0.01, 100.0, 4).unwrap();
         assert_eq!(output.len(), rays.len());
         assert!(output.iter().all(|(state, status)| state.r.is_finite() && *status == 3));
+    }
+
+    #[test]
+    fn ucf_initial_state_batch_matches_reference() {
+        let mass = 1.0;
+        let bh = BlackHole::schwarzschild(mass);
+        let rays = vec![
+            (Vec3::new(0.0, 0.0, 20.0), Vec3::new(0.0, 0.0, -1.0)),
+            (Vec3::new(3.0, -2.0, 18.0), Vec3::new(0.2, 0.1, -1.0).normalize()),
+            (Vec3::new(-4.0, 2.5, 16.0), Vec3::new(-0.25, -0.15, -1.0).normalize()),
+        ];
+        let actual = schwarzschild_initial_state_ucf_cpu_batch(
+            mass,
+            bh.critical_impact_parameter(),
+            &rays,
+        )
+        .expect("UCF initial state batch");
+        assert_eq!(actual.len(), rays.len());
+        for ((origin, direction), actual) in rays.into_iter().zip(actual) {
+            let expected = schwarzschild_geodesic_initial_state(mass, origin, direction)
+                .expect("reference initial state");
+            let a = [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi];
+            let b = [expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi];
+            for (index, (actual, expected)) in a.into_iter().zip(b).enumerate() {
+                if index == 3 && expected.sin().abs() < 1.0e-8 {
+                    continue;
+                }
+                assert!((actual - expected).abs() < 3.0e-4, "index={index}, actual={actual}, expected={expected}");
+            }
+        }
     }
 
     #[test]
