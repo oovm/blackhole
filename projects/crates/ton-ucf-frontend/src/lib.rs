@@ -33,6 +33,8 @@ mod graybody;
 pub use graybody::GraybodyEmissionBuilder;
 mod radiative_transfer;
 pub use radiative_transfer::{PackedRadiativeTransferBuilder, RadiativeTransferBuilder};
+mod radiance_composite;
+pub use radiance_composite::RadianceCompositeBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{

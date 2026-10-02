@@ -54,6 +54,10 @@ pub struct SpectralGpuFrame {
     pub hdr: Vec<[f32; 3]>,
     /// 真实 F64 原生轨迹，不以仅存在 hash 作为执行证据。
     pub trace: F64GpuTraceBatch,
+    /// 真实 F64 GPU 盘面事件包，尚未允许 overflow 进入辐射阶段。
+    pub event_trace: crate::F64GpuEventTraceBatch,
+    /// UCF 固定包辐射传输输出 `[intensity,transmittance,count,status]`。
+    pub radiative: Vec<[f32; 4]>,
     /// 依序完成的圆轨道频移、温度、谱色、显示程序哈希。
     pub shading_program_hashes: Vec<u64>,
 }
@@ -95,6 +99,9 @@ impl SchwarzschildSpectralGpuBuilder {
         let table = spectrum.response_table().map_err(TonError::Domain)?;
         let trace = SchwarzschildF64GpuTraceBuilder::new(self.mass).maximum_step(self.step).maximum_steps(self.maximum_steps).execute_camera(camera, width, height)?;
         trace.require_renderable()?;
+        let event_trace = SchwarzschildF64GpuTraceBuilder::new(self.mass).maximum_step(self.step).maximum_steps(self.maximum_steps)
+            .execute_event_camera(camera, width, height)?;
+        event_trace.require_radiative()?;
         let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create spectral backend: {error}")))?;
         let records = trace.records.iter().map(|record| record.map(|value| value as f32)).collect::<Vec<_>>();
         if records.iter().flatten().any(|value| !value.is_finite()) { return Err(TonError::Domain("F64 trajectory cannot be represented by F32 radiance inputs".into())); }
@@ -118,14 +125,41 @@ impl SchwarzschildSpectralGpuBuilder {
         let color = spectrum.build().map_err(TonError::Domain)?;
         let colors = execute_stage(&mut backend, &color, &emission_input, 3, 7, 111, &[], Some(&table))?;
         hashes.push(ton_ucf_frontend::program_hash(&color));
-        let hdr = colors.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
+        let radiative_model = ton_disk::DiskRadiativeModel::new(self.mass, 6.0 * self.mass, 0.8)?;
+        let mut radiative_input = Vec::with_capacity(event_trace.events.len() * 10);
+        for packet in &event_trace.events {
+            let count = packet[0] as usize;
+            radiative_input.extend([packet[0] as f32, packet[1] as f32]);
+            for event_index in 0..4 {
+                if event_index < count {
+                    let event = packet[2 + event_index * 9..11 + event_index * 9].try_into().unwrap();
+                    let radiative = radiative_model.event(event)?;
+                    radiative_input.extend([radiative.source as f32, radiative.opacity as f32]);
+                } else {
+                    radiative_input.extend([0.0, 0.0]);
+                }
+            }
+        }
+        let transfer = ton_ucf_frontend::PackedRadiativeTransferBuilder::new().maximum_events(4).build().map_err(TonError::Domain)?;
+        let radiative_output = execute_stage(&mut backend, &transfer, &radiative_input, 10, 4, 134, &[0.0], None)?;
+        let radiative = radiative_output.chunks_exact(4).map(|record| record.try_into().unwrap()).collect::<Vec<[f32; 4]>>();
+        hashes.push(ton_ucf_frontend::program_hash(&transfer));
+        let composite = ton_ucf_frontend::RadianceCompositeBuilder::new().build().map_err(TonError::Domain)?;
+        let mut composite_input = Vec::with_capacity(colors.len() + radiative.len() * 4);
+        for (color, transfer) in colors.chunks_exact(7).zip(&radiative) {
+            composite_input.extend_from_slice(color);
+            composite_input.extend_from_slice(transfer);
+        }
+        let composed = execute_stage(&mut backend, &composite, &composite_input, 11, 7, 137, &[1.0e-12], None)?;
+        hashes.push(ton_ucf_frontend::program_hash(&composite));
+        let hdr = composed.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
         let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
-        let pixels = execute_stage(&mut backend, &display, &colors, 7, 3, 121, &[], None)?;
+        let pixels = execute_stage(&mut backend, &display, &composed, 7, 3, 121, &[], None)?;
         if pixels.iter().any(|value| *value < 0.0 || *value > 1.0) { return Err(TonError::Domain("spectral display exceeds encoded sRGB range".into())); }
         hashes.push(ton_ucf_frontend::program_hash(&display));
         let framebuffer = Framebuffer { width, height, encoding: FramebufferEncoding::Display,
             pixels: pixels.chunks_exact(3).map(|pixel| Rgb::new(pixel[0] as f64, pixel[1] as f64, pixel[2] as f64)).collect() };
-        Ok(SpectralGpuFrame { framebuffer, hdr, trace, shading_program_hashes: hashes })
+        Ok(SpectralGpuFrame { framebuffer, hdr, trace, event_trace, radiative, shading_program_hashes: hashes })
     }
 }
 
@@ -307,7 +341,7 @@ mod tests {
         let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
         let output = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).execute(camera, 16, 9).unwrap();
         assert_eq!(output.framebuffer.encoding, FramebufferEncoding::Display);
-        assert_eq!(output.shading_program_hashes.len(), 4);
+        assert_eq!(output.shading_program_hashes.len(), 6);
         assert_eq!(output.hdr.len(), 144);
         let mut luminous = 0;
         for ((hdr, pixel), trace) in output.hdr.iter().zip(&output.framebuffer.pixels).zip(&output.trace.records) {
@@ -315,7 +349,21 @@ mod tests {
             else { luminous += 1; assert!(hdr.iter().any(|value| *value > 0.0)); }
         }
         assert!(output.hdr.iter().flatten().any(|value| *value > 1.0));
-        assert_eq!(luminous, 90);
+        assert_eq!(luminous, output.trace.records.iter().filter(|record| record[13] != 0.0).count());
+        assert_eq!(output.radiative.len(), output.hdr.len());
+        assert!(output.radiative.iter().all(|record| record[3] == 1.0));
+        let model = ton_disk::DiskRadiativeModel::new(1.0, 6.0, 0.8).unwrap();
+        for (packet, actual) in output.event_trace.events.iter().zip(&output.radiative) {
+            let events = packet[2..]
+                .chunks_exact(9)
+                .take(packet[0] as usize)
+                .map(|event| model.event(event.try_into().unwrap()).unwrap())
+                .collect::<Vec<_>>();
+            let expected = ton_disk::accumulate_radiative_events(&events, 0.0).unwrap();
+            assert!((actual[0] as f64 - expected.intensity).abs() < 2.0e-4);
+            assert!((actual[1] as f64 - expected.transmittance).abs() < 2.0e-5);
+            assert_eq!(actual[2], expected.event_count as f32);
+        }
     }
 
     #[test]
