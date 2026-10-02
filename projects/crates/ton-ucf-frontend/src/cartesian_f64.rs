@@ -2,8 +2,36 @@
 
 use super::{b, BinOp, Expr, Program, ProgramBuilder, ScalarTy, StructuredFunctionBuilder, Ty, UnOp};
 
-fn snapshot(builder: &mut StructuredFunctionBuilder, state: [Expr; 8]) -> [Expr; 8] {
+pub(super) fn snapshot(builder: &mut StructuredFunctionBuilder, state: [Expr; 8]) -> [Expr; 8] {
     state.map(|value| Expr::LoadLocal(builder.let_value(Ty::f64(), value)))
+}
+
+pub(super) fn rk4(builder: &mut StructuredFunctionBuilder, initial: &[Expr; 8], mass: &Expr,
+    angular: &Expr, step: &Expr,
+) -> ([Expr; 8], Expr) {
+    let half = b(builder, BinOp::Mul, step.clone(), builder.const_f64(0.5));
+    let (first, mut valid) = derivative(builder, initial, mass, angular);
+    let middle = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, initial[index].clone(),
+        b(builder, BinOp::Mul, half.clone(), first[index].clone()))));
+    let (second, usable) = derivative(builder, &middle, mass, angular);
+    valid = builder.select(valid, usable, Expr::ConstBool(false));
+    let middle = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, initial[index].clone(),
+        b(builder, BinOp::Mul, half.clone(), second[index].clone()))));
+    let (third, usable) = derivative(builder, &middle, mass, angular);
+    valid = builder.select(valid, usable, Expr::ConstBool(false));
+    let end = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, initial[index].clone(),
+        b(builder, BinOp::Mul, step.clone(), third[index].clone()))));
+    let (fourth, usable) = derivative(builder, &end, mass, angular);
+    valid = builder.select(valid, usable, Expr::ConstBool(false));
+    let next = snapshot(builder, std::array::from_fn(|index| {
+        let weighted = b(builder, BinOp::Add,
+            b(builder, BinOp::Add, first[index].clone(), b(builder, BinOp::Mul, builder.const_f64(2.0), second[index].clone())),
+            b(builder, BinOp::Add, b(builder, BinOp::Mul, builder.const_f64(2.0), third[index].clone()), fourth[index].clone()));
+        b(builder, BinOp::Add, initial[index].clone(), b(builder, BinOp::Mul, step.clone(), b(builder, BinOp::Div, weighted, builder.const_f64(6.0))))
+    }));
+    let (_, usable) = derivative(builder, &next, mass, angular);
+    valid = builder.select(valid, usable, Expr::ConstBool(false));
+    (next, valid)
 }
 
 fn derivative(builder: &mut StructuredFunctionBuilder, state: &[Expr; 8], mass: &Expr, angular: &Expr) -> ([Expr; 8], Expr) {
@@ -67,28 +95,7 @@ impl SchwarzschildCartesianF64Rk4Builder {
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f64(0.0));
         builder.bounded_while(running, self.maximum_steps, |builder| {
             let initial = snapshot(builder, state.map(Expr::LoadLocal));
-            let half = b(builder, BinOp::Mul, step.clone(), builder.const_f64(0.5));
-            let (first, mut valid) = derivative(builder, &initial, &mass, &angular);
-            let middle = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, initial[index].clone(),
-                b(builder, BinOp::Mul, half.clone(), first[index].clone()))));
-            let (second, usable) = derivative(builder, &middle, &mass, &angular);
-            valid = builder.select(valid, usable, Expr::ConstBool(false));
-            let middle = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, initial[index].clone(),
-                b(builder, BinOp::Mul, half.clone(), second[index].clone()))));
-            let (third, usable) = derivative(builder, &middle, &mass, &angular);
-            valid = builder.select(valid, usable, Expr::ConstBool(false));
-            let end = snapshot(builder, std::array::from_fn(|index| b(builder, BinOp::Add, initial[index].clone(),
-                b(builder, BinOp::Mul, step.clone(), third[index].clone()))));
-            let (fourth, usable) = derivative(builder, &end, &mass, &angular);
-            valid = builder.select(valid, usable, Expr::ConstBool(false));
-            let next = snapshot(builder, std::array::from_fn(|index| {
-                let weighted = b(builder, BinOp::Add,
-                    b(builder, BinOp::Add, first[index].clone(), b(builder, BinOp::Mul, builder.const_f64(2.0), second[index].clone())),
-                    b(builder, BinOp::Add, b(builder, BinOp::Mul, builder.const_f64(2.0), third[index].clone()), fourth[index].clone()));
-                b(builder, BinOp::Add, initial[index].clone(), b(builder, BinOp::Mul, step.clone(), b(builder, BinOp::Div, weighted, builder.const_f64(6.0))))
-            }));
-            let (_, usable) = derivative(builder, &next, &mass, &angular);
-            valid = builder.select(valid, usable, Expr::ConstBool(false));
+            let (next, valid) = rk4(builder, &initial, &mass, &angular, &step);
             let valid = Expr::LoadLocal(builder.let_value(Ty::Scalar(ScalarTy::Bool), valid));
             for index in 0..8 { builder.store_local(state[index], builder.select(valid.clone(), next[index].clone(), initial[index].clone())); }
             builder.store_local(status, builder.select(valid, builder.const_f64(0.0), builder.const_f64(1.0)));
