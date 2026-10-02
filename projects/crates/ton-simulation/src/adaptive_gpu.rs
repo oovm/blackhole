@@ -310,6 +310,60 @@ mod tests {
     use ton_types::Vec3;
 
     #[test]
+    fn cartesian_f64_native_disk_crossing_converges_on_critical_ray() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let (horizontal, vertical) = (((9.5 / 16.0) * 2.0 - 1.0) * 16.0 / 9.0, 1.0 - (1.5 / 9.0) * 2.0);
+        let initial = SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(horizontal, vertical)).unwrap();
+        let angular = initial.angular_momentum();
+        let input = [initial.t, initial.position.x, initial.position.y, initial.position.z,
+            initial.energy, initial.velocity.x, initial.velocity.y, initial.velocity.z, angular.dot(angular)];
+        let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0)
+            .localization(1.0e-12, 64).build().unwrap();
+        let integration = ton_geodesic::AdaptiveRk4Config::builder().step_range(1.0e-8, 0.01)
+            .tolerances(1.0e-13, 1.0e-13).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).events(events).integration(integration).build().unwrap();
+        let reference = ton_geodesic::schwarzschild_cartesian_adaptive_trace(initial, config).unwrap();
+        let expected = reference.disk_events[0];
+        let expected_radius = expected.event.state.position.length();
+        let program = ton_ucf_frontend::SchwarzschildCartesianF64DiskBuilder::new().maximum_steps(8192).build().unwrap();
+        let mut backend = VulkanBackend::new().unwrap();
+        let mut previous_error = f64::INFINITY;
+        for step in [0.08, 0.04, 0.02, 0.01] {
+            let task = crate::ucf_physics::dispatch_task(76, &program, 1, ResourceId(73), 2, 1, Some(ResourceId(71)),
+                BTreeMap::from([("buffer_2".into(), ParamValue::I64(72)), ("uniform_0".into(), ParamValue::F64(1.0)),
+                    ("uniform_1".into(), ParamValue::F64(step)), ("uniform_2".into(), ParamValue::F64(6.0)),
+                    ("uniform_3".into(), ParamValue::F64(20.0))])).unwrap();
+            let graph = Graph { resources: ResourceGraph { nodes: [(71, 9, Access::Read), (72, 12, Access::Write), (73, 1, Access::Write)]
+                .into_iter().map(|(id, stride, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
+                    domain: Domain::Vram, access, byte_size: Some(stride * 8) }).collect() },
+                tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+            graph.validate().unwrap();
+            backend.prepare(&graph).unwrap(); backend.write_f64(ResourceId(71), &input).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            let actual = backend.read_f64(ResourceId(72)).unwrap();
+            assert_eq!(actual[8], 2.0);
+            assert_eq!(backend.read_f64(ResourceId(73)).unwrap(), [2.0]);
+            assert!(actual[11] <= 1.0e-11);
+            let error = (actual[9] - expected_radius).abs();
+            eprintln!("native F64 disk step={step}, radius={}, reference={expected_radius}, error={error}, affine_error={}, residual={}",
+                actual[9], (actual[10] - expected.affine_parameter).abs(), actual[11]);
+            assert!(error * 8.0 < previous_error, "F64 disk radius must converge at near-fourth order: {error} versus {previous_error}");
+            previous_error = error;
+            let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+            for (slot, value) in [1.0, step, 6.0, 20.0].into_iter().enumerate() {
+                cpu.with_uniform(slot as u32, ton_ucf_frontend::Value::F64(value));
+            }
+            cpu.with_buffer(1, input.into_iter().map(ton_ucf_frontend::Value::F64).collect());
+            cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F64(0.0); 12]);
+            cpu.run_parallel(&program, 1).unwrap();
+            for (actual, expected) in actual.iter().zip(cpu.buffer(2).unwrap()) {
+                assert!((actual - expected.as_f64().unwrap()).abs() < 1.0e-9);
+            }
+        }
+        assert!(previous_error < 1.0e-8);
+    }
+
+    #[test]
     fn cartesian_f64_native_rk4_matches_independent_reference_on_critical_ray() {
         let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
         let (horizontal, vertical) = (((9.5 / 16.0) * 2.0 - 1.0) * 16.0 / 9.0, 1.0 - (1.5 / 9.0) * 2.0);
