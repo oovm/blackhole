@@ -51,7 +51,7 @@ fn star_brightness(d: Vec3) -> f64 {
             let cx = iu + du;
             let cy = iv + dv;
             let seed = cell_hash(cx, cy, face, 0);
-            if seed < 0.018 {
+            if seed > 0.018 {
                 continue;
             }
             let su = cx as f64 + 0.12 + 0.76 * cell_hash(cx, cy, face, 1);

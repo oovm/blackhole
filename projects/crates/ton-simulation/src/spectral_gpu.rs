@@ -1,7 +1,7 @@
 //! 经验证轨迹、圆轨道频移、温度基线与谱色转换组成的原生 GPU 渲染链。
 
 use std::collections::BTreeMap;
-use ton_renderer::{Framebuffer, FramebufferEncoding};
+use ton_renderer::{sky_color, Framebuffer, FramebufferEncoding};
 use ton_types::{Camera, Rgb, TonError, TonResult};
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Graph, ResourceGraph, TaskGraph};
@@ -145,12 +145,16 @@ impl SchwarzschildSpectralGpuBuilder {
         let radiative = radiative_output.chunks_exact(4).map(|record| record.try_into().unwrap()).collect::<Vec<[f32; 4]>>();
         hashes.push(ton_ucf_frontend::program_hash(&transfer));
         let composite = ton_ucf_frontend::RadianceCompositeBuilder::new().build().map_err(TonError::Domain)?;
-        let mut composite_input = Vec::with_capacity(colors.len() + radiative.len() * 4);
-        for (color, transfer) in colors.chunks_exact(7).zip(&radiative) {
+        let mut composite_input = Vec::with_capacity(colors.len() + radiative.len() * 8);
+        for ((color, transfer), trace_record) in colors.chunks_exact(7).zip(&radiative).zip(&trace.records) {
             composite_input.extend_from_slice(color);
             composite_input.extend_from_slice(transfer);
+            let direction = ton_types::Vec3::new(trace_record[1], trace_record[2], trace_record[3]).normalize();
+            let sky = sky_color(direction).scale(0.35);
+            composite_input.extend([sky.r as f32, sky.g as f32, sky.b as f32]);
+            composite_input.push(if trace_record[8] == 2.0 { 2.0 } else { 1.0 });
         }
-        let composed = execute_stage(&mut backend, &composite, &composite_input, 11, 7, 137, &[1.0e-12], None)?;
+        let composed = execute_stage(&mut backend, &composite, &composite_input, 15, 7, 137, &[1.0e-12], None)?;
         hashes.push(ton_ucf_frontend::program_hash(&composite));
         let hdr = composed.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
         let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
@@ -345,11 +349,12 @@ mod tests {
         assert_eq!(output.hdr.len(), 144);
         let mut luminous = 0;
         for ((hdr, pixel), trace) in output.hdr.iter().zip(&output.framebuffer.pixels).zip(&output.trace.records) {
-            if trace[13] == 0.0 { assert_eq!(*hdr, [0.0; 3]); assert_eq!(*pixel, Rgb::BLACK); }
+            if trace[8] == 1.0 && trace[13] == 0.0 { assert_eq!(*hdr, [0.0; 3]); assert_eq!(*pixel, Rgb::BLACK); }
             else { luminous += 1; assert!(hdr.iter().any(|value| *value > 0.0)); }
         }
         assert!(output.hdr.iter().flatten().any(|value| *value > 1.0));
-        assert_eq!(luminous, output.trace.records.iter().filter(|record| record[13] != 0.0).count());
+        let expected_luminous = output.trace.records.iter().filter(|record| !(record[8] == 1.0 && record[13] == 0.0)).count();
+        assert_eq!(luminous, expected_luminous);
         assert_eq!(output.radiative.len(), output.hdr.len());
         assert!(output.radiative.iter().all(|record| record[3] == 1.0));
         let model = ton_disk::DiskRadiativeModel::new(1.0, 6.0, 0.8).unwrap();
