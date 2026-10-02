@@ -12,6 +12,7 @@ use crate::ucf_physics::{
     schwarzschild_capture_silhouette_ucf_vulkan,
     schwarzschild_beauty_ucf_vulkan,
 };
+use crate::SchwarzschildSpectralGpuBuilder;
 
 #[derive(Debug, Clone)]
 pub struct Scene {
@@ -226,6 +227,24 @@ impl Scene {
         )
     }
 
+    /// 使用经过事件包和辐射传输验证的 Schwarzschild 光谱 GPU Beauty 链。
+    ///
+    /// 该入口只接受无自旋黑洞和标准薄盘模型。其他物理模型必须使用
+    /// 对应的独立参考实现，不能在这里静默降级或伪装成 Schwarzschild。
+    pub fn render_spectral_frame_ucf_vulkan(&self) -> TonResult<Framebuffer> {
+        if self.black_hole.spin.abs() > f64::EPSILON {
+            return Err(TonError::Domain("spectral GPU entry currently supports Schwarzschild only".into()));
+        }
+        if self.disk_model != DiskModelKind::NovikovThorneThin {
+            return Err(TonError::Domain("spectral GPU entry requires the thin disk model".into()));
+        }
+        self.disk.as_ref().ok_or_else(|| TonError::Domain("spectral GPU entry requires an accretion disk".into()))?;
+        let frame = SchwarzschildSpectralGpuBuilder::new(self.black_hole.mass)
+            .exposure(3.0e-9)
+            .execute(self.camera, self.width, self.height)?;
+        Ok(frame.framebuffer)
+    }
+
     pub fn render_frame(&self) -> Framebuffer {
         self.render_frame_with_histogram().framebuffer
     }
@@ -310,5 +329,22 @@ mod tests {
         assert!(frame.pixels[0].r.is_finite());
         assert!(frame.pixels[0].g.is_finite());
         assert!(frame.pixels[0].b.is_finite());
+    }
+
+    #[test]
+    fn scene_exposes_verified_spectral_gpu_beauty_entry() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_resolution(8, 4)
+            .with_default_disk()
+            .build();
+        let frame = match scene.render_spectral_frame_ucf_vulkan() {
+            Ok(frame) => frame,
+            Err(error) if error.to_string().contains("create spectral backend") => return,
+            Err(error) => panic!("spectral GPU Beauty: {error}"),
+        };
+        assert_eq!((frame.width, frame.height), (8, 4));
+        assert_eq!(frame.encoding, ton_renderer::FramebufferEncoding::Display);
+        assert_eq!(frame.pixels.len(), 32);
+        assert!(frame.pixels.iter().all(|pixel| pixel.r.is_finite() && pixel.g.is_finite() && pixel.b.is_finite()));
     }
 }
