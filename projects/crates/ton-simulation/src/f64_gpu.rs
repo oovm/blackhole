@@ -1,12 +1,30 @@
 //! F64 通用 UCF 程序的 GPU 相机与分块追踪编排。
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 use ton_types::{Camera, TonError, TonResult};
-use ucf_backend_vulkan::VulkanBackend;
+use ucf_backend_vulkan::{ProgramCacheStats, VulkanBackend};
 use ucf_ir::{Graph, ResourceGraph, TaskGraph};
 use ucf_scheduler::Backend;
 use ucf_types::{Access, Domain, ParamValue, ResourceId, ResourceKind, ResourceNode};
 use crate::GpuTraceTermination;
+
+/// 主机观察到的 F64 追踪各阶段耗时，dispatch 含同步等待，不是 GPU timestamp。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct F64TraceTiming {
+    /// GPU 相机初态链的完整耗时，包含准备与传输。
+    pub camera: Duration,
+    /// 追踪程序构建与图资源准备耗时，不包含运行时 lowering。
+    pub preparation: Duration,
+    /// 逐 chunk 记录上传耗时。
+    pub upload: Duration,
+    /// 逐 chunk 原生执行、首次 lowering 与同步等待耗时。
+    pub dispatch: Duration,
+    /// 输出与状态读回耗时。
+    pub readback: Duration,
+    /// 完整调用耗时，包含设备创建和主机编排。
+    pub total: Duration,
+}
 
 /// 实际 F64 GPU 输出，状态布局与 F32 版本的字节宽度明确分离。
 #[derive(Debug)]
@@ -19,6 +37,10 @@ pub struct F64GpuTraceBatch {
     pub executed_program_hashes: Vec<u64>,
     /// 为保持末批资源容量一致而实际执行、但不进入图像的重复实例数。
     pub padded_instances: u32,
+    /// 实测主机阶段耗时，不以调色掩盖性能问题。
+    pub timing: F64TraceTiming,
+    /// 追踪后端的编译缓存统计，不代表实际 dispatch 数量。
+    pub program_cache: ProgramCacheStats,
 }
 
 impl F64GpuTraceBatch {
@@ -83,6 +105,7 @@ impl SchwarzschildF64GpuTraceBuilder {
 
     /// GPU 相机、GPU 初态与 GPU 追踪，不调用 TON 参考初态或参考渲染。
     pub fn execute_camera(self, camera: Camera, width: u32, height: u32) -> TonResult<F64GpuTraceBatch> {
+        let started = Instant::now();
         self.validate()?;
         width.checked_mul(height).filter(|count| *count > 0)
             .ok_or_else(|| TonError::Domain("F64 camera resolution is zero or exceeds u32 capacity".into()))?;
@@ -92,22 +115,32 @@ impl SchwarzschildF64GpuTraceBuilder {
         let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create F64 trace backend: {error}")))?;
         let capacity = coordinates.len().min(self.batch_instances as usize);
         let mut result = F64GpuTraceBatch { records: Vec::with_capacity(coordinates.len()), terminations: Vec::with_capacity(coordinates.len()),
-            executed_program_hashes: Vec::new(), padded_instances: 0 };
+            executed_program_hashes: Vec::new(), padded_instances: 0, timing: F64TraceTiming::default(), program_cache: ProgramCacheStats::default() };
         for batch in coordinates.chunks(capacity) {
             let mut padded = batch.to_vec();
             padded.resize(capacity, batch[0]);
+            let camera_started = Instant::now();
             let (initial, hash) = crate::adaptive_gpu::initialize_f64_camera(&mut backend, camera, &padded, self.mass)?;
+            result.timing.camera += camera_started.elapsed();
             let output = self.execute_initial_with_backend(&mut backend, &initial)?;
+            result.timing.preparation += output.timing.preparation;
+            result.timing.upload += output.timing.upload;
+            result.timing.dispatch += output.timing.dispatch;
+            result.timing.readback += output.timing.readback;
             result.records.extend(output.records.into_iter().take(batch.len()));
             result.terminations.extend(output.terminations.into_iter().take(batch.len()));
             result.executed_program_hashes.push(hash);
             result.executed_program_hashes.extend(output.executed_program_hashes);
             result.padded_instances += (capacity - batch.len()) as u32;
         }
+        result.timing.total = started.elapsed();
+        result.program_cache = backend.program_cache_stats();
         Ok(result)
     }
 
     pub(crate) fn execute_initial_with_backend(self, backend: &mut VulkanBackend, initial: &[[f64; 9]]) -> TonResult<F64GpuTraceBatch> {
+        let started = Instant::now();
+        let mut timing = F64TraceTiming::default();
         self.validate()?;
         if initial.is_empty() { return Err(TonError::Domain("empty F64 trace batch".into())); }
         let count = u32::try_from(initial.len()).map_err(|_| TonError::Domain("F64 trace batch exceeds u32 capacity".into()))?;
@@ -122,6 +155,7 @@ impl SchwarzschildF64GpuTraceBuilder {
         while scheduled < self.maximum_steps && records.iter().any(|record| record[8] == 0.0) {
             let steps = self.chunk_steps.min(self.maximum_steps - scheduled);
             if steps != prepared_steps {
+                let prepare_started = Instant::now();
                 let program = ton_ucf_frontend::SchwarzschildCartesianF64TraceBuilder::new().maximum_steps(steps)
                     .surface_tolerance(1.0e-11 * self.mass).build().map_err(TonError::Domain)?;
                 let mut params = [self.mass, self.step, self.capture, self.escape, self.inner, self.outer]
@@ -136,13 +170,20 @@ impl SchwarzschildF64GpuTraceBuilder {
                 backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare F64 trace graph: {error}")))?;
                 prepared = Some((graph, ton_ucf_frontend::program_hash(&program)));
                 prepared_steps = steps;
+                timing.preparation += prepare_started.elapsed();
             }
             let (graph, hash) = prepared.as_ref().unwrap();
+            let upload_started = Instant::now();
             backend.write_f64(ResourceId(91), &records.iter().flatten().copied().collect::<Vec<_>>())
                 .map_err(|error| TonError::Domain(format!("upload F64 trace records: {error}")))?;
+            timing.upload += upload_started.elapsed();
+            let dispatch_started = Instant::now();
             backend.run_prepared(graph).map_err(|error| TonError::Domain(format!("execute F64 trace graph: {error}")))?;
+            timing.dispatch += dispatch_started.elapsed();
+            let readback_started = Instant::now();
             let output = backend.read_f64(ResourceId(92)).map_err(|error| TonError::Domain(format!("read F64 trace records: {error}")))?;
             let status = backend.read_f64(ResourceId(93)).map_err(|error| TonError::Domain(format!("read F64 trace status: {error}")))?;
+            timing.readback += readback_started.elapsed();
             if output.len() != records.len() * 29 || status.len() != records.len()
                 || output.iter().any(|value| !value.is_finite()) || output.chunks_exact(29).zip(&status).any(|(record, status)| record[8] != *status) {
                 return Err(TonError::Domain("invalid F64 trace output or scalar status mismatch".into()));
@@ -157,7 +198,8 @@ impl SchwarzschildF64GpuTraceBuilder {
             4.0 => Ok(GpuTraceTermination::EventLocalizationFailure), 5.0 => Ok(GpuTraceTermination::InvalidInput),
             status => Err(TonError::Domain(format!("unknown F64 trace status {status}"))),
         }).collect::<TonResult<Vec<_>>>()?;
-        Ok(F64GpuTraceBatch { records, terminations, executed_program_hashes: hashes, padded_instances: 0 })
+        timing.total = started.elapsed();
+        Ok(F64GpuTraceBatch { records, terminations, executed_program_hashes: hashes, padded_instances: 0, timing, program_cache: backend.program_cache_stats() })
     }
 }
 
@@ -182,6 +224,9 @@ mod tests {
         assert_eq!(plain.terminations, batched.terminations);
         assert_eq!(plain.padded_instances, 0); assert_eq!(batched.padded_instances, 1);
         assert_eq!(batched.records.len(), 15); assert_eq!(batched.executed_program_hashes.len(), 4);
+        assert_eq!(batched.program_cache.lowerings, 2);
+        assert_eq!(batched.program_cache.hits, 2);
+        assert!(batched.timing.total >= batched.timing.camera + batched.timing.preparation + batched.timing.upload + batched.timing.dispatch + batched.timing.readback);
         assert!(SchwarzschildF64GpuTraceBuilder::new(1.0).batch_instances(8193).execute_camera(camera, 5, 3).is_err());
     }
 

@@ -4,7 +4,7 @@
 mod convergence;
 mod adaptive_gpu;
 mod f64_gpu;
-pub use f64_gpu::{F64GpuTraceBatch, SchwarzschildF64GpuTraceBuilder};
+pub use f64_gpu::{F64GpuTraceBatch, F64TraceTiming, SchwarzschildF64GpuTraceBuilder};
 mod spectral_gpu;
 pub use spectral_gpu::{SchwarzschildSpectralGpuBuilder, SpectralGpuFrame};
 mod params;

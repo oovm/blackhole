@@ -108,6 +108,7 @@ fn main() -> ExitCode {
         eprintln!("  completed trace programs={}, shading hashes={:?}, HDR pixels={}", output.trace.executed_program_hashes.len(),
             output.shading_program_hashes, output.hdr.iter().filter(|pixel| pixel.iter().any(|value| *value > 1.0)).count());
         eprintln!("  padded GPU instances excluded from image={}", output.trace.padded_instances);
+        eprintln!("  trace host timing={:?}, program compile cache={:?}", output.trace.timing, output.trace.program_cache);
         (output.framebuffer, 0.0)
     } else if ucf_vulkan {
         if render_mode != RenderMode::Beauty {
