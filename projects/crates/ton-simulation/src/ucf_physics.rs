@@ -9,6 +9,8 @@ use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
 use ton_ucf_frontend::{camera_ray_batch, compose_sky_batch, disk_shade_novikov_from_geodesic_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step, tone_map_aces_batch};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
+
+const VULKAN_GEODESIC_CHUNK_STEPS: u32 = 64;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
 use ucf_scheduler::Backend;
 use ucf_types::{Access, Domain, Objective, ParamValue, Priority, ResourceId, ResourceKind, ResourceNode, ShaderId, TaskId, TaskKind, TaskNode};
@@ -762,7 +764,7 @@ pub fn schwarzschild_disk_radiance_ucf_vulkan(
     let mut disk_radii = vec![0.0; states.len()];
     let mut disk_dopplers = vec![1.0; states.len()];
     let mut statuses = vec![0u32; states.len()];
-    for _ in 0..max_steps.div_ceil(16).max(1) {
+    for _ in 0..max_steps.div_ceil(VULKAN_GEODESIC_CHUNK_STEPS).max(1) {
         let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
             bh.mass,
             &states,
@@ -774,7 +776,7 @@ pub fn schwarzschild_disk_radiance_ucf_vulkan(
             outer_radius,
             step,
             escape_radius,
-            16,
+            VULKAN_GEODESIC_CHUNK_STEPS,
         )?;
         for (index, (state, status, hit, radius, doppler)) in results.into_iter().enumerate() {
             states[index] = state;
@@ -969,7 +971,7 @@ pub fn schwarzschild_beauty_ucf_vulkan(
     let mut geodesic_backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan Beauty geodesic backend: {e}")))?;
     let mut completed_steps = 0u32;
     while completed_steps < max_steps && statuses.iter().any(|status| *status == 0) {
-        let chunk_steps = (max_steps - completed_steps).min(16);
+        let chunk_steps = (max_steps - completed_steps).min(VULKAN_GEODESIC_CHUNK_STEPS);
         let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
             &mut geodesic_backend,
             bh.mass,
