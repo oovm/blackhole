@@ -17,6 +17,8 @@ mod orbit;
 mod radiance;
 mod disk_frequency;
 pub use disk_frequency::schwarzschild_disk_frequency_shift;
+mod thermal_spectrum;
+pub use thermal_spectrum::{blackbody_spectral_radiance, observed_blackbody_spectral_radiance};
 mod radiance_dispatch;
 mod ray;
 mod sem_classical;
