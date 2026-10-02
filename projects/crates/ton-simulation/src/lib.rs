@@ -26,6 +26,7 @@ pub use ucf_physics::{
     schwarzschild_geodesic_integrate_ucf_vulkan,
     schwarzschild_geodesic_integrate_ucf_vulkan_batch,
     schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk,
+    disk_radiance_ucf_vulkan_from_geodesic_state,
     schwarzschild_geodesic_integrate_ucf_cpu_rays, schwarzschild_geodesic_integrate_ucf_vulkan_rays,
     schwarzschild_geodesic_diagnostic_ucf_vulkan,
     schwarzschild_initial_state_ucf_cpu_batch, schwarzschild_initial_state_ucf_vulkan_batch,

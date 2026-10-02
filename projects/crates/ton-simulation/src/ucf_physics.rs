@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_geodesic_initial_state, schwarzschild_geodesic_
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, disk_shade_novikov_from_geodesic_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -622,6 +622,55 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
             output[base + 12] as f64,
         )
     }).collect())
+}
+
+/// 由 Vulkan UCF backend 从扩展测地线状态资源生成批量盘面 radiance。
+///
+/// `state_buffer` 每个实例必须包含十四个 `f32`，盘面 Program 只读取其中的
+/// `disk_radius` 与 `disk_doppler` 字段。输入输出均通过 UCF 资源提交。
+pub fn disk_radiance_ucf_vulkan_from_geodesic_state(
+    state_buffer: &[f32],
+    count: u32,
+    inner_radius: f64,
+    outer_radius: f64,
+    mass: f64,
+    accretion_rate: f64,
+) -> TonResult<Vec<f32>> {
+    let expected = usize::try_from(count)
+        .map_err(|_| TonError::Domain("Vulkan disk count exceeds usize capacity".into()))?
+        .saturating_mul(14);
+    if state_buffer.len() != expected {
+        return Err(TonError::Domain("Vulkan disk state buffer has invalid length".into()));
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let program = disk_shade_novikov_from_geodesic_batch();
+    let task = dispatch_task(35, &program, count, ResourceId(19), Some(ResourceId(18)), BTreeMap::from([
+        ("uniform_0".into(), ParamValue::F64(inner_radius)),
+        ("uniform_1".into(), ParamValue::F64(outer_radius)),
+        ("uniform_2".into(), ParamValue::F64(mass)),
+        ("uniform_3".into(), ParamValue::F64(accretion_rate)),
+    ]))?;
+    let graph = Graph {
+        resources: ResourceGraph {
+            nodes: vec![
+                ResourceNode { id: ResourceId(18), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 14 * 4) },
+                ResourceNode { id: ResourceId(19), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 3 * 4) },
+            ],
+        },
+        tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+    };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan disk radiance graph: {e}")))?;
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan disk radiance backend: {e}")))?;
+    backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan disk radiance graph: {e}")))?;
+    backend.write_f32(ResourceId(18), state_buffer).map_err(|e| TonError::Domain(format!("upload Vulkan disk state: {e}")))?;
+    backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan disk radiance graph: {e}")))?;
+    let output = backend.read_f32(ResourceId(19)).map_err(|e| TonError::Domain(format!("read Vulkan disk radiance: {e}")))?;
+    if output.len() != usize::try_from(count).unwrap_or(0).saturating_mul(3) {
+        return Err(TonError::Domain("Vulkan disk radiance output has invalid length".into()));
+    }
+    Ok(output)
 }
 
 /// 从相机射线开始，依次执行 Vulkan 初态 Program 与 Vulkan 有界测地线 chunk。
