@@ -3,6 +3,8 @@
 
 mod convergence;
 mod adaptive_gpu;
+mod f64_gpu;
+pub use f64_gpu::{F64GpuTraceBatch, SchwarzschildF64GpuTraceBuilder};
 mod params;
 mod scene;
 mod ucf_cpu;
