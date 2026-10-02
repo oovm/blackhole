@@ -9,6 +9,40 @@ use ucf_ir::{Graph, ResourceGraph, TaskGraph};
 use ucf_scheduler::Backend;
 use ucf_types::{Access, Domain, ParamValue, ResourceId, ResourceKind, ResourceNode};
 
+pub(crate) fn initialize_f64_camera(
+    backend: &mut VulkanBackend, camera: Camera, coordinates: &[(f64, f64)], mass: f64,
+) -> TonResult<(Vec<[f64; 9]>, u64)> {
+    if coordinates.is_empty() || !mass.is_finite() || mass <= 0.0
+        || !camera.fov_y.is_finite() || camera.fov_y <= 0.0 || camera.fov_y >= std::f64::consts::PI {
+        return Err(TonError::Domain("invalid F64 camera configuration".into()));
+    }
+    let count = u32::try_from(coordinates.len()).map_err(|_| TonError::Domain("F64 camera batch exceeds u32 capacity".into()))?;
+    let program = ton_ucf_frontend::SchwarzschildCartesianF64CameraBuilder::new().build().map_err(TonError::Domain)?;
+    let uniforms = [camera.position.x, camera.position.y, camera.position.z,
+        camera.forward.x, camera.forward.y, camera.forward.z, camera.right.x, camera.right.y, camera.right.z,
+        camera.up.x, camera.up.y, camera.up.z, (camera.fov_y * 0.5).tan(), mass];
+    let mut params = uniforms.into_iter().enumerate().map(|(slot, value)|
+        (format!("uniform_{slot}"), ParamValue::F64(value))).collect::<BTreeMap<_, _>>();
+    params.insert("buffer_2".into(), ParamValue::I64(82));
+    let task = crate::ucf_physics::dispatch_task(77, &program, count, ResourceId(83), 2, 1, Some(ResourceId(81)), params)?;
+    let graph = Graph { resources: ResourceGraph { nodes: [(81, 2, Access::Read), (82, 9, Access::Write), (83, 1, Access::Write)]
+        .into_iter().map(|(id, stride, access)| ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer,
+            domain: Domain::Vram, access, byte_size: Some(u64::from(count) * stride * 8) }).collect() },
+        tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+    graph.validate().map_err(|error| TonError::Domain(format!("validate F64 camera graph: {error}")))?;
+    backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare F64 camera graph: {error}")))?;
+    let input = coordinates.iter().flat_map(|(horizontal, vertical)| [*horizontal, *vertical]).collect::<Vec<_>>();
+    backend.write_f64(ResourceId(81), &input).map_err(|error| TonError::Domain(format!("upload F64 pixel coordinates: {error}")))?;
+    backend.run_prepared(&graph).map_err(|error| TonError::Domain(format!("execute F64 camera graph: {error}")))?;
+    let status = backend.read_f64(ResourceId(83)).map_err(|error| TonError::Domain(format!("read F64 camera status: {error}")))?;
+    let output = backend.read_f64(ResourceId(82)).map_err(|error| TonError::Domain(format!("read F64 camera states: {error}")))?;
+    if status.len() != coordinates.len() || status.iter().any(|value| *value != 0.0)
+        || output.len() != coordinates.len() * 9 || output.iter().any(|value| !value.is_finite()) {
+        return Err(TonError::Domain("F64 camera rejected input or produced invalid output".into()));
+    }
+    Ok((output.chunks_exact(9).map(|value| value.try_into().unwrap()).collect(), ton_ucf_frontend::program_hash(&program)))
+}
+
 /// 在原生 Vulkan UCF backend 上执行笛卡尔追踪记录的圆轨道频移 Builder。
 /// 输入和输出仍是 TON 负责解释的布局，UCF 只执行通用程序。
 pub fn execute_cartesian_frequency(
@@ -315,7 +349,7 @@ mod tests {
         let (horizontal, vertical) = (((9.5 / 16.0) * 2.0 - 1.0) * 16.0 / 9.0, 1.0 - (1.5 / 9.0) * 2.0);
         let initial = SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(horizontal, vertical)).unwrap();
         let angular = initial.angular_momentum();
-        let input = [initial.t, initial.position.x, initial.position.y, initial.position.z,
+        let ideal_input = [initial.t, initial.position.x, initial.position.y, initial.position.z,
             initial.energy, initial.velocity.x, initial.velocity.y, initial.velocity.z, angular.dot(angular)];
         let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0)
             .localization(1.0e-12, 64).build().unwrap();
@@ -327,6 +361,10 @@ mod tests {
         let expected_radius = expected.event.state.position.length();
         let program = ton_ucf_frontend::SchwarzschildCartesianF64DiskBuilder::new().maximum_steps(8192).build().unwrap();
         let mut backend = VulkanBackend::new().unwrap();
+        let (seeds, hash) = initialize_f64_camera(&mut backend, camera, &[(horizontal, vertical)], 1.0).unwrap();
+        assert_eq!(hash, ton_ucf_frontend::program_hash(&ton_ucf_frontend::SchwarzschildCartesianF64CameraBuilder::new().build().unwrap()));
+        let input = seeds[0];
+        for (actual, expected) in input.iter().zip(ideal_input) { assert!((actual - expected).abs() < 1.0e-12); }
         let mut previous_error = f64::INFINITY;
         for step in [0.08, 0.04, 0.02, 0.01] {
             let task = crate::ucf_physics::dispatch_task(76, &program, 1, ResourceId(73), 2, 1, Some(ResourceId(71)),
@@ -361,6 +399,33 @@ mod tests {
             }
         }
         assert!(previous_error < 1.0e-8);
+    }
+
+    #[test]
+    fn cartesian_f64_native_camera_batch_matches_independent_initial_states() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let coordinates = (0..9).flat_map(|y| (0..16).map(move |x|
+            (((x as f64 + 0.5) / 16.0 * 2.0 - 1.0) * 16.0 / 9.0, 1.0 - (y as f64 + 0.5) / 9.0 * 2.0))).collect::<Vec<_>>();
+        let mut backend = VulkanBackend::new().unwrap();
+        let (seeds, _) = initialize_f64_camera(&mut backend, camera, &coordinates, 1.0).unwrap();
+        assert_eq!(seeds.len(), coordinates.len());
+        let mut maximum_error = 0.0f64;
+        for (seed, &(horizontal, vertical)) in seeds.iter().zip(&coordinates) {
+            let expected = SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(horizontal, vertical)).unwrap();
+            let angular = expected.angular_momentum();
+            let expected = [expected.t, expected.position.x, expected.position.y, expected.position.z,
+                expected.energy, expected.velocity.x, expected.velocity.y, expected.velocity.z, angular.dot(angular)];
+            for (actual, expected) in seed.iter().zip(expected) {
+                maximum_error = maximum_error.max((actual - expected).abs());
+                assert!((actual - expected).abs() < 1.0e-12);
+            }
+            let state = SchwarzschildCartesianNullState { t: seed[0], position: Vec3::new(seed[1], seed[2], seed[3]),
+                energy: seed[4], velocity: Vec3::new(seed[5], seed[6], seed[7]) };
+            assert!(state.null_residual(1.0) < 1.0e-14);
+        }
+        eprintln!("native F64 camera batch: count={}, max_initial_state_error={maximum_error}", seeds.len());
+        assert!(initialize_f64_camera(&mut backend, camera, &[(f64::NAN, 0.0)], 1.0).is_err());
+        assert!(initialize_f64_camera(&mut backend, camera, &[], 1.0).is_err());
     }
 
     #[test]
