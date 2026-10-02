@@ -36,6 +36,24 @@ impl<const MAX_EVENTS: usize> DiskEventBuffer<MAX_EVENTS> {
 
     /// 展平为 GPU buffer 顺序，包含固定容量尾部零填充。
     pub fn flatten(&self) -> Vec<f64> { self.events.iter().flatten().copied().collect() }
+
+    /// 展平为 UCF 事件资源顺序：`[count, overflow, event[0..N]]`。
+    ///
+    /// 该构造只接受未超容量的参考结果，因此 overflow 固定为零。超容量
+    /// 结果必须由 `from_events` 拒绝，不能以截断数据进入后续辐射计算。
+    pub fn flatten_with_header(&self) -> Vec<f64> {
+        let mut output = Vec::with_capacity(2 + MAX_EVENTS * 9);
+        output.push(self.count as f64);
+        output.push(0.0);
+        output.extend(self.flatten());
+        output
+    }
+
+    /// UCF 事件资源的固定 F64 元素数量。
+    pub const fn element_len() -> usize { 2 + MAX_EVENTS * 9 }
+
+    /// UCF 事件资源的固定字节数。
+    pub const fn byte_len() -> usize { Self::element_len() * std::mem::size_of::<f64>() }
 }
 
 #[cfg(test)]
@@ -47,6 +65,8 @@ mod tests {
         let buffer = DiskEventBuffer::<4>::from_events(&[]).unwrap();
         assert_eq!(buffer.count, 0);
         assert_eq!(buffer.flatten().len(), 36);
+        assert_eq!(buffer.flatten_with_header().len(), DiskEventBuffer::<4>::element_len());
+        assert_eq!(DiskEventBuffer::<4>::byte_len(), 38 * 8);
         assert!(buffer.flatten().iter().all(|value| *value == 0.0));
     }
 
@@ -66,5 +86,10 @@ mod tests {
         assert_eq!(buffer.count, 3);
         assert_eq!(buffer.events[2][0], 2.0);
         assert_eq!(buffer.events[3], [0.0; 9]);
+        let flat = buffer.flatten_with_header();
+        assert_eq!(flat[0], 3.0);
+        assert_eq!(flat[1], 0.0);
+        assert_eq!(flat[2], 0.0);
+        assert_eq!(flat[2 + 2 * 9], 2.0);
     }
 }
