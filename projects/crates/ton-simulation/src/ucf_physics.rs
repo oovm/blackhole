@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_geodesic_initial_state, schwarzschild_geodesic_
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, disk_shade_novikov_from_geodesic_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step};
+use ton_ucf_frontend::{camera_ray_batch, disk_shade_novikov_from_geodesic_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step, tone_map_aces_batch};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -777,6 +777,40 @@ pub fn schwarzschild_disk_radiance_ucf_vulkan(
         bh.mass,
         accretion_rate,
     )
+}
+
+/// 由 Vulkan UCF backend 执行批量 ACES tone map。
+pub fn tone_map_ucf_vulkan_batch(hdr: &[f32], count: u32) -> TonResult<Vec<f32>> {
+    let expected = usize::try_from(count)
+        .map_err(|_| TonError::Domain("Vulkan tone-map count exceeds usize capacity".into()))?
+        .saturating_mul(3);
+    if hdr.len() != expected {
+        return Err(TonError::Domain("Vulkan tone-map input has invalid length".into()));
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let program = tone_map_aces_batch();
+    let task = dispatch_task(36, &program, count, ResourceId(20), Some(ResourceId(21)), BTreeMap::new())?;
+    let graph = Graph {
+        resources: ResourceGraph {
+            nodes: vec![
+                ResourceNode { id: ResourceId(21), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 3 * 4) },
+                ResourceNode { id: ResourceId(20), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 3 * 4) },
+            ],
+        },
+        tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+    };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan tone-map graph: {e}")))?;
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan tone-map backend: {e}")))?;
+    backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan tone-map graph: {e}")))?;
+    backend.write_f32(ResourceId(21), hdr).map_err(|e| TonError::Domain(format!("upload Vulkan HDR buffer: {e}")))?;
+    backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan tone-map graph: {e}")))?;
+    let output = backend.read_f32(ResourceId(20)).map_err(|e| TonError::Domain(format!("read Vulkan display buffer: {e}")))?;
+    if output.len() != expected {
+        return Err(TonError::Domain("Vulkan tone-map output has invalid length".into()));
+    }
+    Ok(output)
 }
 
 /// 从相机射线开始，依次执行 Vulkan 初态 Program 与 Vulkan 有界测地线 chunk。

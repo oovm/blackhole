@@ -928,6 +928,38 @@ pub fn tone_map_aces() -> Program {
     ProgramBuilder::new().entry(builder).expect("TON tone map program must build").finish().expect("TON tone map program must validate")
 }
 
+/// 构建并行线性 HDR 到显示 RGB 的 ACES tone-map 程序。
+///
+/// 输入 buffer `1` 和输出 buffer `2` 均按每实例三个 `f32` 通道布局。
+pub fn tone_map_aces_batch() -> Program {
+    let mut builder = StructuredFunctionBuilder::new("tone_map_aces_batch");
+    let global = builder.global_id();
+    let input_base = builder.binary(BinOp::Mul, global.clone(), builder.const_u32(3));
+    let output_base = builder.binary(BinOp::Mul, global, builder.const_u32(3));
+    let zero = builder.const_f32(0.0);
+    let one = builder.const_f32(1.0);
+    let channel = |builder: &mut StructuredFunctionBuilder, input: Expr| {
+        let x = builder.binary(BinOp::Max, input, zero.clone());
+        let numerator = builder.binary(
+            BinOp::Mul,
+            x.clone(),
+            builder.binary(BinOp::Add, builder.binary(BinOp::Mul, builder.const_f32(2.51), x.clone()), builder.const_f32(0.03)),
+        );
+        let denominator = builder.binary(
+            BinOp::Add,
+            builder.binary(BinOp::Mul, x.clone(), builder.binary(BinOp::Add, builder.binary(BinOp::Mul, builder.const_f32(2.43), x), builder.const_f32(0.59))),
+            builder.const_f32(0.14),
+        );
+        builder.binary(BinOp::Min, one.clone(), builder.binary(BinOp::Max, zero.clone(), builder.binary(BinOp::Div, numerator, denominator)))
+    };
+    for component in 0..3u32 {
+        let input = builder.load_buffer(1, builder.binary(BinOp::Add, input_base.clone(), builder.const_u32(component)));
+        let mapped = channel(&mut builder, input);
+        builder.store_buffer(2, builder.binary(BinOp::Add, output_base.clone(), builder.const_u32(component)), mapped);
+    }
+    ProgramBuilder::new().structured_entry(builder, Ty::f32(), zero).expect("valid batch tone map builder").finish().expect("valid batch tone map program")
+}
+
 /// 构建泛光亮部提取程序。
 pub fn post_bloom_extract() -> Program {
     let mut builder = FunctionBuilder::new("post_bloom_extract");
@@ -1194,6 +1226,22 @@ mod integration_tests {
         interpreter.with_buffer(2, vec![Value::F32(0.0); 3]);
         interpreter.run_parallel(&program, 1).expect("state disk shade execution");
         assert!(interpreter.buffer(2).expect("radiance output").iter().any(|value| value.as_f64().expect("f32") > 0.0));
+    }
+
+    #[test]
+    fn batch_tone_map_validates_and_maps_hdr_channels() {
+        let program = tone_map_aces_batch();
+        validate_program(&program).expect("batch tone map must satisfy UCF validation");
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_buffer(1, vec![Value::F32(4.0), Value::F32(2.0), Value::F32(0.5)]);
+        interpreter.with_buffer(2, vec![Value::F32(0.0); 3]);
+        interpreter.run_parallel(&program, 1).expect("batch tone map execution");
+        let output = interpreter.buffer(2).expect("display output");
+        assert!(output.iter().all(|value| {
+            let value = value.as_f64().expect("f32 output");
+            (0.0..=1.0).contains(&value)
+        }));
+        assert!(output[0].as_f64().expect("red") > 0.9);
     }
 
     #[test]
