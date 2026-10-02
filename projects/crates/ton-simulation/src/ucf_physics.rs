@@ -585,6 +585,37 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
     escape_radius: f64,
     max_steps: u32,
 ) -> TonResult<Vec<(SphericalState, u32, bool, f64, f64)>> {
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan disk geodesic backend: {e}")))?;
+    schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
+        &mut backend,
+        mass,
+        states,
+        bound_flags,
+        disk_hits,
+        disk_radii,
+        disk_dopplers,
+        inner_radius,
+        outer_radius,
+        step,
+        escape_radius,
+        max_steps,
+    )
+}
+
+fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
+    backend: &mut VulkanBackend,
+    mass: f64,
+    states: &[SphericalState],
+    bound_flags: &[bool],
+    disk_hits: &[bool],
+    disk_radii: &[f64],
+    disk_dopplers: &[f64],
+    inner_radius: f64,
+    outer_radius: f64,
+    step: f64,
+    escape_radius: f64,
+    max_steps: u32,
+) -> TonResult<Vec<(SphericalState, u32, bool, f64, f64)>> {
     if states.is_empty() {
         return Ok(Vec::new());
     }
@@ -614,7 +645,6 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
         tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
     };
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan disk geodesic graph: {e}")))?;
-    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan disk geodesic backend: {e}")))?;
     backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan disk geodesic graph: {e}")))?;
     let input = states.iter().enumerate().flat_map(|(index, state)| [
         state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi,
@@ -936,10 +966,12 @@ pub fn schwarzschild_beauty_ucf_vulkan(
     let mut disk_radii = vec![0.0; states.len()];
     let mut disk_dopplers = vec![1.0; states.len()];
     let mut statuses = vec![0u32; states.len()];
+    let mut geodesic_backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan Beauty geodesic backend: {e}")))?;
     let mut completed_steps = 0u32;
     while completed_steps < max_steps && statuses.iter().any(|status| *status == 0) {
         let chunk_steps = (max_steps - completed_steps).min(16);
-        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
+            &mut geodesic_backend,
             bh.mass,
             &states,
             &bound_flags,
