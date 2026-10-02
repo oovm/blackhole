@@ -5,7 +5,7 @@ use ton_types::Rgb;
 use crate::framebuffer::{Framebuffer, FramebufferEncoding};
 
 /// 默认曝光乘子（线性 HDR，在色调映射之前应用）。
-pub const DEFAULT_EXPOSURE: f64 = 2.8;
+pub const DEFAULT_EXPOSURE: f64 = 0.82;
 
 /// ACES 拟合色调映射（单通道）。
 pub fn aces_filmic(x: f64) -> f64 {
@@ -151,12 +151,10 @@ fn box_blur_3x3(src: &[Rgb], width: u32, height: u32) -> Vec<Rgb> {
             let mut count = 0u32;
             for dy in -1i32..=1 {
                 for dx in -1i32..=1 {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx >= 0 && ny >= 0 && nx < w as i32 && ny < h as i32 {
-                        sum = sum.add(src[ny as usize * w + nx as usize]);
-                        count += 1;
-                    }
+                    let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                    let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                    sum = sum.add(src[ny * w + nx]);
+                    count += 1;
                 }
             }
             let inv = 1.0 / count as f64;
