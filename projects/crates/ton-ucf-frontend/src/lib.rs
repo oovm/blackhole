@@ -957,13 +957,39 @@ pub fn disk_shade_novikov() -> Program {
 /// `[r, g, b]`。uniform `0..3` 依次为内半径、外半径、质量和吸积率。
 /// 该程序是 TON 前端生成的普通 UCF 程序，不是 UCF 领域算子。
 pub fn disk_shade_novikov_batch() -> Program {
-    let mut builder = StructuredFunctionBuilder::new("disk_shade_novikov_batch");
+    disk_shade_novikov_from_state_batch_with_name(
+        "disk_shade_novikov_batch",
+        2,
+        0,
+        1,
+    )
+}
+
+/// 构建从测地线状态资源读取盘面交点的批量着色程序。
+///
+/// 输入每实例布局为十四个 `f32`，radius 位于偏移 11，Doppler 位于偏移 12。
+pub fn disk_shade_novikov_from_geodesic_batch() -> Program {
+    disk_shade_novikov_from_state_batch_with_name(
+        "disk_shade_novikov_from_geodesic_batch",
+        14,
+        11,
+        12,
+    )
+}
+
+fn disk_shade_novikov_from_state_batch_with_name(
+    name: &str,
+    input_stride: u32,
+    radius_offset: u32,
+    doppler_offset: u32,
+) -> Program {
+    let mut builder = StructuredFunctionBuilder::new(name);
     let global = builder.global_id();
     let index = |base: Expr, offset: u32| bin(BinOp::Add, base, Expr::ConstU32(offset));
-    let input_base = builder.binary(BinOp::Mul, global.clone(), builder.const_u32(2));
+    let input_base = builder.binary(BinOp::Mul, global.clone(), builder.const_u32(input_stride));
     let output_base = builder.binary(BinOp::Mul, global, builder.const_u32(3));
-    let radius = builder.load_buffer(1, index(input_base.clone(), 0));
-    let doppler = builder.load_buffer(1, index(input_base, 1));
+    let radius = builder.load_buffer(1, index(input_base.clone(), radius_offset));
+    let doppler = builder.load_buffer(1, index(input_base, doppler_offset));
     let inner = builder.load_uniform(0);
     let outer = builder.load_uniform(1);
     let mass = builder.load_uniform(2);
@@ -1116,6 +1142,24 @@ mod integration_tests {
         interpreter.with_buffer(0, state);
         interpreter.run_parallel(&program, 1).expect("disk geodesic execution");
         assert_eq!(interpreter.buffer(0).expect("extended state output").len(), 14);
+    }
+
+    #[test]
+    fn geodesic_state_disk_shade_reads_extended_offsets() {
+        let program = disk_shade_novikov_from_geodesic_batch();
+        validate_program(&program).expect("state disk shade must satisfy UCF validation");
+        let mut input = vec![Value::F32(0.0); 14];
+        input[11] = Value::F32(12.0);
+        input[12] = Value::F32(1.5);
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(6.0));
+        interpreter.with_uniform(1, Value::F32(40.0));
+        interpreter.with_uniform(2, Value::F32(1.0));
+        interpreter.with_uniform(3, Value::F32(1.0));
+        interpreter.with_buffer(1, input);
+        interpreter.with_buffer(2, vec![Value::F32(0.0); 3]);
+        interpreter.run_parallel(&program, 1).expect("state disk shade execution");
+        assert!(interpreter.buffer(2).expect("radiance output").iter().any(|value| value.as_f64().expect("f32") > 0.0));
     }
 
     #[test]
