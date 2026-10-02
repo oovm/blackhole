@@ -15,6 +15,8 @@ pub use cartesian_initial::SchwarzschildCartesianInitialStateBuilder;
 pub use cartesian_null::SchwarzschildCartesianAdaptiveChunkBuilder;
 mod cartesian_radiance;
 pub use cartesian_radiance::SchwarzschildDiskFrequencyBuilder;
+mod thermal_spectrum;
+pub use thermal_spectrum::BlackbodySpectrumBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
