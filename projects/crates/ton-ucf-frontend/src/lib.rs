@@ -13,6 +13,8 @@ mod cartesian_null;
 mod cartesian_initial;
 pub use cartesian_initial::SchwarzschildCartesianInitialStateBuilder;
 pub use cartesian_null::SchwarzschildCartesianAdaptiveChunkBuilder;
+mod cartesian_f64;
+pub use cartesian_f64::SchwarzschildCartesianF64Rk4Builder;
 mod cartesian_radiance;
 pub use cartesian_radiance::SchwarzschildDiskFrequencyBuilder;
 mod thermal_spectrum;
