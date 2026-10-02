@@ -6,7 +6,7 @@ use ton_geodesic::{schwarzschild_geodesic_initial_state, schwarzschild_geodesic_
 use ton_metric::{schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter};
 use ton_renderer::Framebuffer;
 use ton_types::{BlackHole, Camera, Rgb, TonError, TonResult, Vec3};
-use ton_ucf_frontend::{camera_ray_batch, disk_shade_novikov_from_geodesic_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step, tone_map_aces_batch};
+use ton_ucf_frontend::{camera_ray_batch, compose_sky_batch, disk_shade_novikov_from_geodesic_batch, geodesic_capture_classify, geodesic_capture_classify_batch, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_geodesic_rk4_step, schwarzschild_geodesic_rk4_integrate, schwarzschild_impact_batch, schwarzschild_initial_state_batch, schwarzschild_radial_rk4_step, tone_map_aces_batch};
 use ucf_backend_cpu::CpuBackend;
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Dispatch, Graph, ResourceGraph, TaskGraph};
@@ -809,6 +809,61 @@ pub fn tone_map_ucf_vulkan_batch(hdr: &[f32], count: u32) -> TonResult<Vec<f32>>
     let output = backend.read_f32(ResourceId(20)).map_err(|e| TonError::Domain(format!("read Vulkan display buffer: {e}")))?;
     if output.len() != expected {
         return Err(TonError::Domain("Vulkan tone-map output has invalid length".into()));
+    }
+    Ok(output)
+}
+
+/// 由 Vulkan UCF backend 合成逃逸天空、捕获黑洞和盘面 radiance。
+pub fn compose_sky_ucf_vulkan_batch(
+    directions: &[f32],
+    states: &[f32],
+    radiance: &[f32],
+    count: u32,
+) -> TonResult<Vec<f32>> {
+    let count_usize = usize::try_from(count).map_err(|_| TonError::Domain("Vulkan sky count exceeds usize capacity".into()))?;
+    if directions.len() != count_usize * 3 || states.len() != count_usize * 14 || radiance.len() != count_usize * 3 {
+        return Err(TonError::Domain("Vulkan sky composite inputs have invalid lengths".into()));
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let program = compose_sky_batch();
+    let mut params = BTreeMap::new();
+    params.insert("buffer_0".into(), ParamValue::I64(22));
+    params.insert("buffer_1".into(), ParamValue::I64(23));
+    params.insert("buffer_2".into(), ParamValue::I64(24));
+    params.insert("output".into(), ParamValue::I64(25));
+    params.insert("program".into(), program_param(&program)?);
+    let task = TaskNode {
+        id: TaskId(37),
+        kind: TaskKind::Dispatch,
+        shader: ShaderId(37),
+        params,
+        dispatch: Dispatch::Explicit { x: count, y: 1, z: 1 },
+        objective: Objective::MaxUtilization,
+        priority: Priority::Batch,
+    };
+    let graph = Graph {
+        resources: ResourceGraph {
+            nodes: vec![
+                ResourceNode { id: ResourceId(22), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 3 * 4) },
+                ResourceNode { id: ResourceId(23), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 14 * 4) },
+                ResourceNode { id: ResourceId(24), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Read, byte_size: Some(u64::from(count) * 3 * 4) },
+                ResourceNode { id: ResourceId(25), kind: ResourceKind::Buffer, domain: Domain::Vram, access: Access::Write, byte_size: Some(u64::from(count) * 3 * 4) },
+            ],
+        },
+        tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+    };
+    graph.validate().map_err(|e| TonError::Domain(format!("Vulkan sky composite graph: {e}")))?;
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan sky composite backend: {e}")))?;
+    backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan sky composite graph: {e}")))?;
+    backend.write_f32(ResourceId(22), directions).map_err(|e| TonError::Domain(format!("upload Vulkan directions: {e}")))?;
+    backend.write_f32(ResourceId(23), states).map_err(|e| TonError::Domain(format!("upload Vulkan states: {e}")))?;
+    backend.write_f32(ResourceId(24), radiance).map_err(|e| TonError::Domain(format!("upload Vulkan radiance: {e}")))?;
+    backend.run_prepared(&graph).map_err(|e| TonError::Domain(format!("execute Vulkan sky composite graph: {e}")))?;
+    let output = backend.read_f32(ResourceId(25)).map_err(|e| TonError::Domain(format!("read Vulkan composite output: {e}")))?;
+    if output.len() != count_usize * 3 {
+        return Err(TonError::Domain("Vulkan sky composite output has invalid length".into()));
     }
     Ok(output)
 }

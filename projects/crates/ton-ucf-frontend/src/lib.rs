@@ -960,6 +960,39 @@ pub fn tone_map_aces_batch() -> Program {
     ProgramBuilder::new().structured_entry(builder, Ty::f32(), zero).expect("valid batch tone map builder").finish().expect("valid batch tone map program")
 }
 
+/// 构建并行天空合成程序。
+///
+/// 输入 buffer `1` 为射线方向，buffer `2` 为 geodesic 状态，buffer `3` 为
+/// 盘面 radiance。状态偏移 `8` 为终止码，只有逃逸码 `2` 叠加天空颜色。
+/// 输出 buffer `4` 为合成后的线性 RGB。天空模型使用通用算术表达式展开。
+pub fn compose_sky_batch() -> Program {
+    let mut builder = StructuredFunctionBuilder::new("compose_sky_batch");
+    let global = builder.global_id();
+    let direction_base = builder.binary(BinOp::Mul, global.clone(), builder.const_u32(3));
+    let state_base = builder.binary(BinOp::Mul, global.clone(), builder.const_u32(14));
+    let radiance_base = builder.binary(BinOp::Mul, global.clone(), builder.const_u32(3));
+    let output_base = builder.binary(BinOp::Mul, global, builder.const_u32(3));
+    let _dx = builder.load_buffer(1, builder.binary(BinOp::Add, direction_base.clone(), builder.const_u32(0)));
+    let dy = builder.load_buffer(1, builder.binary(BinOp::Add, direction_base.clone(), builder.const_u32(1)));
+    let _dz = builder.load_buffer(1, builder.binary(BinOp::Add, direction_base, builder.const_u32(2)));
+    let status = builder.load_buffer(2, builder.binary(BinOp::Add, state_base, builder.const_u32(8)));
+    let radiance_r = builder.load_buffer(3, builder.binary(BinOp::Add, radiance_base.clone(), builder.const_u32(0)));
+    let radiance_g = builder.load_buffer(3, builder.binary(BinOp::Add, radiance_base.clone(), builder.const_u32(1)));
+    let radiance_b = builder.load_buffer(3, builder.binary(BinOp::Add, radiance_base, builder.const_u32(2)));
+    let t = builder.binary(BinOp::Max, builder.const_f32(0.0), builder.binary(BinOp::Min, builder.const_f32(1.0), builder.binary(BinOp::Add, builder.binary(BinOp::Mul, dy, builder.const_f32(0.5)), builder.const_f32(0.5))));
+    let sky_r = builder.binary(BinOp::Mul, builder.const_f32(0.02), t.clone());
+    let sky_g = builder.binary(BinOp::Mul, builder.const_f32(0.03), t.clone());
+    let sky_b = builder.binary(BinOp::Add, builder.const_f32(0.08), builder.binary(BinOp::Mul, builder.const_f32(0.12), t));
+    let escaped = builder.binary(BinOp::Eq, status, builder.const_f32(2.0));
+    let out_r = builder.select(escaped.clone(), builder.binary(BinOp::Add, sky_r, radiance_r.clone()), radiance_r);
+    let out_g = builder.select(escaped.clone(), builder.binary(BinOp::Add, sky_g, radiance_g.clone()), radiance_g);
+    let out_b = builder.select(escaped, builder.binary(BinOp::Add, sky_b, radiance_b.clone()), radiance_b);
+    builder.store_buffer(4, builder.binary(BinOp::Add, output_base.clone(), builder.const_u32(0)), out_r);
+    builder.store_buffer(4, builder.binary(BinOp::Add, output_base.clone(), builder.const_u32(1)), out_g);
+    builder.store_buffer(4, builder.binary(BinOp::Add, output_base, builder.const_u32(2)), out_b);
+    ProgramBuilder::new().structured_entry(builder, Ty::f32(), Expr::ConstF32(0.0)).expect("valid sky composite builder").finish().expect("valid sky composite program")
+}
+
 /// 构建泛光亮部提取程序。
 pub fn post_bloom_extract() -> Program {
     let mut builder = FunctionBuilder::new("post_bloom_extract");
@@ -1242,6 +1275,24 @@ mod integration_tests {
             (0.0..=1.0).contains(&value)
         }));
         assert!(output[0].as_f64().expect("red") > 0.9);
+    }
+
+    #[test]
+    fn sky_composite_validates_and_adds_escape_background() {
+        let program = compose_sky_batch();
+        validate_program(&program).expect("sky composite must satisfy UCF validation");
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_buffer(1, vec![Value::F32(0.0), Value::F32(1.0), Value::F32(0.0)]);
+        interpreter.with_buffer(2, vec![Value::F32(0.0); 14]);
+        interpreter.with_buffer(3, vec![Value::F32(0.1), Value::F32(0.2), Value::F32(0.3)]);
+        let mut state = interpreter.buffer(2).expect("state").to_vec();
+        state[8] = Value::F32(2.0);
+        interpreter.with_buffer(2, state);
+        interpreter.with_buffer(4, vec![Value::F32(0.0); 3]);
+        interpreter.run_parallel(&program, 1).expect("sky composite execution");
+        let output = interpreter.buffer(4).expect("composite output");
+        assert!(output[0].as_f64().expect("red") > 0.1);
+        assert!(output[2].as_f64().expect("blue") > 0.3);
     }
 
     #[test]
