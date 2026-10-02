@@ -3,6 +3,9 @@
 //! 本 crate 负责把 TON 的领域算法展开为通用 UCF Program。UCF 核心只
 //! 接收 `Program`、校验并执行，不依赖黑洞类型或物理名称。
 
+mod adaptive;
+pub use adaptive::SchwarzschildAdaptiveStepBuilder;
+
 pub use ucf_program::{
     program_hash, validate_program, BinOp, CpuExecResult, CpuInterpreter, Expr, Function,
     FunctionBuilder, ProgramBuilder,
@@ -619,18 +622,13 @@ pub fn schwarzschild_geodesic_rk4_chunk_with_disk(max_steps: u32) -> Program {
     schwarzschild_geodesic_rk4_integrate_mode(max_steps, false, true)
 }
 
-fn schwarzschild_geodesic_rk4_integrate_mode(
-    max_steps: u32,
-    report_budget_exhaustion: bool,
-    detect_disk: bool,
-) -> Program {
     fn b(builder: &StructuredFunctionBuilder, op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
         builder.binary(op, lhs, rhs)
     }
     fn u(builder: &StructuredFunctionBuilder, op: UnOp, arg: Expr) -> Expr {
         builder.unary(op, arg)
     }
-    fn derivative(builder: &StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr) -> [Expr; 8] {
+    fn schwarzschild_derivative(builder: &StructuredFunctionBuilder, values: &[Expr; 8], mass: &Expr) -> [Expr; 8] {
         let r = values[1].clone();
         let theta = values[2].clone();
         let ut = values[4].clone();
@@ -682,6 +680,12 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
             b(builder, BinOp::Mul, b(builder, BinOp::Mul, builder.const_f32(2.0), cot_theta), b(builder, BinOp::Mul, utheta.clone(), uphi.clone())));
         [ut, ur, utheta, uphi, du_t, du_r, du_theta, u(builder, UnOp::Neg, phi)]
     }
+
+fn schwarzschild_geodesic_rk4_integrate_mode(
+    max_steps: u32,
+    report_budget_exhaustion: bool,
+    detect_disk: bool,
+) -> Program {
     let mut builder = StructuredFunctionBuilder::new(if detect_disk {
         "schwarzschild_geodesic_rk4_chunk_with_disk"
     } else {
@@ -759,13 +763,13 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
         let add_scaled = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], slope: &[Expr; 8], scale: Expr| {
             std::array::from_fn(|index| b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, slope[index].clone(), scale.clone())))
         };
-        let k1 = derivative(builder, &values, &mass);
+        let k1 = schwarzschild_derivative(builder, &values, &mass);
         let mid1 = add_scaled(builder, &values, &k1, half_step.clone());
-        let k2 = derivative(builder, &mid1, &mass);
+        let k2 = schwarzschild_derivative(builder, &mid1, &mass);
         let mid2 = add_scaled(builder, &values, &k2, half_step);
-        let k3 = derivative(builder, &mid2, &mass);
+        let k3 = schwarzschild_derivative(builder, &mid2, &mass);
         let end = add_scaled(builder, &values, &k3, step.clone());
-        let k4 = derivative(builder, &end, &mass);
+        let k4 = schwarzschild_derivative(builder, &end, &mass);
         for index in 0..8 {
             let weighted = b(builder, BinOp::Add, b(builder, BinOp::Add, k1[index].clone(), b(builder, BinOp::Mul, k2[index].clone(), builder.const_f32(2.0))), b(builder, BinOp::Add, b(builder, BinOp::Mul, k3[index].clone(), builder.const_f32(2.0)), k4[index].clone()));
             let next = b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, step.clone(), b(builder, BinOp::Div, weighted, builder.const_f32(6.0))));

@@ -1236,6 +1236,102 @@ pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalSta
 mod tests {
     use super::*;
 
+    fn adaptive_cpu_output(input: &[f32; 9], uniforms: [f32; 5], retries: u32) -> Vec<f64> {
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveStepBuilder::new().maximum_retries(retries).build().unwrap();
+        let mut interpreter = ton_ucf_frontend::CpuInterpreter::new();
+        for (slot, value) in uniforms.into_iter().enumerate() { interpreter.with_uniform(slot as u32, Value::F32(value)); }
+        interpreter.with_buffer(1, input.iter().copied().map(Value::F32).collect());
+        interpreter.with_buffer(2, vec![Value::F32(0.0); 13]);
+        interpreter.run_parallel(&program, 1).unwrap();
+        interpreter.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect()
+    }
+
+    #[test]
+    fn adaptive_ucf_cpu_matches_independent_reference_and_failures() {
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveStepBuilder::new().build().unwrap();
+        let ParamValue::Program { hash, body, .. } = program_param(&program).unwrap() else { panic!("missing program body"); };
+        let decoded: ucf_program::Program = serde_json::from_str(&body).unwrap();
+        assert_eq!(hash, ton_ucf_frontend::program_hash(&decoded));
+        assert_eq!(program, decoded);
+        let input = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 0.08];
+        let state = SphericalState { t: input[0] as f64, r: input[1] as f64, theta: input[2] as f64, phi: input[3] as f64,
+            ut: input[4] as f64, ur: input[5] as f64, utheta: input[6] as f64, uphi: input[7] as f64 };
+        let uniforms = [1.0f32, 1.0e-13, 1.0e-11, 1.0e-8, 0.08];
+        let config = ton_geodesic::AdaptiveRk4Config::builder()
+            .tolerances(uniforms[1] as f64, uniforms[2] as f64)
+            .step_range(uniforms[3] as f64, uniforms[4] as f64).build().unwrap();
+        let expected = ton_geodesic::schwarzschild_adaptive_rk4_step(1.0, state, input[8] as f64, config).unwrap();
+        let actual = adaptive_cpu_output(&input, uniforms, 16);
+        assert_eq!(actual[8], 1.0);
+        assert!(expected.rejections > 0);
+        assert_eq!(actual[12], expected.rejections as f64);
+        for (actual, expected) in actual[..8].iter().copied().zip([expected.state.t, expected.state.r, expected.state.theta, expected.state.phi,
+            expected.state.ut, expected.state.ur, expected.state.utheta, expected.state.uphi]) {
+            assert!((actual - expected).abs() < 1.0e-6, "actual={actual}, expected={expected}");
+        }
+        assert!((actual[9] - expected.step_used).abs() < 1.0e-6);
+        assert!((actual[10] - expected.next_step).abs() < 1.0e-6);
+        assert!(actual[11] <= 1.0);
+        for (uniforms, retries, status) in [
+            ([1.0, 1.0e-30, 0.0, 1.0e-8, 0.08], 0, 3.0),
+            ([1.0, 1.0e-30, 0.0, 0.08, 0.08], 16, 2.0),
+            ([0.0, 1.0e-9, 1.0e-7, 1.0e-8, 0.08], 16, 4.0),
+        ] {
+            let output = adaptive_cpu_output(&input, uniforms, retries);
+            assert_eq!(output[8], status);
+            assert_eq!(output[9], 0.0);
+            for (actual, initial) in output[..8].iter().zip(&input[..8]) { assert_eq!(*actual, *initial as f64); }
+        }
+    }
+
+    #[test]
+    fn adaptive_ucf_vulkan_executes_mixed_batch_and_minimum_step_failure() {
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveStepBuilder::new().maximum_retries(2).build().unwrap();
+        let valid = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 0.08];
+        let mut invalid_step = valid;
+        invalid_step[8] = -1.0;
+        let mut invalid_radius = valid;
+        invalid_radius[1] = 1.0;
+        let input = [valid, invalid_step, invalid_radius].into_iter().flatten().collect::<Vec<_>>();
+        let make_graph = |uniforms: [f32; 5]| {
+            let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+            params.insert("buffer_2".into(), ParamValue::I64(2));
+            let task = dispatch_task(50, &program, 3, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+            Graph {
+                resources: ResourceGraph { nodes: [(1, 27, Access::Read), (2, 39, Access::Write), (3, 3, Access::Write)]
+                    .into_iter().map(|(id, elements, access)| ResourceNode {
+                        id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                    }).collect() },
+                tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+            }
+        };
+        let uniforms = [1.0, 1.0e-5, 1.0e-4, 1.0e-8, 0.08];
+        let graph = make_graph(uniforms);
+        graph.validate().unwrap();
+        let mut backend = VulkanBackend::new().expect("Vulkan adaptive program");
+        backend.prepare(&graph).unwrap();
+        backend.write_f32(ResourceId(1), &input).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        let actual = backend.read_f32(ResourceId(2)).unwrap();
+        let expected = adaptive_cpu_output(&valid, uniforms, 2);
+        assert_eq!(actual.len(), 39);
+        assert_eq!([actual[8], actual[21], actual[34]], [1.0, 4.0, 4.0]);
+        for (actual, expected) in actual[..8].iter().zip(&expected[..8]) {
+            assert!((*actual as f64 - expected).abs() < 2.0e-5);
+        }
+        assert!((0.0..=1.0).contains(&actual[11]));
+        for (offset, initial) in [(13, invalid_step), (26, invalid_radius)] {
+            assert_eq!(&actual[offset..offset + 8], &initial[..8]);
+            assert_eq!(actual[offset + 9], 0.0);
+        }
+        let graph = make_graph([1.0, 1.0e-25, 0.0, 0.08, 0.08]);
+        backend.run_prepared(&graph).unwrap();
+        let failure = backend.read_f32(ResourceId(2)).unwrap();
+        assert_eq!(failure[8], 2.0);
+        assert_eq!(&failure[..8], &valid[..8]);
+        assert_eq!(failure[9], 0.0);
+    }
+
     #[test]
     fn adaptive_polar_reference_escapes_with_bounded_null_residual() {
         let bh = BlackHole::schwarzschild(1.0);
