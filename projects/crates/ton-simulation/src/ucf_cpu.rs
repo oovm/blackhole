@@ -36,6 +36,19 @@ pub struct InitialStateProgramExecution {
     pub program_hash: u64,
     /// 输出 buffer 解码后的球坐标状态。
     pub states: Vec<SphericalState>,
+    /// 每条射线是否属于解析捕获侧。
+    pub bound_infall: Vec<bool>,
+}
+
+/// 一次真实 UCF 有界测地线 chunk 执行的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeodesicChunkProgramExecution {
+    /// 实际执行的 Program hash。
+    pub program_hash: u64,
+    /// chunk 执行后的状态。
+    pub states: Vec<SphericalState>,
+    /// 每条射线的 UCF 终止状态。
+    pub statuses: Vec<u32>,
 }
 
 fn camera_uniforms(camera: Camera) -> Vec<(u32, Value)> {
@@ -205,6 +218,7 @@ pub fn execute_initial_state_program_cpu(
     if output.len() != camera.rays.len() * 10 {
         return Err(TonError::Domain("initial state output has invalid length".into()));
     }
+    let mut bound_infall = Vec::with_capacity(camera.rays.len());
     let states = output
         .chunks_exact(10)
         .map(|values| {
@@ -213,6 +227,8 @@ pub fn execute_initial_state_program_cpu(
                     .as_f64()
                     .map_err(|error| TonError::Domain(format!("initial state value {index}: {error}")))
             };
+            let bound = scalar(9)?;
+            bound_infall.push(bound >= 0.5);
             Ok(SphericalState {
                 t: scalar(0)?,
                 r: scalar(1)?,
@@ -225,7 +241,87 @@ pub fn execute_initial_state_program_cpu(
             })
         })
         .collect::<TonResult<Vec<_>>>()?;
-    Ok(InitialStateProgramExecution { program_hash: actual_hash, states })
+    Ok(InitialStateProgramExecution { program_hash: actual_hash, states, bound_infall })
+}
+
+/// 执行三维 Schwarzschild 帧图中绑定的有界 RK4 Program。
+pub fn execute_geodesic_chunk_program_cpu(
+    scene: &Scene,
+    graph: &Graph,
+) -> TonResult<GeodesicChunkProgramExecution> {
+    let initial = execute_initial_state_program_cpu(scene, graph)?;
+    let task = graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|node| node.id.0 == 13)
+        .ok_or_else(|| TonError::Domain("geodesic chunk task 13 is missing".into()))?;
+    let ParamValue::Program { hash, body, .. } = task
+        .params
+        .get("program")
+        .ok_or_else(|| TonError::Domain("geodesic chunk task has no UCF program body".into()))?
+    else {
+        return Err(TonError::Domain("geodesic chunk program binding has invalid type".into()));
+    };
+    let program: ucf_program::Program = serde_json::from_str(body)
+        .map_err(|error| TonError::Domain(format!("decode geodesic chunk UCF program: {error}")))?;
+    let actual_hash = program_hash(&program);
+    if actual_hash != *hash {
+        return Err(TonError::Domain(format!(
+            "geodesic chunk program hash mismatch: expected {hash}, actual {actual_hash}"
+        )));
+    }
+    let state_input = initial
+        .states
+        .iter()
+        .zip(&initial.bound_infall)
+        .flat_map(|(state, bound)| {
+            [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi]
+                .into_iter()
+                .chain([0.0, if *bound { 1.0 } else { 0.0 }])
+                .map(|value| Value::F32(value as f32))
+        })
+        .collect::<Vec<_>>();
+    let report = CpuBackend::new()
+        .execute_program_with_buffers(
+            &program,
+            initial.states.len() as u32,
+            [
+                (0, Value::F32(scene.black_hole.mass as f32)),
+                (1, Value::F32(scene.trace.dphi as f32)),
+                (2, Value::F32(scene.trace.escape_radius as f32)),
+            ],
+            [(0, state_input)],
+        )
+        .map_err(TonError::Domain)?;
+    let output = report
+        .buffers
+        .get(&0)
+        .ok_or_else(|| TonError::Domain("geodesic chunk state buffer was not written".into()))?;
+    if output.len() != initial.states.len() * 10 {
+        return Err(TonError::Domain("geodesic chunk state buffer has invalid length".into()));
+    }
+    let mut states = Vec::with_capacity(initial.states.len());
+    let mut statuses = Vec::with_capacity(initial.states.len());
+    for values in output.chunks_exact(10) {
+        let scalar = |index: usize| {
+            values[index]
+                .as_f64()
+                .map_err(|error| TonError::Domain(format!("geodesic chunk value {index}: {error}")))
+        };
+        states.push(SphericalState {
+            t: scalar(0)?,
+            r: scalar(1)?,
+            theta: scalar(2)?,
+            phi: scalar(3)?,
+            ut: scalar(4)?,
+            ur: scalar(5)?,
+            utheta: scalar(6)?,
+            uphi: scalar(7)?,
+        });
+        statuses.push(scalar(8)? as u32);
+    }
+    Ok(GeodesicChunkProgramExecution { program_hash: actual_hash, states, statuses })
 }
 
 fn task_op(graph: &Graph, task_id: u64) -> TonResult<&str> {
@@ -372,5 +468,20 @@ mod tests {
         .expect("reference initial state");
         assert!((center.r - expected.r).abs() < 3.0e-4);
         assert!((center.ut - expected.ut).abs() < 3.0e-4);
+    }
+
+    #[test]
+    fn cpu_graph_executes_bound_geodesic_chunk_program() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_resolution(4, 3)
+            .with_step_size(0.01)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let execution = execute_geodesic_chunk_program_cpu(&scene, &graph)
+            .expect("bound geodesic chunk must consume initialized states");
+        assert_eq!(execution.states.len(), 12);
+        assert_eq!(execution.statuses.len(), 12);
+        assert!(execution.states.iter().all(|state| state.r.is_finite()));
     }
 }
