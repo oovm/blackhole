@@ -51,6 +51,99 @@ pub struct GeodesicChunkProgramExecution {
     pub statuses: Vec<u32>,
 }
 
+/// 从帧图执行绑定的批量盘面着色 Program。
+///
+/// `samples` 是每个实例的半径和 Doppler 因子。图资源使用 7/8，UCF
+/// 程序内部 buffer 槽位使用 1/2，二者在这里显式映射。
+pub fn execute_disk_shade_program_cpu(
+    scene: &Scene,
+    graph: &Graph,
+    samples: &[(f64, f64)],
+) -> TonResult<Vec<Rgb>> {
+    graph
+        .validate()
+        .map_err(|error| TonError::Domain(format!("disk shade graph validate: {error}")))?;
+    if scene.disk_model != DiskModelKind::NovikovThorneThin {
+        return Err(TonError::Domain("disk shade CPU program requires NovikovThorneThin".into()));
+    }
+    let disk = scene
+        .disk
+        .ok_or_else(|| TonError::Domain("disk shade CPU program requires a disk configuration".into()))?;
+    let task = program_task(graph, "disk_shade_novikov_batch")?;
+    let ParamValue::Program { hash, body, .. } = task
+        .params
+        .get("program")
+        .ok_or_else(|| TonError::Domain("disk shade task has no UCF program body".into()))?
+    else {
+        return Err(TonError::Domain("disk shade task program binding has invalid type".into()));
+    };
+    let program: ucf_program::Program = serde_json::from_str(body)
+        .map_err(|error| TonError::Domain(format!("decode disk shade UCF program: {error}")))?;
+    let actual_hash = program_hash(&program);
+    if actual_hash != *hash {
+        return Err(TonError::Domain(format!(
+            "disk shade program hash mismatch: expected {hash}, actual {actual_hash}"
+        )));
+    }
+    let input_resource = match task.params.get("input_resource") {
+        Some(ParamValue::I64(id)) => *id as u32,
+        _ => return Err(TonError::Domain("disk shade input resource binding is missing".into())),
+    };
+    let output_resource = match task.params.get("output_resource") {
+        Some(ParamValue::I64(id)) => *id as u32,
+        _ => return Err(TonError::Domain("disk shade output resource binding is missing".into())),
+    };
+    if input_resource != 7 || output_resource != 8 {
+        return Err(TonError::Domain("disk shade resource contract is invalid".into()));
+    }
+    if task.params.get("input_stride_f32") != Some(&ParamValue::I64(2))
+        || task.params.get("output_stride_f32") != Some(&ParamValue::I64(3))
+    {
+        return Err(TonError::Domain("disk shade buffer stride contract is invalid".into()));
+    }
+    let dispatch = match task.dispatch {
+        ucf_ir::Dispatch::Explicit { x, y: 1, z: 1 } => x,
+        _ => return Err(TonError::Domain("disk shade dispatch must be one-dimensional".into())),
+    };
+    if dispatch != samples.len() as u32 {
+        return Err(TonError::Domain("disk shade dispatch does not match sample count".into()));
+    }
+    let input = samples
+        .iter()
+        .flat_map(|(radius, doppler)| [Value::F32(*radius as f32), Value::F32(*doppler as f32)])
+        .collect::<Vec<_>>();
+    let report = CpuBackend::new()
+        .execute_program_with_buffers(
+            &program,
+            dispatch,
+            [
+                (0, Value::F32(disk.config.inner_radius as f32)),
+                (1, Value::F32(disk.config.outer_radius as f32)),
+                (2, Value::F32(disk.bh.mass as f32)),
+                (3, Value::F32(disk.config.accretion_rate as f32)),
+            ],
+            [(1, input), (2, vec![Value::F32(0.0); samples.len() * 3])],
+        )
+        .map_err(TonError::Domain)?;
+    let output = report
+        .buffers
+        .get(&2)
+        .ok_or_else(|| TonError::Domain("disk shade output resource was not written".into()))?;
+    if output.len() != samples.len() * 3 {
+        return Err(TonError::Domain("disk shade output has invalid length".into()));
+    }
+    output
+        .chunks_exact(3)
+        .map(|values| {
+            Ok(Rgb::new(
+                values[0].as_f64().map_err(|error| TonError::Domain(error.to_string()))?,
+                values[1].as_f64().map_err(|error| TonError::Domain(error.to_string()))?,
+                values[2].as_f64().map_err(|error| TonError::Domain(error.to_string()))?,
+            ))
+        })
+        .collect()
+}
+
 fn camera_uniforms(camera: Camera) -> Vec<(u32, Value)> {
     [
         camera.forward.x,
@@ -443,6 +536,7 @@ pub fn execute_frame_graph_cpu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ton_disk::sample_disk_radiance;
     use ton_types::{BlackHole, IntegratorKind};
 
     #[test]
@@ -565,5 +659,26 @@ mod tests {
         assert_eq!(execution.states.len(), 12);
         assert_eq!(execution.statuses.len(), 12);
         assert!(execution.states.iter().all(|state| state.r.is_finite()));
+    }
+
+    #[test]
+    fn cpu_graph_executes_bound_batched_disk_shade_program() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_default_disk()
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_resolution(4, 1)
+            .build();
+        let samples = [(10.0, 1.0), (12.0, 1.5), (18.0, 2.2), (24.0, 0.8)];
+        let graph = scene.build_ucf_graph();
+        let actual = execute_disk_shade_program_cpu(&scene, &graph, &samples)
+            .expect("bound disk shade program must execute through UCF CPU backend");
+        let disk = scene.disk.expect("default disk");
+        for (rgb, (radius, doppler)) in actual.iter().zip(samples) {
+            let expected = sample_disk_radiance(disk, radius, doppler).emissive_radiance;
+            assert!((rgb.r - expected.r).abs() < 2e-4);
+            assert!((rgb.g - expected.g).abs() < 2e-4);
+            assert!((rgb.b - expected.b).abs() < 2e-4);
+        }
     }
 }
