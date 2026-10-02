@@ -1332,7 +1332,12 @@ mod tests {
         };
         let mut backend = VulkanBackend::new().expect("Vulkan adaptive polar trajectory");
         backend.prepare(&graph).unwrap();
+        let initial_energy = (1.0 - 2.0 / input[1] as f64) * input[4] as f64;
+        let initial_angular_squared = (input[1] as f64).powi(4) *
+            ((input[6] as f64).powi(2) + (input[2] as f64).sin().powi(2) * (input[7] as f64).powi(2));
         let mut residual = 0.0f64;
+        let mut energy_drift = 0.0f64;
+        let mut angular_drift = 0.0f64;
         let mut chunks = 0;
         while input[1] < 80.0 && chunks < 256 {
             backend.write_f32(ResourceId(1), &input).unwrap();
@@ -1348,13 +1353,21 @@ mod tests {
             let relative = ((spatial - temporal) / (spatial.abs() + temporal.abs())).abs();
             assert!(relative.is_finite());
             residual = residual.max(relative);
+            let energy = f * output[4] as f64;
+            let angular_squared = radius.powi(4) *
+                ((output[6] as f64).powi(2) + (output[2] as f64).sin().powi(2) * (output[7] as f64).powi(2));
+            energy_drift = energy_drift.max(((energy - initial_energy) / initial_energy).abs());
+            angular_drift = angular_drift.max(((angular_squared - initial_angular_squared) / initial_angular_squared).abs());
             input[..8].copy_from_slice(&output[..8]);
             input[8] = output[10];
             chunks += 1;
         }
         eprintln!("UCF Vulkan polar chunks={chunks}, max_chunk_boundary_null_residual={residual}, r={}", input[1]);
+        eprintln!("UCF Vulkan max_chunk_boundary_energy_drift={energy_drift}, angular_squared_drift={angular_drift}");
         assert!(input[1] >= 80.0 && chunks < 256);
         assert!(residual < 1.0e-3);
+        assert!(energy_drift < 1.0e-3);
+        assert!(angular_drift < 2.0e-3);
     }
 
     #[test]
