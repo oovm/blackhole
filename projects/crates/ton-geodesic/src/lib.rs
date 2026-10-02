@@ -19,6 +19,8 @@ mod disk_frequency;
 pub use disk_frequency::schwarzschild_disk_frequency_shift;
 mod thermal_spectrum;
 pub use thermal_spectrum::{blackbody_spectral_radiance, observed_blackbody_spectral_radiance};
+mod spectral_color;
+pub use spectral_color::{cie1931_fit, observed_blackbody_xyz, xyz_to_linear_srgb, zero_torque_disk_temperature};
 mod radiance_dispatch;
 mod ray;
 mod sem_classical;
