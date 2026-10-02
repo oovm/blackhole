@@ -9,6 +9,49 @@ use ucf_ir::{Graph, ResourceGraph, TaskGraph};
 use ucf_scheduler::Backend;
 use ucf_types::{Access, Domain, ParamValue, ResourceId, ResourceKind, ResourceNode};
 
+/// 在原生 Vulkan UCF backend 上执行笛卡尔追踪记录的圆轨道频移 Builder。
+/// 输入和输出仍是 TON 负责解释的布局，UCF 只执行通用程序。
+pub fn execute_cartesian_frequency(
+    records: &[[f32; 29]], mass: f32, observer_radius: f32,
+) -> TonResult<Vec<[f32; 4]>> {
+    let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create frequency Vulkan backend: {error}")))?;
+    execute_cartesian_frequency_with_backend(&mut backend, records, mass, observer_radius)
+}
+
+pub(crate) fn execute_cartesian_frequency_with_backend(
+    backend: &mut VulkanBackend, records: &[[f32; 29]], mass: f32, observer_radius: f32,
+) -> TonResult<Vec<[f32; 4]>> {
+    if records.is_empty() || !mass.is_finite() || !observer_radius.is_finite()
+        || mass <= 0.0 || observer_radius <= 2.0 * mass
+        || records.iter().any(|record| record.iter().any(|value| !value.is_finite())) {
+        return Err(TonError::Domain("invalid Cartesian frequency input".into()));
+    }
+    let count = u32::try_from(records.len()).map_err(|_| TonError::Domain("frequency batch exceeds u32 capacity".into()))?;
+    let program = ton_ucf_frontend::SchwarzschildDiskFrequencyBuilder::new().build().map_err(TonError::Domain)?;
+    let params = BTreeMap::from([
+        ("uniform_0".into(), ParamValue::F64(mass as f64)),
+        ("uniform_1".into(), ParamValue::F64(observer_radius as f64)),
+        ("buffer_2".into(), ParamValue::I64(42)),
+    ]);
+    let task = crate::ucf_physics::dispatch_task(73, &program, count, ResourceId(43), 2, 1, Some(ResourceId(41)), params)?;
+    let graph = Graph {
+        resources: ResourceGraph { nodes: [(41, 29, Access::Read), (42, 4, Access::Write), (43, 1, Access::Write)].into_iter().map(|(id, stride, access)|
+            ResourceNode { id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access,
+                byte_size: Some(u64::from(count) * stride * 4) }).collect() },
+        tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+    };
+    graph.validate().map_err(|error| TonError::Domain(format!("validate Cartesian frequency graph: {error}")))?;
+    backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare Cartesian frequency graph: {error}")))?;
+    backend.write_f32(ResourceId(41), &records.iter().flatten().copied().collect::<Vec<_>>())
+        .map_err(|error| TonError::Domain(format!("upload Cartesian frequency records: {error}")))?;
+    backend.run_prepared(&graph).map_err(|error| TonError::Domain(format!("execute Cartesian frequency graph: {error}")))?;
+    let output = backend.read_f32(ResourceId(42)).map_err(|error| TonError::Domain(format!("read Cartesian frequency output: {error}")))?;
+    if output.len() != records.len() * 4 || output.iter().any(|value| !value.is_finite() || *value < 0.0) {
+        return Err(TonError::Domain("Cartesian frequency output is invalid".into()));
+    }
+    Ok(output.chunks_exact(4).map(|value| value.try_into().unwrap()).collect())
+}
+
 /// GPU 程序终止与宿主总预算耗尽分别表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuTraceTermination {
@@ -418,6 +461,68 @@ mod tests {
     }
 
     #[test]
+    fn cartesian_frequency_builder_executes_on_vulkan_and_matches_cpu_and_reference() {
+        let mut record = [0.0f32; 29];
+        record[13] = 1.0;
+        record[21] = 123.0;
+        record[22] = 8.0;
+        record[25] = 1.0;
+        record[27] = 0.25;
+        let gpu = execute_cartesian_frequency(&[record], 1.0, 24.0).unwrap();
+        let program = ton_ucf_frontend::SchwarzschildDiskFrequencyBuilder::new().build().unwrap();
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        for (slot, value) in [1.0, 24.0].into_iter().enumerate() {
+            cpu.with_uniform(slot as u32, ton_ucf_frontend::Value::F32(value));
+        }
+        cpu.with_buffer(1, record.into_iter().map(ton_ucf_frontend::Value::F32).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 4]);
+        cpu.run_parallel(&program, 1).unwrap();
+        let expected = cpu.buffer(2).unwrap();
+        for (actual, expected) in gpu[0].iter().zip(expected) {
+            assert!((*actual - expected.as_f64().unwrap() as f32).abs() < 2.0e-4,
+                "GPU={actual}, CPU={}", expected.as_f64().unwrap());
+        }
+        let reference = ton_geodesic::schwarzschild_disk_frequency_shift(1.0, 24.0,
+            SchwarzschildCartesianNullState { t: 123.0, position: Vec3::new(8.0, 0.0, 0.0),
+                energy: 1.0, velocity: Vec3::new(0.0, 0.25, 0.0) }).unwrap();
+        assert_eq!(gpu[0][0], 8.0);
+        assert_eq!(gpu[0][3], 1.0);
+        assert!((gpu[0][1] as f64 - reference).abs() < 1.0e-6);
+        assert!((gpu[0][2] as f64 - reference.powi(4)).abs() < 2.0e-6);
+    }
+
+    #[test]
+    fn cartesian_camera_trace_frequency_chain_matches_independent_disk_reference() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let trace = SchwarzschildGpuTraceBuilder::new(1.0).execute_camera(camera, 16, 9).unwrap();
+        trace.require_renderable().unwrap();
+        let frequency = execute_cartesian_frequency(&trace.records, 1.0, camera.position.length() as f32).unwrap();
+        let mut disk_pixels = 0;
+        let mut maximum_error = 0.0f64;
+        for (index, (record, output)) in trace.records.iter().zip(&frequency).enumerate() {
+            if record[13] == 0.0 {
+                assert_eq!(*output, [0.0; 4], "pixel={index}");
+                continue;
+            }
+            disk_pixels += 1;
+            assert_eq!(output[3], 1.0, "pixel={index}, frequency={output:?}");
+            let state = SchwarzschildCartesianNullState { t: record[21] as f64,
+                position: Vec3::new(record[22] as f64, record[23] as f64, record[24] as f64),
+                energy: record[25] as f64,
+                velocity: Vec3::new(record[26] as f64, record[27] as f64, record[28] as f64) };
+            let expected = ton_geodesic::schwarzschild_disk_frequency_shift(1.0,
+                (camera.position.length() as f32) as f64, state).unwrap();
+            let error = (output[1] as f64 - expected).abs();
+            maximum_error = maximum_error.max(error);
+            assert!(error < 2.0e-6, "pixel={index}, actual={}, reference={expected}", output[1]);
+            assert!((output[2] as f64 - expected.powi(4)).abs() < 1.0e-5, "pixel={index}");
+            assert!((output[0] as f64 - state.position.length()).abs() < 3.0e-6, "pixel={index}");
+        }
+        assert!(disk_pixels > 0);
+        eprintln!("GPU camera/trace/frequency 16x9: disk_pixels={disk_pixels}, max_same_state_shift_error={maximum_error}");
+    }
+
+    #[test]
     fn cartesian_adaptive_program_matches_reference_single_step() {
         let initial = ton_geodesic::SchwarzschildCartesianNullState::from_ray(1.0,
             Vec3::new(12.0, 3.0, 5.0), Vec3::new(-1.0, 0.2, -0.1)).unwrap();
@@ -817,5 +922,39 @@ mod tests {
         }
         eprintln!("GPU camera chain {width}x{height}: captured={captured}, escaped={}, maxima={maxima:?}, executed_programs={}",
             result.records.len() - captured, result.executed_program_hashes.len());
+    }
+
+    #[test]
+    fn cartesian_near_critical_disk_error_sources_and_step_sweep() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let (u, v) = (((9.5 / 16.0) * 2.0 - 1.0) * 16.0 / 9.0, 1.0 - (1.5 / 9.0) * 2.0);
+        let ideal = SchwarzschildCartesianNullState::from_ray(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
+        let mut backend = VulkanBackend::new().unwrap();
+        let directions = crate::ucf_physics::camera_ray_ucf_vulkan_batch_with_backend(&mut backend, camera, &[(u, v)]).unwrap();
+        let (records, _) = SchwarzschildGpuTraceBuilder::new(1.0).initialize_rays(&mut backend, &[(camera.position, directions[0])]).unwrap();
+        let seed = records[0];
+        let rounded = SchwarzschildCartesianNullState { t: seed[0] as f64,
+            position: Vec3::new(seed[1] as f64, seed[2] as f64, seed[3] as f64), energy: seed[4] as f64,
+            velocity: Vec3::new(seed[5] as f64, seed[6] as f64, seed[7] as f64) };
+        let events = ton_geodesic::SchwarzschildEventConfig::builder(1.0).equatorial_disk(6.0, 20.0).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0).events(events)
+            .integration(ton_geodesic::AdaptiveRk4Config::builder().step_range(1.0e-8, 0.02).build().unwrap()).build().unwrap();
+        let ideal = ton_geodesic::schwarzschild_cartesian_adaptive_trace(ideal, config).unwrap();
+        let rounded = ton_geodesic::schwarzschild_cartesian_adaptive_trace(rounded, config).unwrap();
+        let ideal_radius = ideal.disk_events[0].event.state.position.length();
+        let rounded_radius = rounded.disk_events[0].event.state.position.length();
+        eprintln!("pixel 25 initial-source radius error={}, ideal={ideal_radius}, rounded={rounded_radius}", (rounded_radius - ideal_radius).abs());
+        for step in [0.08, 0.04, 0.02] {
+            let mut input = records.clone();
+            input[0][9] = step;
+            let result = SchwarzschildGpuTraceBuilder::new(1.0).step_range(step, step)
+                .execute_packed(&mut backend, input, GpuTraceStateLayout::CartesianNullEnergy).unwrap();
+            result.require_renderable().unwrap();
+            assert_eq!(result.terminations, [GpuTraceTermination::Escaped]);
+            assert_eq!(result.records[0][13], rounded.disk_events.len() as f32);
+            eprintln!("pixel 25 step={step}, disk_radius={}, same-input error={}, ideal error={}, angular_drift={}",
+                result.records[0][14], (result.records[0][14] as f64 - rounded_radius).abs(),
+                (result.records[0][14] as f64 - ideal_radius).abs(), result.records[0][18]);
+        }
     }
 }
