@@ -166,16 +166,56 @@ impl SchwarzschildSpectralGpuBuilder {
             let bright_output = execute_stage(&mut backend, &bright_builder, &bright_input, 3, 3, 149, &[0.08], None)?;
             hashes.push(ton_ucf_frontend::program_hash(&bright_builder));
             let blur_builder = ton_ucf_frontend::UcfBoxBlur3x3Builder::new(width, height).build().map_err(TonError::Domain)?;
-            let blurred_output = execute_stage(&mut backend, &blur_builder, &bright_output, 3, 3, 152, &[], None)?;
-            let bright = blurred_output.chunks_exact(3).map(|record| Rgb::new(record[0] as f64, record[1] as f64, record[2] as f64)).collect::<Vec<_>>();
+            let l0 = execute_stage(&mut backend, &blur_builder, &bright_output, 3, 3, 152, &[], None)?;
+            hashes.push(ton_ucf_frontend::program_hash(&blur_builder));
+
+            let (w2, h2) = (width / 2, height / 2);
+            let mut l1 = vec![0.0; bright_output.len()];
+            let mut l2 = vec![0.0; bright_output.len()];
+            if w2 > 0 && h2 > 0 {
+                let downsample1 = ton_ucf_frontend::UcfDownsample2xRgbBuilder::new(width, height).build().map_err(TonError::Domain)?;
+                let down1 = execute_stage(&mut backend, &downsample1, &bright_output, 3, 3, 155, &[], None)?;
+                hashes.push(ton_ucf_frontend::program_hash(&downsample1));
+                let blur1_builder = ton_ucf_frontend::UcfBoxBlur3x3Builder::new(w2, h2).build().map_err(TonError::Domain)?;
+                let blur1 = execute_stage(&mut backend, &blur1_builder, &down1, 3, 3, 158, &[], None)?;
+                hashes.push(ton_ucf_frontend::program_hash(&blur1_builder));
+                let upsample1 = ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w2, h2, width, height, 0.55).build().map_err(TonError::Domain)?;
+                l1 = execute_stage(&mut backend, &upsample1, &blur1, 3, 3, 161, &[], None)?;
+                hashes.push(ton_ucf_frontend::program_hash(&upsample1));
+
+                let (w4, h4) = (w2 / 2, h2 / 2);
+                if w4 > 0 && h4 > 0 {
+                    let downsample2 = ton_ucf_frontend::UcfDownsample2xRgbBuilder::new(w2, h2).build().map_err(TonError::Domain)?;
+                    let down2 = execute_stage(&mut backend, &downsample2, &down1, 3, 3, 164, &[], None)?;
+                    hashes.push(ton_ucf_frontend::program_hash(&downsample2));
+                    let blur2_builder = ton_ucf_frontend::UcfBoxBlur3x3Builder::new(w4, h4).build().map_err(TonError::Domain)?;
+                    let blur2 = execute_stage(&mut backend, &blur2_builder, &down2, 3, 3, 167, &[], None)?;
+                    hashes.push(ton_ucf_frontend::program_hash(&blur2_builder));
+                    let upsample2_mid = ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w4, h4, w2, h2, 1.0).build().map_err(TonError::Domain)?;
+                    let up2_mid = execute_stage(&mut backend, &upsample2_mid, &blur2, 3, 3, 170, &[], None)?;
+                    hashes.push(ton_ucf_frontend::program_hash(&upsample2_mid));
+                    let upsample2 = ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w2, h2, width, height, 0.35).build().map_err(TonError::Domain)?;
+                    l2 = execute_stage(&mut backend, &upsample2, &up2_mid, 3, 3, 173, &[], None)?;
+                    hashes.push(ton_ucf_frontend::program_hash(&upsample2));
+                }
+            }
             let mut linear = Framebuffer { width, height,
                 pixels: display_input.chunks_exact(7).map(|record| Rgb::new(record[3] as f64, record[4] as f64, record[5] as f64)).collect(),
                 encoding: FramebufferEncoding::LinearHdr };
-            ton_renderer::composite_bloom_from_bright(&mut linear, &bright, 0.08);
-            for (record, pixel) in display_input.chunks_exact_mut(7).zip(linear.pixels) {
-                record[3] = pixel.r as f32; record[4] = pixel.g as f32; record[5] = pixel.b as f32;
+            for (index, pixel) in linear.pixels.iter_mut().enumerate() {
+                let offset = index * 3;
+                let bloom = [bright_output[offset] + l0[offset] + l1[offset] + l2[offset],
+                    bright_output[offset + 1] + l0[offset + 1] + l1[offset + 1] + l2[offset + 1],
+                    bright_output[offset + 2] + l0[offset + 2] + l1[offset + 2] + l2[offset + 2]];
+                pixel.r += bloom[0] as f64 * 0.08;
+                pixel.g += bloom[1] as f64 * 0.08;
+                pixel.b += bloom[2] as f64 * 0.08;
             }
-            hashes.push(ton_ucf_frontend::program_hash(&blur_builder));
+            for (record, pixel) in display_input.chunks_exact_mut(7).zip(linear.pixels) {
+                record[3] = pixel.r as f32;
+                record[4] = pixel.g as f32;
+                record[5] = pixel.b as f32;
+            }
         }
         let hdr = display_input.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
         let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
@@ -398,7 +438,7 @@ mod tests {
         let base = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).execute(camera, 8, 4).unwrap();
         let bloom = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).bloom(true).execute(camera, 8, 4).unwrap();
         assert_eq!(base.shading_program_hashes.len(), 6);
-        assert_eq!(bloom.shading_program_hashes.len(), 8);
+        assert_eq!(bloom.shading_program_hashes.len(), 15);
         assert!(base.hdr.iter().zip(&bloom.hdr).any(|(a, b)| a != b));
     }
 
