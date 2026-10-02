@@ -31,6 +31,8 @@ mod spectral_disk;
 pub use spectral_disk::{ZeroTorqueDiskInputsBuilder, SpectralDisplayBuilder};
 mod graybody;
 pub use graybody::GraybodyEmissionBuilder;
+mod radiative_transfer;
+pub use radiative_transfer::RadiativeTransferBuilder;
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
