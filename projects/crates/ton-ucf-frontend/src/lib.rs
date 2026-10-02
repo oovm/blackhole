@@ -735,7 +735,10 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
         )
     };
     builder.bounded_while(active(&builder), max_steps, |builder| {
-        let values: [Expr; 8] = std::array::from_fn(|index| Expr::LoadLocal(state[index]));
+        let values: [Expr; 8] = std::array::from_fn(|index| {
+            let previous = builder.let_value(ucf_program::Ty::f32(), Expr::LoadLocal(state[index]));
+            Expr::LoadLocal(previous)
+        });
         let half_step = b(builder, BinOp::Mul, step.clone(), builder.const_f32(0.5));
         let add_scaled = |builder: &StructuredFunctionBuilder, values: &[Expr; 8], slope: &[Expr; 8], scale: Expr| {
             std::array::from_fn(|index| b(builder, BinOp::Add, values[index].clone(), b(builder, BinOp::Mul, slope[index].clone(), scale.clone())))
@@ -810,6 +813,8 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
             );
             let first_hit = b(builder, BinOp::Eq, Expr::LoadLocal(*disk_hit.as_ref().expect("disk hit local")), builder.const_f32(0.0));
             let record = builder.select(crossed, builder.select(previous_nonzero, builder.select(next_nonzero, builder.select(in_range, first_hit, Expr::ConstBool(false)), Expr::ConstBool(false)), Expr::ConstBool(false)), Expr::ConstBool(false));
+            let record = builder.let_value(ucf_program::Ty::Scalar(ucf_program::ScalarTy::Bool), record);
+            let record = Expr::LoadLocal(record);
             builder.store_local(
                 *disk_hit.as_ref().expect("disk hit local"),
                 builder.select(record.clone(), builder.const_f32(1.0), Expr::LoadLocal(*disk_hit.as_ref().expect("disk hit local"))),
@@ -1263,6 +1268,23 @@ mod integration_tests {
                 assert_eq!(interpreter.buffer(0).expect("terminal metadata"), &state);
             }
         }
+    }
+
+    #[test]
+    fn disk_geodesic_chunk_detects_crossing_between_distinct_states() {
+        let mut interpreter = CpuInterpreter::new();
+        let input = [0.0, 12.0, 1.56, 0.3, 1.2, -0.7, 0.22, 0.01, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            .into_iter().map(Value::F32).collect::<Vec<_>>();
+        for (slot, value) in [1.0, 0.1, 100.0, 6.0, 40.0].into_iter().enumerate() {
+            interpreter.with_uniform(slot as u32, Value::F32(value));
+        }
+        interpreter.with_buffer(0, input);
+        interpreter.run_parallel(&schwarzschild_geodesic_rk4_chunk_with_disk(1), 1).unwrap();
+        let output = interpreter.buffer(0).unwrap();
+        assert!(output[2].as_f64().unwrap() > std::f64::consts::FRAC_PI_2);
+        assert_eq!(output[10], Value::F32(1.0));
+        let radius = output[11].as_f64().unwrap();
+        assert!(radius > 11.8 && radius < 12.0, "crossing radius={radius}");
     }
 
     #[test]

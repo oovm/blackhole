@@ -1229,6 +1229,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vulkan_disk_crossing_matches_reference_step_when_available() {
+        let state = SphericalState { t: 0.0, r: 12.0, theta: 1.56, phi: 0.3, ut: 1.2, ur: -0.7, utheta: 0.22, uphi: 0.01 };
+        let expected = reference_geodesic_rk4_step(1.0, state, 0.1);
+        let actual = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+            1.0, &[state], &[false], &[false], &[0.0], &[1.0], 6.0, 40.0, 0.1, 100.0, 1,
+        ).expect("Vulkan disk crossing");
+        let (actual, status, hit, radius, doppler) = actual[0];
+        assert_eq!(status, 0);
+        assert!(hit);
+        assert!(radius > 11.8 && radius < 12.0);
+        assert!(doppler.is_finite() && doppler > 0.0);
+        for (actual, expected) in [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi]
+            .into_iter().zip([expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi]) {
+            assert!((actual - expected).abs() < 2.0e-5, "actual={actual}, expected={expected}");
+        }
+    }
+
+    #[test]
     fn vulkan_disk_chunk_preserves_terminal_state_and_metadata_when_available() {
         let mut backend = match VulkanBackend::new() {
             Ok(backend) => backend,
