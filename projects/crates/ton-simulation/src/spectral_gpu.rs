@@ -216,6 +216,51 @@ mod tests {
     }
 
     #[test]
+    fn radiative_transfer_uses_real_reference_disk_events_on_cpu_and_vulkan() {
+        let initial = ton_geodesic::SchwarzschildCartesianNullState::from_ray(
+            1.0, ton_types::Vec3::new(10.0, 0.0, 0.01), ton_types::Vec3::new(0.0, 0.0, -1.0),
+        ).unwrap();
+        let event_config = ton_geodesic::SchwarzschildEventConfig::builder(1.0)
+            .radial_boundaries(2.0002, 80.0).equatorial_disk(6.0, 20.0)
+            .localization(1.0e-11, 64).build().unwrap();
+        let integration = ton_geodesic::AdaptiveRk4Config::builder()
+            .tolerances(1.0e-12, 1.0e-12).step_range(1.0e-8, 0.04).build().unwrap();
+        let config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0)
+            .events(event_config).integration(integration).initial_step(0.04).maximum_steps(512).build().unwrap();
+        let reference = ton_geodesic::schwarzschild_cartesian_adaptive_trace(initial, config).unwrap();
+        let packed = ton_geodesic::DiskEventBuffer::<4>::from_events(&reference.disk_events).unwrap();
+        let model = ton_disk::DiskRadiativeModel::new(1.0, 6.0, 0.8).unwrap();
+        let mut input = vec![0.0f32; 8];
+        for (event_index, event) in reference.disk_events.iter().map(|event| {
+            let state = event.event.state;
+            [event.affine_parameter, state.t, state.position.x, state.position.y, state.position.z,
+                state.energy, state.velocity.x, state.velocity.y, state.velocity.z]
+        }).enumerate() {
+            let radiative = model.event(event).unwrap();
+            input[event_index * 2] = radiative.source as f32;
+            input[event_index * 2 + 1] = radiative.opacity as f32;
+        }
+        assert_eq!(packed.count, 1);
+        let expected_event = model.event(packed.events[0]).unwrap();
+        let expected = ton_disk::accumulate_radiative_events(&[expected_event], 0.2).unwrap();
+        let program = ton_ucf_frontend::RadiativeTransferBuilder::new().maximum_events(4).build().unwrap();
+        let mut backend = VulkanBackend::new().unwrap();
+        let output = execute_stage(&mut backend, &program, &input, 8, 4, 133, &[0.2, 1.0], None).unwrap();
+        assert!((output[0] as f64 - expected.intensity).abs() < 1.0e-5);
+        assert!((output[1] as f64 - expected.transmittance).abs() < 1.0e-5);
+        assert_eq!(output[2], 1.0);
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        cpu.with_uniform(0, ton_ucf_frontend::Value::F32(0.2));
+        cpu.with_uniform(1, ton_ucf_frontend::Value::F32(1.0));
+        cpu.with_buffer(1, input.into_iter().map(ton_ucf_frontend::Value::F32).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 4]);
+        cpu.run_parallel(&program, 1).unwrap();
+        for (actual, expected) in output.iter().zip(cpu.buffer(2).unwrap()) {
+            assert!(((*actual as f64) - expected.as_f64().unwrap()).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
     fn spectral_gpu_temperature_and_display_match_independent_formulas() {
         let mut backend = VulkanBackend::new().unwrap();
         let program = ton_ucf_frontend::ZeroTorqueDiskInputsBuilder::new().build().unwrap();
