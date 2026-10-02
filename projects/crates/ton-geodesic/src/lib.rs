@@ -4,6 +4,7 @@
 mod dispatch;
 mod adaptive_rk4;
 mod adaptive_events;
+mod adaptive_trace;
 mod diagnostic_dispatch;
 mod geodesic3d;
 mod kerr_equatorial;
@@ -18,6 +19,7 @@ mod trace;
 pub use dispatch::trace_ray;
 pub use adaptive_rk4::{schwarzschild_adaptive_rk4_step, AdaptiveRk4Config, AdaptiveRk4ConfigBuilder, AdaptiveRk4Step};
 pub use adaptive_events::{schwarzschild_accepted_step_events, SchwarzschildEventConfig, SchwarzschildEventConfigBuilder, SchwarzschildStepEvent, SchwarzschildStepEventKind};
+pub use adaptive_trace::{schwarzschild_adaptive_trace, AdaptiveTraceDiskEvent, AdaptiveTraceTermination, SchwarzschildAdaptiveTraceConfig, SchwarzschildAdaptiveTraceConfigBuilder, SchwarzschildAdaptiveTraceResult};
 pub use radiance_dispatch::{trace_ray_radiance, trace_ray_radiance_result};
 pub use diagnostic_dispatch::trace_ray_diagnostic;
 pub use geodesic3d::{

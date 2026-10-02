@@ -22,6 +22,10 @@ pub struct SchwarzschildEventConfigBuilder {
 }
 
 impl SchwarzschildEventConfig {
+    pub(crate) fn mass(self) -> f64 { self.mass }
+    pub(crate) fn capture_radius(self) -> f64 { self.capture_radius }
+    pub(crate) fn escape_radius(self) -> f64 { self.escape_radius }
+
     /// 捕获面默认位于坐标视界之外，不声称定位到奇异坐标上的事件视界。
     pub fn builder(mass: f64) -> SchwarzschildEventConfigBuilder {
         SchwarzschildEventConfigBuilder { config: Self {
