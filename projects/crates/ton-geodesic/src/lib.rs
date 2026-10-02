@@ -6,6 +6,7 @@ mod adaptive_rk4;
 mod adaptive_events;
 mod adaptive_trace;
 mod null_energy;
+mod cartesian_null;
 mod diagnostic_dispatch;
 mod geodesic3d;
 mod kerr_equatorial;
@@ -22,6 +23,7 @@ pub use adaptive_rk4::{schwarzschild_adaptive_rk4_step, AdaptiveRk4Config, Adapt
 pub use adaptive_events::{schwarzschild_accepted_step_events, SchwarzschildEventConfig, SchwarzschildEventConfigBuilder, SchwarzschildStepEvent, SchwarzschildStepEventKind};
 pub use adaptive_trace::{schwarzschild_adaptive_trace, AdaptiveTraceDiskEvent, AdaptiveTraceTermination, SchwarzschildAdaptiveTraceConfig, SchwarzschildAdaptiveTraceConfigBuilder, SchwarzschildAdaptiveTraceResult};
 pub use null_energy::{schwarzschild_null_energy_rk4_step, SchwarzschildNullEnergyState};
+pub use cartesian_null::{schwarzschild_cartesian_null_rk4_step, SchwarzschildCartesianNullState};
 pub use radiance_dispatch::{trace_ray_radiance, trace_ray_radiance_result};
 pub use diagnostic_dispatch::trace_ray_diagnostic;
 pub use geodesic3d::{
