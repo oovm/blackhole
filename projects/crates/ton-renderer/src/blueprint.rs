@@ -39,6 +39,7 @@ pub fn build_frame_graph_for_resolution(
 ) -> Graph {
     let pixel_count = u64::from(width).saturating_mul(u64::from(height));
     let pixel_count_u32 = width.saturating_mul(height);
+    let geodesic_3d = matches!(integrator, IntegratorKind::Geodesic3d);
     let mut b = GraphBuilder::new();
     b.buffer(1, Domain::Host);
     b.buffer(2, Domain::Host);
@@ -48,17 +49,36 @@ pub fn build_frame_graph_for_resolution(
     b.buffer(6, Domain::Host);
     b.gpu(10, "ton_upload_params");
     b.gpu(11, "ton_generate_rays");
-    b.gpu(12, integrator.ucf_op_name());
-    b.gpu(13, disk_shade_op(disk));
-    if bloom {
-        b.gpu(14, "ton_bloom");
-        b.gpu(15, "ton_tone_map");
-        b.gpu(16, "ton_present_or_readback");
-        b.chain(&[10, 11, 12, 13, 14, 15, 16]);
+    if geodesic_3d {
+        b.gpu(12, "ton_initialize_geodesic_state");
+        b.gpu(13, integrator.ucf_op_name());
+        b.gpu(14, disk_shade_op(disk));
     } else {
-        b.gpu(14, "ton_tone_map");
-        b.gpu(15, "ton_present_or_readback");
-        b.chain(&[10, 11, 12, 13, 14, 15]);
+        b.gpu(12, integrator.ucf_op_name());
+        b.gpu(13, disk_shade_op(disk));
+    }
+    if bloom {
+        let chain = if geodesic_3d { vec![10, 11, 12, 13, 14, 15, 16, 17] } else { vec![10, 11, 12, 13, 14, 15, 16] };
+        if geodesic_3d {
+            b.gpu(15, "ton_bloom");
+            b.gpu(16, "ton_tone_map");
+            b.gpu(17, "ton_present_or_readback");
+        } else {
+            b.gpu(14, "ton_bloom");
+            b.gpu(15, "ton_tone_map");
+            b.gpu(16, "ton_present_or_readback");
+        }
+        b.chain(&chain);
+    } else {
+        if geodesic_3d {
+            b.gpu(15, "ton_tone_map");
+            b.gpu(16, "ton_present_or_readback");
+            b.chain(&[10, 11, 12, 13, 14, 15, 16]);
+        } else {
+            b.gpu(14, "ton_tone_map");
+            b.gpu(15, "ton_present_or_readback");
+            b.chain(&[10, 11, 12, 13, 14, 15]);
+        }
     }
     let mut graph = b.build();
     let resource_sizes = [
@@ -74,15 +94,20 @@ pub fn build_frame_graph_for_resolution(
             node.byte_size = Some(*byte_size);
         }
     }
-    let task_resources = [
-        (10, None, Some(6)),
-        (11, Some(1), Some(2)),
-        (12, Some(2), Some(3)),
-        (13, Some(3), Some(4)),
-        (14, Some(4), Some(if bloom { 4 } else { 5 })),
-        (15, Some(if bloom { 4 } else { 5 }), Some(5)),
-        (16, Some(5), Some(5)),
-    ];
+    let task_resources = if geodesic_3d {
+        vec![
+            (10, None, Some(6)), (11, Some(1), Some(2)), (12, Some(2), Some(3)),
+            (13, Some(3), Some(4)), (14, Some(4), Some(if bloom { 4 } else { 5 })),
+            (15, Some(if bloom { 4 } else { 5 }), Some(5)), (16, Some(5), Some(5)),
+            (17, Some(5), Some(5)),
+        ]
+    } else {
+        vec![
+            (10, None, Some(6)), (11, Some(1), Some(2)), (12, Some(2), Some(3)),
+            (13, Some(3), Some(4)), (14, Some(4), Some(if bloom { 4 } else { 5 })),
+            (15, Some(if bloom { 4 } else { 5 }), Some(5)), (16, Some(5), Some(5)),
+        ]
+    };
     for task in &mut graph.tasks.nodes {
         task.dispatch = Dispatch::Explicit {
             x: pixel_count_u32.max(1),
@@ -120,7 +145,7 @@ mod tests {
             IntegratorKind::SchwarzschildOrbit,
             DiskModelKind::NovikovThorneThin,
         );
-        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 12).expect("trace");
+        let node = g.tasks.nodes.iter().find(|n| matches!(n.params.get("program_name"), Some(ParamValue::Str(name)) if name == "equatorial_orbit_rk4_step")).expect("trace");
         assert!(matches!(
             node.params.get("program_hash"),
             Some(ParamValue::I64(h)) if *h != 0
@@ -139,7 +164,7 @@ mod tests {
     #[test]
     fn geodesic_graph_binds_geodesic_infall_program() {
         let g = build_frame_graph(IntegratorKind::Geodesic3d, DiskModelKind::NovikovThorneThin);
-        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 12).expect("trace");
+        let node = g.tasks.nodes.iter().find(|n| matches!(n.params.get("program_name"), Some(ParamValue::Str(name)) if name == "schwarzschild_geodesic_rk4_chunk")).expect("trace");
         assert!(matches!(
             node.params.get("program_name"),
             Some(ParamValue::Str(name)) if name == "schwarzschild_geodesic_rk4_chunk"
@@ -149,7 +174,7 @@ mod tests {
     #[test]
     fn novikov_graph_binds_disk_shade_program() {
         let g = build_frame_graph(IntegratorKind::Geodesic3d, DiskModelKind::NovikovThorneThin);
-        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 13).expect("shade");
+        let node = g.tasks.nodes.iter().find(|n| matches!(n.params.get("program_name"), Some(ParamValue::Str(name)) if name == "disk_shade_novikov")).expect("shade");
         assert!(matches!(
             node.params.get("program_name"),
             Some(ParamValue::Str(name)) if name == "disk_shade_novikov"
@@ -169,7 +194,7 @@ mod tests {
         g.validate().expect("graph must validate");
         assert_eq!(g.tasks.nodes.len(), 6);
         assert!(matches!(
-            g.tasks.nodes[2].params.get("op"),
+            g.tasks.nodes.iter().find(|node| matches!(node.params.get("program_name"), Some(ParamValue::Str(name)) if name == "equatorial_orbit_rk4_step")).expect("trace").params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_trace_schwarzschild_orbit"
         ));
     }
@@ -182,7 +207,7 @@ mod tests {
         );
         g.validate().expect("graph must validate");
         assert!(matches!(
-            g.tasks.nodes[2].params.get("op"),
+            g.tasks.nodes.iter().find(|node| matches!(node.params.get("program_name"), Some(ParamValue::Str(name)) if name == "geodesic_radial_infall_steps")).expect("trace").params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_trace_sem_classical"
         ));
     }
@@ -195,7 +220,7 @@ mod tests {
         );
         g.validate().expect("graph must validate");
         assert!(matches!(
-            g.tasks.nodes[3].params.get("op"),
+            g.tasks.nodes.iter().find(|node| node.params.get("op") == Some(&ParamValue::Str("ton_shade_procedural_fbm".into()))).expect("shade").params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_shade_procedural_fbm"
         ));
     }
@@ -208,7 +233,7 @@ mod tests {
         );
         g.validate().expect("graph must validate");
         assert!(matches!(
-            g.tasks.nodes[2].params.get("op"),
+            g.tasks.nodes.iter().find(|node| matches!(node.params.get("program_name"), Some(ParamValue::Str(name)) if name == "schwarzschild_geodesic_rk4_chunk")).expect("trace").params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_trace_geodesic_3d"
         ));
     }
@@ -221,7 +246,7 @@ mod tests {
         );
         g.validate().expect("graph must validate");
         assert!(matches!(
-            g.tasks.nodes[2].params.get("op"),
+            g.tasks.nodes.iter().find(|node| matches!(node.params.get("program_name"), Some(ParamValue::Str(name)) if name == "equatorial_orbit_rk4_step")).expect("trace").params.get("op"),
             Some(ParamValue::Str(op)) if op == "ton_trace_kerr_equatorial"
         ));
     }
@@ -253,8 +278,8 @@ mod tests {
         );
         let shade = shade_kernel(DiskModelKind::NovikovThorneThin);
         let tone = tone_map_kernel();
-        let shade_node = g.tasks.nodes.iter().find(|n| n.id.0 == 13).expect("shade");
-        let tone_node = g.tasks.nodes.iter().find(|n| n.id.0 == 14).expect("tone");
+        let shade_node = g.tasks.nodes.iter().find(|n| matches!(n.params.get("program_name"), Some(ParamValue::Str(name)) if name == "disk_shade_novikov")).expect("shade");
+        let tone_node = g.tasks.nodes.iter().find(|n| matches!(n.params.get("program_name"), Some(ParamValue::Str(name)) if name == "tone_map_aces")).expect("tone");
         assert!(matches!(
             shade_node.params.get("program_hash"),
             Some(ParamValue::I64(h)) if *h == shade.program_hash as i64
@@ -272,7 +297,7 @@ mod tests {
             IntegratorKind::Geodesic3d,
             DiskModelKind::NovikovThorneThin,
         );
-        let node = g.tasks.nodes.iter().find(|n| n.id.0 == 14).expect("tone_map");
+        let node = g.tasks.nodes.iter().find(|n| matches!(n.params.get("program_name"), Some(ParamValue::Str(name)) if name == "tone_map_aces")).expect("tone_map");
         assert!(matches!(
             node.params.get("program_name"),
             Some(ParamValue::Str(name)) if name == "tone_map_aces"

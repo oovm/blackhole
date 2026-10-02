@@ -4,6 +4,7 @@ use ton_types::{DiskModelKind, IntegratorKind};
 use ton_ucf_frontend::{
     camera_ray_batch, disk_shade_novikov, geodesic_capture_classify, geodesic_radial_infall_steps,
     equatorial_orbit_rk4_step, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk,
+    schwarzschild_initial_state_batch,
     tone_map_aces, vector_math_normalize,
     Program,
 };
@@ -87,6 +88,12 @@ pub fn generate_rays_kernel() -> KernelBinding {
     KernelBinding::from_program("camera_ray_batch", p)
 }
 
+/// Schwarzschild 三维路径的球坐标初态程序绑定。
+pub fn schwarzschild_initial_state_kernel() -> KernelBinding {
+    let p = schwarzschild_initial_state_batch();
+    KernelBinding::from_program("schwarzschild_initial_state_batch", p)
+}
+
 /// 色调映射任务程序绑定（ACES 拟合）。
 pub fn tone_map_kernel() -> KernelBinding {
     let p = tone_map_aces();
@@ -131,13 +138,18 @@ pub fn annotate_frame_programs(
 ) {
     attach_binding(graph, 11, &generate_rays_kernel());
     let trace = trace_kernel(integrator);
-    attach_binding(graph, 12, &trace.binding);
+    let trace_task = if matches!(integrator, IntegratorKind::Geodesic3d) { 13 } else { 12 };
+    if matches!(integrator, IntegratorKind::Geodesic3d) {
+        attach_binding(graph, 12, &schwarzschild_initial_state_kernel());
+    }
+    attach_binding(graph, trace_task, &trace.binding);
     let shade = shade_kernel(disk);
-    attach_binding(graph, 13, &shade);
+    let shade_task = trace_task + 1;
+    attach_binding(graph, shade_task, &shade);
     if bloom {
-        attach_binding(graph, 14, &bloom_kernel());
-        attach_binding(graph, 15, &tone_map_kernel());
+        attach_binding(graph, shade_task + 1, &bloom_kernel());
+        attach_binding(graph, shade_task + 2, &tone_map_kernel());
     } else {
-        attach_binding(graph, 14, &tone_map_kernel());
+        attach_binding(graph, shade_task + 1, &tone_map_kernel());
     }
 }
