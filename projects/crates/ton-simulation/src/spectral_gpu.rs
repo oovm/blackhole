@@ -34,7 +34,7 @@ fn execute_stage(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Progra
     let output = backend.read_f32(ResourceId(base + 1)).map_err(|error| TonError::Domain(format!("read spectral output: {error}")))?;
     let status = backend.read_f32(ResourceId(base + 2)).map_err(|error| TonError::Domain(format!("read spectral status: {error}")))?;
     if output.len() != count as usize * output_stride as usize || status.len() != count as usize
-        || output.iter().any(|value| !value.is_finite()) || status.iter().any(|value| *value != 0.0 && *value != 1.0) {
+        || output.iter().any(|value| !value.is_finite()) || status.iter().any(|value| *value != 0.0 && *value != 1.0 && *value != 2.0) {
         let mut unique_status = status.iter().copied().filter(|value| value.is_finite()).collect::<Vec<_>>();
         unique_status.sort_by(f32::total_cmp); unique_status.dedup();
         let first_bad = output.iter().position(|value| !value.is_finite());
@@ -197,6 +197,22 @@ mod tests {
             for (base, actual) in base.iter().zip(actual) { assert!((*actual as f64) <= (*base as f64) + 1.0e-12); }
         }
         assert!(changed > 0);
+    }
+
+    #[test]
+    fn radiative_transfer_program_matches_cpu_and_vulkan() {
+        let program = ton_ucf_frontend::RadiativeTransferBuilder::new().maximum_events(4).build().unwrap();
+        let input = [2.0f32, 0.25, 8.0, 0.5, 0.0, 0.0, 0.0, 0.0];
+        let mut backend = VulkanBackend::new().unwrap();
+        let output = execute_stage(&mut backend, &program, &input, 8, 4, 131, &[1.0, 2.0], None).unwrap();
+        assert!((output[0] - 4.625).abs() < 1.0e-5);
+        assert!((output[1] - 0.375).abs() < 1.0e-5);
+        assert_eq!(output[2], 2.0); assert_eq!(output[3], 1.0);
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        cpu.with_uniform(0, ton_ucf_frontend::Value::F32(1.0)); cpu.with_uniform(1, ton_ucf_frontend::Value::F32(2.0));
+        cpu.with_buffer(1, input.into_iter().map(ton_ucf_frontend::Value::F32).collect()); cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 4]);
+        cpu.run_parallel(&program, 1).unwrap();
+        for (actual, expected) in output.iter().zip(cpu.buffer(2).unwrap()) { assert!(((*actual as f64) - expected.as_f64().unwrap()).abs() < 1.0e-5); }
     }
 
     #[test]
