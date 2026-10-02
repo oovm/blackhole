@@ -49,6 +49,14 @@ pub struct GeodesicChunkProgramExecution {
     pub states: Vec<SphericalState>,
     /// 每条射线的 UCF 终止状态。
     pub statuses: Vec<u32>,
+    /// 每条射线在本次扩展状态中是否已经命中赤道盘。
+    pub disk_hits: Vec<bool>,
+    /// UCF 输出的盘面交点半径。
+    pub disk_radii: Vec<f64>,
+    /// UCF 输出的盘面 Doppler 因子。
+    pub disk_dopplers: Vec<f64>,
+    /// 原始 UCF 状态资源，便于直接绑定到后续 Program。
+    pub state_buffer: Vec<Value>,
 }
 
 /// 从帧图执行绑定的批量盘面着色 Program。
@@ -347,7 +355,16 @@ pub fn execute_geodesic_chunk_program_cpu(
     graph: &Graph,
 ) -> TonResult<GeodesicChunkProgramExecution> {
     let initial = execute_initial_state_program_cpu(scene, graph)?;
-    execute_geodesic_chunk_program_cpu_with_state(scene, graph, initial.states, initial.bound_infall)
+    let count = initial.states.len();
+    execute_geodesic_chunk_program_cpu_with_state(
+        scene,
+        graph,
+        initial.states,
+        initial.bound_infall,
+        vec![false; count],
+        vec![0.0; count],
+        vec![1.0; count],
+    )
 }
 
 fn execute_geodesic_chunk_program_cpu_with_state(
@@ -355,6 +372,9 @@ fn execute_geodesic_chunk_program_cpu_with_state(
     graph: &Graph,
     states: Vec<SphericalState>,
     bound_infall: Vec<bool>,
+    disk_hits: Vec<bool>,
+    disk_radii: Vec<f64>,
+    disk_dopplers: Vec<f64>,
 ) -> TonResult<GeodesicChunkProgramExecution> {
     let task = graph
         .tasks
@@ -391,15 +411,19 @@ fn execute_geodesic_chunk_program_cpu_with_state(
     if states.len() != bound_infall.len() {
         return Err(TonError::Domain("geodesic chunk state and bound buffers differ in length".into()));
     }
+    if disk_hits.len() != states.len() || disk_radii.len() != states.len() || disk_dopplers.len() != states.len() {
+        return Err(TonError::Domain("geodesic chunk disk metadata differs in length".into()));
+    }
     let state_input = states
         .iter()
         .zip(&bound_infall)
-        .flat_map(|(state, bound)| {
+        .enumerate()
+        .flat_map(|(index, (state, bound))| {
             [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi]
                 .into_iter()
                 .chain([0.0, if *bound { 1.0 } else { 0.0 }])
                 .chain(if extended_state {
-                    vec![0.0, 0.0, 0.0, 0.0]
+                    vec![if disk_hits[index] { 1.0 } else { 0.0 }, disk_radii[index], disk_dopplers[index], 0.0]
                 } else {
                     Vec::new()
                 })
@@ -428,6 +452,9 @@ fn execute_geodesic_chunk_program_cpu_with_state(
     }
     let mut next_states = Vec::with_capacity(states.len());
     let mut statuses = Vec::with_capacity(states.len());
+    let mut next_disk_hits = Vec::with_capacity(states.len());
+    let mut next_disk_radii = Vec::with_capacity(states.len());
+    let mut next_disk_dopplers = Vec::with_capacity(states.len());
     for values in output.chunks_exact(output_stride) {
         let scalar = |index: usize| {
             values[index]
@@ -445,8 +472,25 @@ fn execute_geodesic_chunk_program_cpu_with_state(
             uphi: scalar(7)?,
         });
         statuses.push(scalar(8)? as u32);
+        if extended_state {
+            next_disk_hits.push(scalar(10)? >= 0.5);
+            next_disk_radii.push(scalar(11)?);
+            next_disk_dopplers.push(scalar(12)?);
+        } else {
+            next_disk_hits.push(false);
+            next_disk_radii.push(0.0);
+            next_disk_dopplers.push(1.0);
+        }
     }
-    Ok(GeodesicChunkProgramExecution { program_hash: actual_hash, states: next_states, statuses })
+    Ok(GeodesicChunkProgramExecution {
+        program_hash: actual_hash,
+        states: next_states,
+        statuses,
+        disk_hits: next_disk_hits,
+        disk_radii: next_disk_radii,
+        disk_dopplers: next_disk_dopplers,
+        state_buffer: output.clone(),
+    })
 }
 
 /// 执行三维 Schwarzschild UCF 图并生成终止分类诊断帧。
@@ -463,6 +507,9 @@ pub fn execute_geodesic_diagnostic_frame_cpu(
     let initial = execute_initial_state_program_cpu(scene, graph)?;
     let mut states = initial.states;
     let bound_infall = initial.bound_infall;
+    let mut disk_hits = vec![false; states.len()];
+    let mut disk_radii = vec![0.0; states.len()];
+    let mut disk_dopplers = vec![1.0; states.len()];
     let mut statuses = vec![0u32; states.len()];
     let chunk_count = scene.trace.max_steps.div_ceil(16).max(1);
     let mut executed_ops = vec!["camera_ray_batch".to_string(), "schwarzschild_initial_state_batch".to_string()];
@@ -472,9 +519,15 @@ pub fn execute_geodesic_diagnostic_frame_cpu(
             graph,
             states,
             bound_infall.clone(),
+            disk_hits.clone(),
+            disk_radii.clone(),
+            disk_dopplers.clone(),
         )?;
         states = result.states;
         statuses = result.statuses;
+        disk_hits = result.disk_hits;
+        disk_radii = result.disk_radii;
+        disk_dopplers = result.disk_dopplers;
         executed_ops.push("schwarzschild_geodesic_rk4_chunk".to_string());
         if statuses.iter().all(|status| *status != 0) {
             break;
