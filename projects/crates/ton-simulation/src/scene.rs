@@ -4,12 +4,13 @@ use ton_renderer::{
     apply_post_process, build_frame_graph_for_resolution, default_camera, default_integrator, Framebuffer, Graph,
     RenderConfig, RenderMode, RenderOutput, Renderer, DEFAULT_EXPOSURE,
 };
-use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonResult};
+use ton_types::{BlackHole, Camera, DiskModelKind, IntegratorKind, TonError, TonResult};
 
 use crate::ucf_cpu::{execute_frame_graph_cpu, CpuGraphExecution};
 use crate::ucf_physics::{
     schwarzschild_capture_silhouette_ucf_cpu,
     schwarzschild_capture_silhouette_ucf_vulkan,
+    schwarzschild_beauty_ucf_vulkan,
 };
 
 #[derive(Debug, Clone)]
@@ -198,6 +199,30 @@ impl Scene {
             self.camera,
             self.width,
             self.height,
+        )
+    }
+
+    /// 使用原生 Vulkan UCF backend 生成已色调映射的 Beauty 帧。
+    ///
+    /// GPU 不可用、程序能力不足、终止预算耗尽或输出非法时直接返回错误，
+    /// 不回退 CPU，也不调用 TON 原生渲染器。
+    pub fn render_frame_ucf_vulkan(&self) -> TonResult<Framebuffer> {
+        let (inner_radius, outer_radius, accretion_rate) = self
+            .disk
+            .as_ref()
+            .map(|disk| (disk.config.inner_radius, disk.config.outer_radius, disk.config.accretion_rate))
+            .ok_or_else(|| TonError::Domain("Vulkan Beauty requires an accretion disk".into()))?;
+        schwarzschild_beauty_ucf_vulkan(
+            self.black_hole,
+            self.camera,
+            self.width,
+            self.height,
+            inner_radius,
+            outer_radius,
+            accretion_rate,
+            self.trace.step_size,
+            self.trace.escape_radius,
+            self.trace.max_steps,
         )
     }
 

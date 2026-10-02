@@ -868,6 +868,151 @@ pub fn compose_sky_ucf_vulkan_batch(
     Ok(output)
 }
 
+/// 执行 Schwarzschild UCF Vulkan Beauty 链并读回显示帧。
+///
+/// 相机射线、初态、测地线、盘面辐射、天空合成和色调映射均通过 UCF
+/// Program 执行。该入口不接受预算耗尽或非有限实例，也不在 GPU 失败时
+/// 切换到 CPU 或原生 TON 渲染器。
+pub fn schwarzschild_beauty_ucf_vulkan(
+    bh: BlackHole,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    inner_radius: f64,
+    outer_radius: f64,
+    accretion_rate: f64,
+    step: f64,
+    escape_radius: f64,
+    max_steps: u32,
+) -> TonResult<Framebuffer> {
+    if width == 0 || height == 0 {
+        return Err(TonError::Domain("Vulkan Beauty resolution must be non-zero".into()));
+    }
+    if max_steps == 0 {
+        return Err(TonError::Domain("Vulkan Beauty step budget must be non-zero".into()));
+    }
+    let uv = (0..height)
+        .flat_map(|y| {
+            (0..width).map(move |x| {
+                let aspect = width as f64 / height as f64;
+                (
+                    ((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * aspect,
+                    1.0 - (y as f64 + 0.5) / height as f64 * 2.0,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let count = u32::try_from(uv.len())
+        .map_err(|_| TonError::Domain("Vulkan Beauty pixel count exceeds u32 capacity".into()))?;
+    let directions = camera_ray_ucf_vulkan_batch(camera, &uv)?;
+    let rays = directions
+        .iter()
+        .copied()
+        .map(|direction| (camera.position, direction))
+        .collect::<Vec<_>>();
+    let (mut states, bound_flags) = schwarzschild_initial_state_ucf_vulkan_batch_with_flags(
+        bh.mass,
+        bh.critical_impact_parameter(),
+        &rays,
+    )?;
+    let mut disk_hits = vec![false; states.len()];
+    let mut disk_radii = vec![0.0; states.len()];
+    let mut disk_dopplers = vec![1.0; states.len()];
+    let mut statuses = vec![0u32; states.len()];
+    let mut completed_steps = 0u32;
+    while completed_steps < max_steps && statuses.iter().any(|status| *status == 0) {
+        let chunk_steps = (max_steps - completed_steps).min(16);
+        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+            bh.mass,
+            &states,
+            &bound_flags,
+            &disk_hits,
+            &disk_radii,
+            &disk_dopplers,
+            inner_radius,
+            outer_radius,
+            step,
+            escape_radius,
+            chunk_steps,
+        )?;
+        for (index, (state, status, hit, radius, doppler)) in results.into_iter().enumerate() {
+            states[index] = state;
+            statuses[index] = status;
+            disk_hits[index] = hit;
+            disk_radii[index] = radius;
+            disk_dopplers[index] = doppler;
+        }
+        completed_steps += chunk_steps;
+    }
+    for status in &mut statuses {
+        if *status == 0 {
+            *status = 3;
+        }
+    }
+    if let Some((index, status)) = statuses
+        .iter()
+        .enumerate()
+        .find(|(_, status)| **status == 3 || **status == 4)
+    {
+        return Err(TonError::Domain(format!(
+            "Vulkan Beauty contains non-beauty geodesic instance {index} with status {status}"
+        )));
+    }
+    let state_buffer = states
+        .iter()
+        .enumerate()
+        .flat_map(|(index, state)| {
+            [
+                state.t as f32,
+                state.r as f32,
+                state.theta as f32,
+                state.phi as f32,
+                state.ut as f32,
+                state.ur as f32,
+                state.utheta as f32,
+                state.uphi as f32,
+                statuses[index] as f32,
+                bound_flags[index] as u8 as f32,
+                disk_hits[index] as u8 as f32,
+                disk_radii[index] as f32,
+                disk_dopplers[index] as f32,
+                0.0,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let radiance = disk_radiance_ucf_vulkan_from_geodesic_state(
+        &state_buffer,
+        count,
+        inner_radius,
+        outer_radius,
+        bh.mass,
+        accretion_rate,
+    )?;
+    let direction_buffer = directions
+        .iter()
+        .flat_map(|direction| [direction.x as f32, direction.y as f32, direction.z as f32])
+        .collect::<Vec<_>>();
+    let composite = compose_sky_ucf_vulkan_batch(&direction_buffer, &state_buffer, &radiance, count)?;
+    let display = tone_map_ucf_vulkan_batch(&composite, count)?;
+    let expected = uv.len().saturating_mul(3);
+    if display.len() != expected {
+        return Err(TonError::Domain("Vulkan Beauty display buffer has invalid length".into()));
+    }
+    if display.iter().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value)) {
+        return Err(TonError::Domain("Vulkan Beauty display buffer is not finite display data".into()));
+    }
+    let pixels = display
+        .chunks_exact(3)
+        .map(|rgb| Rgb::new(rgb[0] as f64, rgb[1] as f64, rgb[2] as f64))
+        .collect::<Vec<_>>();
+    Ok(Framebuffer {
+        width,
+        height,
+        pixels,
+        encoding: ton_renderer::FramebufferEncoding::Display,
+    })
+}
+
 /// 从相机射线开始，依次执行 Vulkan 初态 Program 与 Vulkan 有界测地线 chunk。
 ///
 /// 初态和终止状态都来自 UCF GPU buffer。该入口不调用 TON 原生积分器，
@@ -1217,6 +1362,25 @@ mod tests {
             report.total
         );
         assert!(report.agreement <= report.total);
+    }
+
+    #[test]
+    fn vulkan_beauty_rejects_invalid_resolution_before_backend_creation() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let error = schwarzschild_beauty_ucf_vulkan(
+            bh,
+            Camera::cinematic(bh),
+            0,
+            2,
+            6.0,
+            24.0,
+            1.0,
+            0.04,
+            100.0,
+            16,
+        )
+        .expect_err("zero-width Beauty frame must fail");
+        assert!(error.to_string().contains("resolution must be non-zero"));
     }
 
     #[test]
