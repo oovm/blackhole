@@ -630,7 +630,14 @@ pub fn schwarzschild_geodesic_diagnostic_ucf_vulkan(bh: BlackHole, camera: Camer
     })).collect::<Vec<_>>();
     let directions = camera_ray_ucf_vulkan_batch(camera, &uv)?;
     let rays = directions.into_iter().map(|direction| (camera.position, direction)).collect::<Vec<_>>();
-    let states = schwarzschild_geodesic_integrate_ucf_vulkan_rays(bh.mass, &rays, step, escape_radius, max_steps)?;
+    let states = schwarzschild_geodesic_integrate_ucf_vulkan_from_rays(
+        bh.mass,
+        bh.critical_impact_parameter(),
+        &rays,
+        step,
+        escape_radius,
+        max_steps,
+    )?;
     let mut frame = Framebuffer::new(width, height);
     frame.encoding = ton_renderer::FramebufferEncoding::Display;
     for (index, (_, status)) in states.into_iter().enumerate() {
