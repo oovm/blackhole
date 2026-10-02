@@ -32,7 +32,9 @@ fn dispatch_task(
     let mut params = uniforms;
     params.insert("program".into(), program_param(program)?);
     params.insert("output".into(), ParamValue::I64(output.0 as i64));
-    params.insert(format!("buffer_{output_slot}"), ParamValue::I64(output.0 as i64));
+    params
+        .entry(format!("buffer_{output_slot}"))
+        .or_insert(ParamValue::I64(output.0 as i64));
     if let Some(input) = input {
         params.insert("buffer_0".into(), ParamValue::I64(input.0 as i64));
         params.insert(format!("buffer_{input_slot}"), ParamValue::I64(input.0 as i64));
