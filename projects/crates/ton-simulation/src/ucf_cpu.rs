@@ -1,11 +1,11 @@
 //! UCF 帧图 CPU 参考执行：按任务链顺序校验 `op` 标签并驱动后处理。
 
 use ton_renderer::{
-    apply_tone_map_ucf, bloom_pass_ucf, Framebuffer, Graph, DEFAULT_BLOOM_INTENSITY,
+    apply_tone_map_ucf, bloom_pass_ucf, Framebuffer, FramebufferEncoding, Graph, DEFAULT_BLOOM_INTENSITY,
     DEFAULT_BLOOM_THRESHOLD,
 };
 use ton_geodesic::SphericalState;
-use ton_types::{Camera, DiskModelKind, IntegratorKind, TonError, TonResult, Vec3};
+use ton_types::{Camera, DiskModelKind, IntegratorKind, Rgb, TonError, TonResult, Vec3};
 use ton_ucf_frontend::program_hash;
 use ucf_backend_cpu::CpuBackend;
 use ucf_program::Value;
@@ -250,6 +250,15 @@ pub fn execute_geodesic_chunk_program_cpu(
     graph: &Graph,
 ) -> TonResult<GeodesicChunkProgramExecution> {
     let initial = execute_initial_state_program_cpu(scene, graph)?;
+    execute_geodesic_chunk_program_cpu_with_state(scene, graph, initial.states, initial.bound_infall)
+}
+
+fn execute_geodesic_chunk_program_cpu_with_state(
+    scene: &Scene,
+    graph: &Graph,
+    states: Vec<SphericalState>,
+    bound_infall: Vec<bool>,
+) -> TonResult<GeodesicChunkProgramExecution> {
     let task = graph
         .tasks
         .nodes
@@ -271,10 +280,12 @@ pub fn execute_geodesic_chunk_program_cpu(
             "geodesic chunk program hash mismatch: expected {hash}, actual {actual_hash}"
         )));
     }
-    let state_input = initial
-        .states
+    if states.len() != bound_infall.len() {
+        return Err(TonError::Domain("geodesic chunk state and bound buffers differ in length".into()));
+    }
+    let state_input = states
         .iter()
-        .zip(&initial.bound_infall)
+        .zip(&bound_infall)
         .flat_map(|(state, bound)| {
             [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi]
                 .into_iter()
@@ -285,7 +296,7 @@ pub fn execute_geodesic_chunk_program_cpu(
     let report = CpuBackend::new()
         .execute_program_with_buffers(
             &program,
-            initial.states.len() as u32,
+            states.len() as u32,
             [
                 (0, Value::F32(scene.black_hole.mass as f32)),
                 (1, Value::F32(scene.trace.dphi as f32)),
@@ -298,18 +309,18 @@ pub fn execute_geodesic_chunk_program_cpu(
         .buffers
         .get(&0)
         .ok_or_else(|| TonError::Domain("geodesic chunk state buffer was not written".into()))?;
-    if output.len() != initial.states.len() * 10 {
+    if output.len() != states.len() * 10 {
         return Err(TonError::Domain("geodesic chunk state buffer has invalid length".into()));
     }
-    let mut states = Vec::with_capacity(initial.states.len());
-    let mut statuses = Vec::with_capacity(initial.states.len());
+    let mut next_states = Vec::with_capacity(states.len());
+    let mut statuses = Vec::with_capacity(states.len());
     for values in output.chunks_exact(10) {
         let scalar = |index: usize| {
             values[index]
                 .as_f64()
                 .map_err(|error| TonError::Domain(format!("geodesic chunk value {index}: {error}")))
         };
-        states.push(SphericalState {
+        next_states.push(SphericalState {
             t: scalar(0)?,
             r: scalar(1)?,
             theta: scalar(2)?,
@@ -321,7 +332,57 @@ pub fn execute_geodesic_chunk_program_cpu(
         });
         statuses.push(scalar(8)? as u32);
     }
-    Ok(GeodesicChunkProgramExecution { program_hash: actual_hash, states, statuses })
+    Ok(GeodesicChunkProgramExecution { program_hash: actual_hash, states: next_states, statuses })
+}
+
+/// 执行三维 Schwarzschild UCF 图并生成终止分类诊断帧。
+///
+/// 该帧只证明 UCF CPU interpreter 的图内执行和终止分类，不是 Beauty 输出。
+pub fn execute_geodesic_diagnostic_frame_cpu(
+    scene: &Scene,
+    graph: &Graph,
+) -> TonResult<(Framebuffer, CpuGraphExecution)> {
+    if scene.integrator != IntegratorKind::Geodesic3d {
+        return Err(TonError::Domain("CPU geodesic diagnostic requires Geodesic3d graph".into()));
+    }
+    let _camera = execute_camera_program_cpu(scene, graph)?;
+    let initial = execute_initial_state_program_cpu(scene, graph)?;
+    let mut states = initial.states;
+    let bound_infall = initial.bound_infall;
+    let mut statuses = vec![0u32; states.len()];
+    let chunk_count = scene.trace.max_steps.div_ceil(16).max(1);
+    let mut executed_ops = vec!["camera_ray_batch".to_string(), "schwarzschild_initial_state_batch".to_string()];
+    for _ in 0..chunk_count {
+        let result = execute_geodesic_chunk_program_cpu_with_state(
+            scene,
+            graph,
+            states,
+            bound_infall.clone(),
+        )?;
+        states = result.states;
+        statuses = result.statuses;
+        executed_ops.push("schwarzschild_geodesic_rk4_chunk".to_string());
+        if statuses.iter().all(|status| *status != 0) {
+            break;
+        }
+    }
+    for status in &mut statuses {
+        if *status == 0 {
+            *status = 3;
+        }
+    }
+    let mut frame = Framebuffer::new(scene.width, scene.height);
+    frame.encoding = FramebufferEncoding::Display;
+    for (pixel, status) in frame.pixels.iter_mut().zip(statuses) {
+        *pixel = match status {
+            1 => Rgb::BLACK,
+            2 => Rgb::WHITE,
+            3 => Rgb::new(1.0, 0.0, 0.0),
+            4 => Rgb::new(1.0, 0.0, 1.0),
+            _ => Rgb::new(0.0, 1.0, 1.0),
+        };
+    }
+    Ok((frame, CpuGraphExecution { executed_ops }))
 }
 
 fn task_op(graph: &Graph, task_id: u64) -> TonResult<&str> {
@@ -372,7 +433,9 @@ pub fn execute_frame_graph_cpu(
     graph
         .validate()
         .map_err(|e| TonError::Domain(format!("graph validate: {e}")))?;
-    let _ = scene;
+    if scene.integrator == IntegratorKind::Geodesic3d && scene.render_mode == ton_renderer::RenderMode::TerminationMap {
+        return execute_geodesic_diagnostic_frame_cpu(scene, graph);
+    }
     Err(TonError::Domain(
         "UCF CPU frame execution is unavailable until the graph is bound to real UCF programs and resources".into(),
     ))
@@ -406,6 +469,26 @@ mod tests {
             .build();
         let error = scene.render_frame_ucf_cpu().expect_err("must reject fake execution");
         assert!(error.to_string().contains("real UCF programs"));
+    }
+
+    #[test]
+    fn cpu_executor_renders_geodesic_termination_from_bound_programs() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_render_mode(ton_renderer::RenderMode::TerminationMap)
+            .with_resolution(8, 5)
+            .with_max_steps(32)
+            .build();
+        let (frame, report) = scene.render_frame_ucf_cpu().expect("real UCF diagnostic frame");
+        assert_eq!((frame.width, frame.height), (8, 5));
+        assert_eq!(frame.pixels.len(), 40);
+        assert_eq!(report.executed_ops[0], "camera_ray_batch");
+        assert_eq!(report.executed_ops[1], "schwarzschild_initial_state_batch");
+        assert!(report.executed_ops.iter().skip(2).all(|op| op == "schwarzschild_geodesic_rk4_chunk"));
+        assert!(frame.pixels.iter().all(|pixel| {
+            [Rgb::BLACK, Rgb::WHITE, Rgb::new(1.0, 0.0, 0.0), Rgb::new(1.0, 0.0, 1.0)]
+                .contains(pixel)
+        }));
     }
 
     #[test]
