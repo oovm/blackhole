@@ -22,6 +22,7 @@ fn main() -> ExitCode {
     let integrator = parse_integrator(&args);
     let disk_model = parse_disk_model(&args);
     let ucf_tone = args.iter().any(|a| a == "--ucf-tone");
+    let ucf_vulkan = args.iter().any(|a| a == "--ucf-vulkan");
     let bloom = args.iter().any(|a| a == "--bloom");
     let strict = args.iter().any(|a| a == "--strict");
     let convergence = args.iter().any(|a| a == "--convergence");
@@ -85,7 +86,24 @@ fn main() -> ExitCode {
         trace.escape_radius
     );
 
-    let (fb, failure_pct) = if render_mode != RenderMode::Beauty {
+    let (fb, failure_pct) = if ucf_vulkan {
+        if render_mode != RenderMode::Beauty {
+            eprintln!("--ucf-vulkan only supports Beauty mode");
+            return ExitCode::from(4);
+        }
+        if spin.abs() > f64::EPSILON {
+            eprintln!("--ucf-vulkan Schwarzschild path does not support Kerr yet");
+            return ExitCode::from(4);
+        }
+        let frame = match scene.render_frame_ucf_vulkan() {
+            Ok(frame) => frame,
+            Err(error) => {
+                eprintln!("UCF Vulkan Beauty failed without fallback: {error}");
+                return ExitCode::from(3);
+            }
+        };
+        (frame, 0.0)
+    } else if render_mode != RenderMode::Beauty {
         let output = scene.render_frame_with_histogram();
         if let Some(hist) = output.termination_histogram {
             eprintln!("{}", hist);
