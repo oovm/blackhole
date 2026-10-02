@@ -2,11 +2,9 @@
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ton_ucf_frontend::{
-    camera_ray_batch, disk_shade_novikov, geodesic_capture_classify, geodesic_radial_infall_steps,
-    equatorial_orbit_rk4_step, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk,
-    schwarzschild_initial_state_batch,
+    Program, camera_ray_batch, disk_shade_novikov, disk_shade_novikov_batch, equatorial_orbit_rk4_step, geodesic_capture_classify,
+    geodesic_radial_infall_steps, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk, schwarzschild_initial_state_batch,
     tone_map_aces, vector_math_normalize,
-    Program,
 };
 use ucf_types::ParamValue;
 
@@ -29,11 +27,7 @@ pub struct KernelInstance {
 
 impl KernelBinding {
     pub fn from_program(name: impl Into<String>, program: Program) -> Self {
-        Self {
-            program_name: name.into(),
-            program_hash: program_hash(&program),
-            program,
-        }
+        Self { program_name: name.into(), program_hash: program_hash(&program), program }
     }
 }
 
@@ -54,12 +48,9 @@ pub fn trace_kernel(integrator: IntegratorKind) -> KernelInstance {
             } else {
                 ("geodesic_radial_infall_steps", geodesic_radial_infall_steps())
             };
-            return KernelInstance {
-                op: integrator.ucf_op_name().to_string(),
-                binding: KernelBinding::from_program(name, p),
-            };
+            return KernelInstance { op: integrator.ucf_op_name().to_string(), binding: KernelBinding::from_program(name, p) };
         }
-}
+    }
 }
 
 /// 解析捕获分类程序绑定（史瓦西 `b < b_c`）。
@@ -74,6 +65,20 @@ pub fn shade_kernel(disk: DiskModelKind) -> KernelBinding {
         DiskModelKind::NovikovThorneThin => {
             let p = disk_shade_novikov();
             KernelBinding::from_program("disk_shade_novikov", p)
+        }
+        _ => {
+            let p = vector_math_normalize();
+            KernelBinding::from_program("vector_math_normalize", p)
+        }
+    }
+}
+
+/// 盘面批处理着色任务程序绑定。
+pub fn shade_batch_kernel(disk: DiskModelKind) -> KernelBinding {
+    match disk {
+        DiskModelKind::NovikovThorneThin => {
+            let p = disk_shade_novikov_batch();
+            KernelBinding::from_program("disk_shade_novikov_batch", p)
         }
         _ => {
             let p = vector_math_normalize();
@@ -109,33 +114,15 @@ pub fn bloom_kernel() -> KernelBinding {
 /// 将 `program_hash` / `program_name` 写入指定任务节点 `params`。
 pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) {
     if let Some(node) = graph.tasks.nodes.iter_mut().find(|n| n.id.0 == task_id) {
-        node.params.insert(
-            "program_hash".into(),
-            ParamValue::I64(binding.program_hash as i64),
-        );
+        node.params.insert("program_hash".into(), ParamValue::I64(binding.program_hash as i64));
         let body = serde_json::to_string(&binding.program).expect("UCF program serializes");
-        node.params.insert(
-            "program".into(),
-            ParamValue::Program {
-                version: binding.program.version,
-                hash: binding.program_hash,
-                body,
-            },
-        );
-        node.params.insert(
-            "program_name".into(),
-            ParamValue::Str(binding.program_name.clone()),
-        );
+        node.params.insert("program".into(), ParamValue::Program { version: binding.program.version, hash: binding.program_hash, body });
+        node.params.insert("program_name".into(), ParamValue::Str(binding.program_name.clone()));
     }
 }
 
 /// 帧图构建后标注 generate_rays / trace / shade / 后处理的程序绑定。
-pub fn annotate_frame_programs(
-    graph: &mut Graph,
-    integrator: IntegratorKind,
-    disk: DiskModelKind,
-    bloom: bool,
-) {
+pub fn annotate_frame_programs(graph: &mut Graph, integrator: IntegratorKind, disk: DiskModelKind, bloom: bool) {
     attach_binding(graph, 11, &generate_rays_kernel());
     let trace = trace_kernel(integrator);
     let trace_task = if matches!(integrator, IntegratorKind::Geodesic3d) { 13 } else { 12 };
@@ -143,7 +130,7 @@ pub fn annotate_frame_programs(
         attach_binding(graph, 12, &schwarzschild_initial_state_kernel());
     }
     attach_binding(graph, trace_task, &trace.binding);
-    let shade = shade_kernel(disk);
+    let shade = shade_batch_kernel(disk);
     let shade_task = trace_task + 1;
     attach_binding(graph, shade_task, &shade);
     if bloom {
