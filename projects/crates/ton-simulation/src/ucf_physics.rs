@@ -21,7 +21,7 @@ fn program_param(program: &ucf_program::Program) -> TonResult<ParamValue> {
     Ok(ParamValue::Program { version: program.version, hash: ton_ucf_frontend::program_hash(program), body })
 }
 
-fn dispatch_task(
+pub(crate) fn dispatch_task(
     id: u64,
     program: &ucf_program::Program,
     count: u32,
