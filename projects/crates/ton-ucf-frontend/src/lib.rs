@@ -39,6 +39,8 @@ mod bloom_extract;
 pub use bloom_extract::HdrBrightExtractBuilder;
 mod box_blur;
 pub use box_blur::UcfBoxBlur3x3Builder;
+mod bloom_scale;
+pub use bloom_scale::{UcfDownsample2xRgbBuilder, UcfUpsampleRgbBuilder};
 pub use adaptive_trace::SchwarzschildAdaptiveTraceChunkBuilder;
 
 pub use ucf_program::{
