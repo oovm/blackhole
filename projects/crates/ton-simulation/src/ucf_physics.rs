@@ -611,6 +611,7 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
         &mut backend,
         mass,
         states,
+        &vec![0; states.len()],
         bound_flags,
         disk_hits,
         disk_radii,
@@ -627,6 +628,7 @@ fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
     backend: &mut VulkanBackend,
     mass: f64,
     states: &[SphericalState],
+    statuses: &[u32],
     bound_flags: &[bool],
     disk_hits: &[bool],
     disk_radii: &[f64],
@@ -640,7 +642,8 @@ fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
     if states.is_empty() {
         return Ok(Vec::new());
     }
-    if states.len() != bound_flags.len()
+    if states.len() != statuses.len()
+        || states.len() != bound_flags.len()
         || states.len() != disk_hits.len()
         || states.len() != disk_radii.len()
         || states.len() != disk_dopplers.len()
@@ -669,7 +672,7 @@ fn schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
     backend.prepare(&graph).map_err(|e| TonError::Domain(format!("prepare Vulkan disk geodesic graph: {e}")))?;
     let input = states.iter().enumerate().flat_map(|(index, state)| [
         state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi,
-        0.0, bound_flags[index] as u8 as f64,
+        statuses[index] as f64, bound_flags[index] as u8 as f64,
         disk_hits[index] as u8 as f64, disk_radii[index], disk_dopplers[index], 0.0,
     ]).map(|value| value as f32).collect::<Vec<_>>();
     backend.write_f32(ResourceId(18), &input).map_err(|e| TonError::Domain(format!("upload Vulkan disk geodesic state: {e}")))?;
@@ -783,10 +786,13 @@ pub fn schwarzschild_disk_radiance_ucf_vulkan(
     let mut disk_radii = vec![0.0; states.len()];
     let mut disk_dopplers = vec![1.0; states.len()];
     let mut statuses = vec![0u32; states.len()];
+    let mut backend = VulkanBackend::new().map_err(|e| TonError::Domain(format!("create Vulkan disk trace backend: {e}")))?;
     for _ in 0..max_steps.div_ceil(VULKAN_GEODESIC_CHUNK_STEPS).max(1) {
-        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
+            &mut backend,
             bh.mass,
             &states,
+            &statuses,
             &bound_flags,
             &disk_hits,
             &disk_radii,
@@ -996,6 +1002,7 @@ pub fn schwarzschild_beauty_ucf_vulkan(
             &mut beauty_backend,
             bh.mass,
             &states,
+            &statuses,
             &bound_flags,
             &disk_hits,
             &disk_radii,
@@ -1220,6 +1227,32 @@ pub fn schwarzschild_geodesic_rk4_step_ucf_vulkan(mass: f64, state: SphericalSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vulkan_disk_chunk_preserves_terminal_state_and_metadata_when_available() {
+        let mut backend = match VulkanBackend::new() {
+            Ok(backend) => backend,
+            Err(error) => { eprintln!("Vulkan unavailable: {error}"); return; }
+        };
+        let state = SphericalState { t: 1.0, r: 20.0, theta: 1.0, phi: 0.2, ut: 1.0, ur: 0.5, utheta: 0.0, uphi: 0.0 };
+        let states = vec![state; 5];
+        let statuses = [1, 2, 3, 4, 0];
+        let output = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk_backend(
+            &mut backend, 1.0, &states, &statuses, &[false; 5], &[true; 5], &[8.0; 5], &[1.1; 5],
+            6.0, 30.0, 0.01, 100.0, 4,
+        ).unwrap();
+        for (index, (actual, status, hit, radius, doppler)) in output.iter().enumerate().take(4) {
+            assert_eq!(*status, statuses[index]);
+            assert_eq!(actual.r, state.r);
+            assert_eq!(actual.t, state.t);
+            assert!(*hit);
+            assert_eq!(*radius, 8.0);
+            assert!((*doppler - 1.1).abs() < 1.0e-6);
+        }
+        assert!(output[4].0.r > state.r);
+        assert_eq!(output[4].1, 0);
+        assert_eq!(output[4].3, 8.0);
+    }
 
     #[test]
     fn vulkan_resident_beauty_post_matches_separate_stages_when_available() {

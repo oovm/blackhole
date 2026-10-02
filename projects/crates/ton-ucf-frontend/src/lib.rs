@@ -702,8 +702,12 @@ fn schwarzschild_geodesic_rk4_integrate_mode(
             builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(10))),
         )
     });
-    let disk_radius = detect_disk.then(|| builder.let_value(ucf_program::Ty::f32(), builder.const_f32(0.0)));
-    let disk_doppler = detect_disk.then(|| builder.let_value(ucf_program::Ty::f32(), builder.const_f32(1.0)));
+    let disk_radius = detect_disk.then(|| {
+        builder.let_value(ucf_program::Ty::f32(), builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(11))))
+    });
+    let disk_doppler = detect_disk.then(|| {
+        builder.let_value(ucf_program::Ty::f32(), builder.load_buffer(0, b(&builder, BinOp::Add, base.clone(), builder.const_u32(12))))
+    });
     let mass = builder.load_uniform(0);
     let step = builder.load_uniform(1);
     let horizon = b(&builder, BinOp::Mul, builder.const_f32(2.0), mass.clone());
@@ -1241,6 +1245,24 @@ mod integration_tests {
         interpreter.with_buffer(0, state);
         interpreter.run_parallel(&program, 1).expect("disk geodesic execution");
         assert_eq!(interpreter.buffer(0).expect("extended state output").len(), 14);
+    }
+
+    #[test]
+    fn disk_geodesic_chunk_preserves_terminal_metadata_across_dispatches() {
+        let program = schwarzschild_geodesic_rk4_chunk_with_disk(4);
+        for status in [1.0, 2.0, 3.0, 4.0] {
+            let state = [1.0, 20.0, 1.0, 0.2, 1.0, 0.5, 0.0, 0.0, status, 0.0, 1.0, 8.0, 1.1, 0.0]
+                .into_iter().map(Value::F32).collect::<Vec<_>>();
+            let mut interpreter = CpuInterpreter::new();
+            for (slot, value) in [1.0, 0.01, 100.0, 6.0, 30.0].into_iter().enumerate() {
+                interpreter.with_uniform(slot as u32, Value::F32(value));
+            }
+            interpreter.with_buffer(0, state.clone());
+            for _ in 0..2 {
+                interpreter.run_parallel(&program, 1).expect("terminal disk chunk execution");
+                assert_eq!(interpreter.buffer(0).expect("terminal metadata"), &state);
+            }
+        }
     }
 
     #[test]
