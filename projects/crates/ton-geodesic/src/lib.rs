@@ -15,6 +15,8 @@ mod geodesic3d;
 mod kerr_equatorial;
 mod orbit;
 mod radiance;
+mod disk_frequency;
+pub use disk_frequency::schwarzschild_disk_frequency_shift;
 mod radiance_dispatch;
 mod ray;
 mod sem_classical;
