@@ -70,6 +70,20 @@ fn camera_uniforms(camera: Camera) -> Vec<(u32, Value)> {
     .collect()
 }
 
+fn program_task<'a>(graph: &'a Graph, program_name: &str) -> TonResult<&'a ucf_ir::TaskNode> {
+    graph
+        .tasks
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.params.get("program_name"),
+                Some(ParamValue::Str(name)) if name == program_name
+            )
+        })
+        .ok_or_else(|| TonError::Domain(format!("UCF program task {program_name} is missing")))
+}
+
 /// 从帧图节点取出并执行相机 Program，不调用 TON 原生相机实现替代执行。
 pub fn execute_camera_program_cpu(
     scene: &Scene,
@@ -78,12 +92,7 @@ pub fn execute_camera_program_cpu(
     graph
         .validate()
         .map_err(|error| TonError::Domain(format!("camera graph validate: {error}")))?;
-    let task = graph
-        .tasks
-        .nodes
-        .iter()
-        .find(|node| node.id.0 == 11)
-        .ok_or_else(|| TonError::Domain("camera task 11 is missing".into()))?;
+    let task = program_task(graph, "camera_ray_batch")?;
     let ParamValue::Program { hash, body, .. } = task
         .params
         .get("program")
@@ -162,12 +171,7 @@ pub fn execute_initial_state_program_cpu(
         return Err(TonError::Domain("initial state program requires Geodesic3d graph".into()));
     }
     let camera = execute_camera_program_cpu(scene, graph)?;
-    let task = graph
-        .tasks
-        .nodes
-        .iter()
-        .find(|node| node.id.0 == 12)
-        .ok_or_else(|| TonError::Domain("initial state task 12 is missing".into()))?;
+    let task = program_task(graph, "schwarzschild_initial_state_batch")?;
     let ParamValue::Program { hash, body, .. } = task
         .params
         .get("program")
@@ -259,12 +263,7 @@ fn execute_geodesic_chunk_program_cpu_with_state(
     states: Vec<SphericalState>,
     bound_infall: Vec<bool>,
 ) -> TonResult<GeodesicChunkProgramExecution> {
-    let task = graph
-        .tasks
-        .nodes
-        .iter()
-        .find(|node| node.id.0 == 13)
-        .ok_or_else(|| TonError::Domain("geodesic chunk task 13 is missing".into()))?;
+    let task = program_task(graph, "schwarzschild_geodesic_rk4_chunk")?;
     let ParamValue::Program { hash, body, .. } = task
         .params
         .get("program")
