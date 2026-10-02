@@ -78,6 +78,40 @@ mod tests {
         assert!((result[16] - expected_null).abs() < 1.0e-15);
         assert_eq!(execute(&program, &result, [1.0, 0.02, 2.0002, 80.0, 6.0, 20.0]), result);
     }
+
+    #[test]
+    fn event_trace_builder_exposes_fixed_capacity_event_output() {
+        let program = SchwarzschildCartesianF64EventTraceBuilder::<4>::new()
+            .maximum_steps(4)
+            .build()
+            .unwrap();
+        crate::validate_program(&program).unwrap();
+        let mut input = [0.0; 29];
+        input[3] = 10.0;
+        input[4] = 1.0;
+        input[7] = -1.0;
+        input[9] = 0.04;
+        input[19] = 1.0;
+        input[20] = 100.0;
+        let mut cpu = CpuInterpreter::new();
+        for (slot, value) in [1.0, 0.04, 2.0002, 80.0, 6.0, 20.0].into_iter().enumerate() {
+            cpu.with_uniform(slot as u32, Value::F64(value));
+        }
+        cpu.with_buffer(1, input.into_iter().map(Value::F64).collect());
+        cpu.with_buffer(2, vec![Value::F64(0.0); 29]);
+        cpu.with_buffer(3, vec![Value::F64(0.0); 2 + 4 * 9]);
+        cpu.run_parallel(&program, 1).unwrap();
+        let output = cpu.buffer(3).unwrap();
+        assert_eq!(output.len(), 38);
+        assert_eq!(output[0].as_f64().unwrap(), 0.0);
+        assert_eq!(output[1].as_f64().unwrap(), 0.0);
+        assert!(output[2..].iter().all(|value| value.as_f64().unwrap() == 0.0));
+    }
+
+    #[test]
+    fn event_trace_builder_rejects_zero_capacity() {
+        assert!(SchwarzschildCartesianF64EventTraceBuilder::<0>::new().build().is_err());
+    }
 }
 
 fn both(builder: &StructuredFunctionBuilder, left: Expr, right: Expr) -> Expr {
@@ -207,11 +241,21 @@ impl SchwarzschildCartesianF64TraceBuilder {
     pub fn surface_tolerance(mut self, value: f64) -> Self { self.surface_tolerance = value; self }
     /// 生成通用 UCF F64 程序。
     pub fn build(self) -> Result<Program, String> {
+        self.build_with_event_capacity(None)
+    }
+    /// 生成可选固定容量事件输出的通用 UCF F64 程序。
+    pub(crate) fn build_with_event_capacity(self, event_capacity: Option<u32>) -> Result<Program, String> {
         if self.maximum_steps == 0 || self.maximum_steps > 65536 || self.maximum_bisections == 0 || self.maximum_bisections > 64
             || !self.surface_tolerance.is_finite() || self.surface_tolerance <= 0.0 {
             return Err("invalid F64 trace budget or tolerance".into());
         }
-        let mut builder = StructuredFunctionBuilder::new("schwarzschild_cartesian_f64_trace");
+        if matches!(event_capacity, Some(0) | Some(65..)) { return Err("invalid F64 event capacity".into()); }
+        let function_name = if event_capacity.is_some() {
+            "schwarzschild_cartesian_f64_event_trace"
+        } else {
+            "schwarzschild_cartesian_f64_trace"
+        };
+        let mut builder = StructuredFunctionBuilder::new(function_name);
         let base = b(&builder, BinOp::Mul, builder.global_id(), builder.const_u32(29));
         let record: [u32; 29] = std::array::from_fn(|index| {
             let value = builder.load_buffer(1, b(&builder, BinOp::Add, base.clone(), builder.const_u32(index as u32)));
@@ -256,6 +300,10 @@ impl SchwarzschildCartesianF64TraceBuilder {
             b(&builder, BinOp::Gt, radial_dot(&builder, &initial), builder.const_f64(0.0)));
         builder.store_local(record[8], builder.select(initial_running,
             builder.select(initial_capture, builder.const_f64(1.0), builder.select(initial_escape, builder.const_f64(2.0), builder.const_f64(0.0))), Expr::LoadLocal(record[8])));
+        let event_base = event_capacity.map(|maximum_events| {
+            let stride = 2 + maximum_events * 9;
+            b(&builder, BinOp::Mul, builder.global_id(), builder.const_u32(stride))
+        });
         let running = b(&builder, BinOp::Eq, Expr::LoadLocal(record[8]), builder.const_f64(0.0));
         builder.bounded_while(running, self.maximum_steps, |builder| {
             let start = snapshot(builder, std::array::from_fn(|index| Expr::LoadLocal(record[index])));
@@ -308,8 +356,21 @@ impl SchwarzschildCartesianF64TraceBuilder {
             for index in 0..8 { builder.store_local(record[index + 21], builder.select(first_hit.clone(), disk_state[index].clone(), Expr::LoadLocal(record[index + 21]))); }
             builder.store_local(record[14], builder.select(first_hit.clone(), disk_radius, Expr::LoadLocal(record[14])));
             builder.store_local(record[15], builder.select(first_hit,
-                b(builder, BinOp::Add, Expr::LoadLocal(record[12]), b(builder, BinOp::Mul, step.clone(), disk_fraction)), Expr::LoadLocal(record[15])));
+                b(builder, BinOp::Add, Expr::LoadLocal(record[12]), b(builder, BinOp::Mul, step.clone(), disk_fraction.clone())), Expr::LoadLocal(record[15])));
             builder.store_local(record[13], builder.select(hit.clone(), b(builder, BinOp::Add, Expr::LoadLocal(record[13]), builder.const_f64(1.0)), Expr::LoadLocal(record[13])));
+            if let (Some(maximum_events), Some(event_base)) = (event_capacity, event_base.as_ref()) {
+                let affine = b(builder, BinOp::Add, Expr::LoadLocal(record[12]), b(builder, BinOp::Mul, step.clone(), disk_fraction.clone()));
+                let values = [affine, disk_state[0].clone(), disk_state[1].clone(), disk_state[2].clone(),
+                    disk_state[3].clone(), disk_state[4].clone(), disk_state[5].clone(), disk_state[6].clone(), disk_state[7].clone()];
+                for event_index in 0..maximum_events {
+                    let write_event = both(builder, hit.clone(), b(builder, BinOp::Eq,
+                        Expr::LoadLocal(record[13]), builder.const_f64(event_index as f64)));
+                    for (offset, value) in values.iter().cloned().enumerate() {
+                        let index = b(builder, BinOp::Add, event_base.clone(), builder.const_u32(2 + event_index * 9 + offset as u32));
+                        builder.store_buffer(3, index, builder.select(write_event.clone(), value, builder.const_f64(0.0)));
+                    }
+                }
+            }
             let terminal: [Expr; 8] = std::array::from_fn(|index| builder.select(capture_ok.clone(), capture_state[index].clone(),
                 builder.select(escape_ok.clone(), escape_state[index].clone(), end[index].clone())));
             observe(builder, &record, &end, &mass, accepted.clone());
@@ -326,7 +387,49 @@ impl SchwarzschildCartesianF64TraceBuilder {
         for (index, local) in record.into_iter().enumerate() {
             builder.store_buffer(2, b(&builder, BinOp::Add, base.clone(), builder.const_u32(index as u32)), Expr::LoadLocal(local));
         }
+        if let Some(maximum_events) = event_capacity {
+            // 事件输出布局为 `[count, overflow, event[0..N]]`，每个事件为
+            // `[affine,t,x,y,z,E,vx,vy,vz]`。count 是实际写入数量，overflow
+            // 表示物理命中数超过固定容量。宿主必须在 dispatch 前清零该资源。
+            let event_stride = 2 + maximum_events * 9;
+            let event_base = b(&builder, BinOp::Mul, builder.global_id(), builder.const_u32(event_stride));
+            let count = builder.select(b(&builder, BinOp::Lt, Expr::LoadLocal(record[13]), builder.const_f64(maximum_events as f64)),
+                Expr::LoadLocal(record[13]), builder.const_f64(maximum_events as f64));
+            builder.store_buffer(3, event_base.clone(), count);
+            builder.store_buffer(3, b(&builder, BinOp::Add, event_base.clone(), builder.const_u32(1)),
+                b(&builder, BinOp::Gt, Expr::LoadLocal(record[13]), builder.const_f64(maximum_events as f64)));
+        }
         ProgramBuilder::new().structured_entry(builder, Ty::f64(), Expr::LoadLocal(record[8]))
             .map_err(|error| error.to_string())?.finish().map_err(|error| error.to_string())
+    }
+}
+
+/// 带固定容量盘面事件输出的笛卡尔 F64 追踪 Builder。
+///
+/// 输入仍使用旧追踪程序的 29 标量记录。输出 buffer 2 是该记录，输出
+/// buffer 3 按实例使用 `[count, overflow, event[0..MAX_EVENTS]]`，每个事件
+/// 为 `[affine,t,x,y,z,E,vx,vy,vz]` 共 9 个 F64。`count` 不超过容量，
+/// `overflow` 明确表示仍有未写入的物理事件。
+#[derive(Debug, Clone, Copy)]
+pub struct SchwarzschildCartesianF64EventTraceBuilder<const MAX_EVENTS: usize> {
+    inner: SchwarzschildCartesianF64TraceBuilder,
+}
+
+impl<const MAX_EVENTS: usize> Default for SchwarzschildCartesianF64EventTraceBuilder<MAX_EVENTS> {
+    fn default() -> Self { Self { inner: SchwarzschildCartesianF64TraceBuilder::new() } }
+}
+
+impl<const MAX_EVENTS: usize> SchwarzschildCartesianF64EventTraceBuilder<MAX_EVENTS> {
+    /// 创建默认配置的固定容量事件追踪 Builder。
+    pub fn new() -> Self { Self::default() }
+    /// 设置每实例 chunk 的积分步数。
+    pub fn maximum_steps(mut self, value: u32) -> Self { self.inner = self.inner.maximum_steps(value); self }
+    /// 设置每事件最大二分次数。
+    pub fn maximum_bisections(mut self, value: u32) -> Self { self.inner = self.inner.maximum_bisections(value); self }
+    /// 设置事件面的绝对残差容差。
+    pub fn surface_tolerance(mut self, value: f64) -> Self { self.inner = self.inner.surface_tolerance(value); self }
+    /// 生成通用 UCF F64 事件追踪程序。
+    pub fn build(self) -> Result<Program, String> {
+        self.inner.build_with_event_capacity(Some(MAX_EVENTS as u32))
     }
 }
