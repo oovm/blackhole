@@ -19,6 +19,8 @@ mod cartesian_f64_disk;
 pub use cartesian_f64_disk::SchwarzschildCartesianF64DiskBuilder;
 mod cartesian_f64_camera;
 pub use cartesian_f64_camera::SchwarzschildCartesianF64CameraBuilder;
+mod cartesian_f64_trace;
+pub use cartesian_f64_trace::SchwarzschildCartesianF64TraceBuilder;
 mod cartesian_radiance;
 pub use cartesian_radiance::SchwarzschildDiskFrequencyBuilder;
 mod thermal_spectrum;
