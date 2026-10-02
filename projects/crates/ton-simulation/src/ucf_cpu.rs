@@ -112,8 +112,8 @@ pub fn execute_camera_program_cpu(
         .flat_map(|y| {
             (0..scene.width).map(move |x| {
                 let aspect = scene.width.max(1) as f32 / scene.height.max(1) as f32;
-                let u = ((x as f32 / scene.width.max(1) as f32) * 2.0 - 1.0) * aspect;
-                let v = 1.0 - (y as f32 / scene.height.max(1) as f32) * 2.0;
+                let u = (((x as f32 + 0.5) / scene.width.max(1) as f32) * 2.0 - 1.0) * aspect;
+                let v = 1.0 - ((y as f32 + 0.5) / scene.height.max(1) as f32) * 2.0;
                 [u, v]
             })
         })
