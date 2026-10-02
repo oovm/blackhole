@@ -332,7 +332,7 @@ pub fn schwarzschild_initial_state_batch() -> Program {
     let phi_pos = unary(UnOp::Atan, bin(BinOp::Div, y.clone(), bin(BinOp::Max, x.clone(), eps.clone())));
     let phi_neg_base = unary(UnOp::Atan, bin(BinOp::Div, y.clone(), bin(BinOp::Min, x.clone(), neg_eps.clone())));
     let phi_neg = select(bin(BinOp::Ge, y.clone(), f32(0.0)), bin(BinOp::Add, phi_neg_base.clone(), f32(std::f32::consts::PI)), bin(BinOp::Sub, phi_neg_base, f32(std::f32::consts::PI)));
-    let phi_axis = select(bin(BinOp::Ge, y.clone(), f32(0.0)), f32(std::f32::consts::FRAC_PI_2), unary(UnOp::Neg, f32(std::f32::consts::FRAC_PI_2)));
+    let phi_axis = f32(0.0);
     body.push(Stmt::Let { id: 11, ty: Ty::f32(), init: select(bin(BinOp::Gt, x.clone(), eps.clone()), phi_pos, select(bin(BinOp::Lt, x.clone(), neg_eps), phi_neg, phi_axis)) });
     let direction_length = unary(UnOp::Sqrt, bin(BinOp::Add, bin(BinOp::Add, square(local(3)), square(local(4))), square(local(5))));
     body.push(Stmt::Let { id: 12, ty: Ty::f32(), init: bin(BinOp::Div, local(3), direction_length.clone()) });

@@ -466,7 +466,11 @@ pub fn schwarzschild_geodesic_integrate_ucf_cpu_rays(mass: f64, rays: &[(Vec3, V
     if rays.is_empty() { return Ok(Vec::new()); }
     let bound_flags = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_impact_parameter(mass, *origin, *direction)
         .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false)).collect::<Vec<_>>();
-    let mut states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
+    let mut states = schwarzschild_initial_state_ucf_cpu_batch(
+        mass,
+        BlackHole::schwarzschild(mass).critical_impact_parameter(),
+        rays,
+    )?;
     let chunk = schwarzschild_geodesic_rk4_chunk(16);
     let backend = CpuBackend::new();
     let mut statuses = vec![0u32; states.len()];
@@ -597,26 +601,14 @@ pub fn schwarzschild_geodesic_integrate_ucf_vulkan_from_rays(
 
 /// 由 Vulkan UCF batch dispatch 并行推进多条相机射线。
 pub fn schwarzschild_geodesic_integrate_ucf_vulkan_rays(mass: f64, rays: &[(Vec3, Vec3)], step: f64, escape_radius: f64, max_steps: u32) -> TonResult<Vec<(SphericalState, u32)>> {
-    let states = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_initial_state(mass, *origin, *direction).ok_or_else(|| TonError::Domain("invalid Schwarzschild ray initial state".into()))).collect::<TonResult<Vec<_>>>()?;
-    let bound_flags = rays.iter().map(|(origin, direction)| schwarzschild_geodesic_impact_parameter(mass, *origin, *direction)
-        .map(|impact| impact < BlackHole::schwarzschild(mass).critical_impact_parameter()).unwrap_or(false)).collect::<Vec<_>>();
-    let chunk = schwarzschild_geodesic_rk4_chunk(16);
-    let mut states = states;
-    let mut statuses = vec![0u32; states.len()];
-    for _ in 0..max_steps.div_ceil(16) {
-        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_program(mass, &states, &bound_flags, step, escape_radius, &chunk)?;
-        states = results.iter().map(|(state, _)| *state).collect();
-        statuses = results.iter().map(|(_, status)| *status).collect();
-        if statuses.iter().all(|status| *status != 0) {
-            break;
-        }
-    }
-    for status in &mut statuses {
-        if *status == 0 {
-            *status = 3;
-        }
-    }
-    Ok(states.into_iter().zip(statuses).collect())
+    schwarzschild_geodesic_integrate_ucf_vulkan_from_rays(
+        mass,
+        BlackHole::schwarzschild(mass).critical_impact_parameter(),
+        rays,
+        step,
+        escape_radius,
+        max_steps,
+    )
 }
 
 /// 生成 UCF Vulkan 测地线终止诊断帧。
