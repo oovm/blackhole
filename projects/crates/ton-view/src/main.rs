@@ -23,6 +23,7 @@ fn main() -> ExitCode {
     let disk_model = parse_disk_model(&args);
     let ucf_tone = args.iter().any(|a| a == "--ucf-tone");
     let ucf_vulkan = args.iter().any(|a| a == "--ucf-vulkan");
+    let ucf_spectral = args.iter().any(|a| a == "--ucf-spectral");
     let bloom = args.iter().any(|a| a == "--bloom");
     let strict = args.iter().any(|a| a == "--strict");
     let convergence = args.iter().any(|a| a == "--convergence");
@@ -30,8 +31,12 @@ fn main() -> ExitCode {
     let hdr_linear = args.iter().any(|a| a == "--hdr-linear");
     let camera = parse_camera(&args, mass, spin);
     let render_mode = parse_render_mode(&args);
-    let step_size = parse_f64_arg(&args, "--step-size", 0.08);
+    let step_size = parse_f64_arg(&args, "--step-size", if ucf_spectral { 0.02 * mass } else { 0.08 });
     let max_steps = parse_optional_u32_arg(&args, "--max-steps");
+    if ucf_spectral && (convergence || hdr_linear || args.iter().any(|argument| argument == "--disk" || argument == "--integrator")) {
+        eprintln!("--ucf-spectral uses its own verified trace and disk baseline, and does not support convergence or HDR export yet");
+        return ExitCode::from(4);
+    }
 
     let bh = if spin.abs() > f64::EPSILON {
         BlackHole::kerr(mass, spin)
@@ -68,8 +73,8 @@ fn main() -> ExitCode {
     eprintln!(
         "TON view: mode={}, integrator={}, disk={}, camera={}, {}x{} → {}",
         render_mode_label(render_mode),
-        integrator_label(integrator),
-        disk_model_label(disk_model),
+        if ucf_spectral { "F64-Cartesian-RK4" } else { integrator_label(integrator) },
+        if ucf_spectral { "zero-torque-opaque" } else { disk_model_label(disk_model) },
         camera_label(&args),
         width,
         height,
@@ -82,11 +87,29 @@ fn main() -> ExitCode {
         bh.critical_impact_parameter(),
         bh.shadow_angular_radius(10.0 * bh.mass),
         trace.step_size,
-        trace.max_steps,
+        if ucf_spectral { max_steps.unwrap_or(32768) } else { trace.max_steps },
         trace.escape_radius
     );
 
-    let (fb, failure_pct) = if ucf_vulkan {
+    let (fb, failure_pct) = if ucf_spectral {
+        if render_mode != RenderMode::Beauty || spin.abs() > f64::EPSILON || bloom || overlay_shadow || ucf_vulkan || ucf_tone {
+            eprintln!("--ucf-spectral requires Schwarzschild Beauty without Bloom, overlays or other backend flags");
+            return ExitCode::from(4);
+        }
+        let renderer = ton_simulation::SchwarzschildSpectralGpuBuilder::new(mass)
+            .maximum_step(step_size).maximum_steps(max_steps.unwrap_or(32768))
+            .peak_temperature(parse_f64_arg(&args, "--peak-kelvin", 6500.0))
+            .exposure(parse_f64_arg(&args, "--exposure", 1.0e-10));
+        let output = match renderer.execute(camera, width, height) {
+            Ok(output) => output,
+            Err(error) => { eprintln!("UCF spectral Vulkan failed without fallback: {error}"); return ExitCode::from(3); }
+        };
+        eprintln!("  actual backend=Vulkan, trace=F64, radiance=F32, disk=zero-torque opaque baseline, observer=CIE1931 fit");
+        eprintln!("  completed trace programs={}, shading hashes={:?}, HDR pixels={}", output.trace.executed_program_hashes.len(),
+            output.shading_program_hashes, output.hdr.iter().filter(|pixel| pixel.iter().any(|value| *value > 1.0)).count());
+        eprintln!("  padded GPU instances excluded from image={}", output.trace.padded_instances);
+        (output.framebuffer, 0.0)
+    } else if ucf_vulkan {
         if render_mode != RenderMode::Beauty {
             eprintln!("--ucf-vulkan only supports Beauty mode");
             return ExitCode::from(4);
@@ -190,6 +213,11 @@ fn parse_camera(args: &[String], mass: f64, spin: f64) -> Camera {
         .map(|s| s.as_str())
     {
         Some("equatorial") => equatorial_far_camera(bh),
+        Some("level") => {
+            let inclination = 80.0f64.to_radians();
+            Camera::look_at(Vec3::new(0.0, -50.0 * mass * inclination.sin(), 50.0 * mass * inclination.cos()),
+                Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 0.58)
+        }
         _ => Camera::cinematic(bh),
     }
 }
@@ -316,6 +344,7 @@ fn camera_label(args: &[String]) -> &'static str {
         .map(|s| s.as_str())
     {
         Some("equatorial") => "equatorial",
+        Some("level") => "level",
         _ => "cinematic",
     }
 }
