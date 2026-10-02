@@ -1238,12 +1238,153 @@ mod tests {
 
     fn adaptive_cpu_output(input: &[f32; 9], uniforms: [f32; 5], retries: u32) -> Vec<f64> {
         let program = ton_ucf_frontend::SchwarzschildAdaptiveStepBuilder::new().maximum_retries(retries).build().unwrap();
+        adaptive_cpu_program_output(&program, input, uniforms)
+    }
+
+    fn adaptive_cpu_program_output(program: &ucf_program::Program, input: &[f32; 9], uniforms: [f32; 5]) -> Vec<f64> {
         let mut interpreter = ton_ucf_frontend::CpuInterpreter::new();
         for (slot, value) in uniforms.into_iter().enumerate() { interpreter.with_uniform(slot as u32, Value::F32(value)); }
         interpreter.with_buffer(1, input.iter().copied().map(Value::F32).collect());
         interpreter.with_buffer(2, vec![Value::F32(0.0); 13]);
-        interpreter.run_parallel(&program, 1).unwrap();
+        interpreter.run_parallel(program, 1).unwrap();
         interpreter.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect()
+    }
+
+    #[test]
+    fn adaptive_ucf_chunk_matches_independent_reference_sequence() {
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveChunkBuilder::new().maximum_steps(8).build().unwrap();
+        let input = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 0.08];
+        let uniforms = [1.0f32, 1.0e-13, 1.0e-11, 1.0e-8, 0.08];
+        let actual = adaptive_cpu_program_output(&program, &input, uniforms);
+        let mut expected = SphericalState { t: input[0] as f64, r: input[1] as f64, theta: input[2] as f64, phi: input[3] as f64,
+            ut: input[4] as f64, ur: input[5] as f64, utheta: input[6] as f64, uphi: input[7] as f64 };
+        let config = ton_geodesic::AdaptiveRk4Config::builder().tolerances(uniforms[1] as f64, uniforms[2] as f64)
+            .step_range(uniforms[3] as f64, uniforms[4] as f64).build().unwrap();
+        let mut step = input[8] as f64;
+        let mut rejections = 0;
+        for _ in 0..8 {
+            let report = ton_geodesic::schwarzschild_adaptive_rk4_step(1.0, expected, step, config).unwrap();
+            expected = report.state;
+            step = report.next_step;
+            rejections += report.rejections;
+        }
+        assert_eq!(actual[8], 1.0);
+        assert_eq!(actual[12], rejections as f64);
+        for (actual, expected) in actual[..8].iter().copied().zip([expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi]) {
+            assert!((actual - expected).abs() < 1.0e-5, "actual={actual}, expected={expected}");
+        }
+        assert!((actual[10] - step).abs() < 1.0e-5);
+        let failure = adaptive_cpu_program_output(&program, &input, [1.0, 1.0e-30, 0.0, 0.08, 0.08]);
+        assert_eq!(failure[8], 2.0);
+        assert_eq!(failure[12], 1.0);
+        assert_eq!(failure[9], 0.0);
+        for (actual, initial) in failure[..8].iter().zip(&input[..8]) { assert_eq!(*actual, *initial as f64); }
+    }
+
+    #[test]
+    fn adaptive_ucf_vulkan_chunk_matches_cpu_sequence() {
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveChunkBuilder::new().maximum_steps(32).build().unwrap();
+        let input = [0.0f32, 12.0, 1.0, 0.3, 1.2, -0.7, 0.22, 0.08, 0.08];
+        let uniforms = [1.0f32, 1.0e-5, 1.0e-4, 1.0e-8, 0.08];
+        let expected = adaptive_cpu_program_output(&program, &input, uniforms);
+        let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(2));
+        let task = dispatch_task(51, &program, 1, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(1, 9, Access::Read), (2, 13, Access::Write), (3, 1, Access::Write)]
+                .into_iter().map(|(id, elements, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        let mut backend = VulkanBackend::new().expect("Vulkan adaptive chunk");
+        backend.prepare(&graph).unwrap();
+        backend.write_f32(ResourceId(1), &input).unwrap();
+        backend.run_prepared(&graph).unwrap();
+        let actual = backend.read_f32(ResourceId(2)).unwrap();
+        assert_eq!(actual[8], 1.0);
+        for (actual, expected) in actual[..8].iter().zip(&expected[..8]) {
+            assert!((*actual as f64 - expected).abs() < 3.0e-4, "actual={actual}, expected={expected}");
+        }
+        assert!((actual[10] as f64 - expected[10]).abs() < 1.0e-6);
+        assert!((0.0..=1.0).contains(&actual[11]));
+    }
+
+    #[test]
+    fn adaptive_ucf_vulkan_polar_chunks_escape_with_bounded_null_residual() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let u = ((39.5 / 128.0) * 2.0 - 1.0) * (128.0 / 72.0);
+        let v = 1.0 - (0.5 / 72.0) * 2.0;
+        let state = schwarzschild_geodesic_initial_state(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveChunkBuilder::new().build().unwrap();
+        let mut input = [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.08].map(|value| value as f32);
+        let uniforms = [1.0f32, 1.0e-6, 1.0e-5, 1.0e-8, 0.08];
+        let mut params = uniforms.into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value as f64))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(2));
+        let task = dispatch_task(52, &program, 1, ResourceId(3), 0, 1, Some(ResourceId(1)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(1, 9, Access::Read), (2, 13, Access::Write), (3, 1, Access::Write)]
+                .into_iter().map(|(id, elements, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access, byte_size: Some(elements * 4),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        let mut backend = VulkanBackend::new().expect("Vulkan adaptive polar trajectory");
+        backend.prepare(&graph).unwrap();
+        let mut residual = 0.0f64;
+        let mut chunks = 0;
+        while input[1] < 80.0 && chunks < 256 {
+            backend.write_f32(ResourceId(1), &input).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            let output = backend.read_f32(ResourceId(2)).unwrap();
+            assert_eq!(output[8], 1.0, "adaptive GPU chunk failure: {output:?}");
+            assert!(output.iter().all(|value| value.is_finite()));
+            let radius = output[1] as f64;
+            let f = 1.0 - 2.0 / radius;
+            let temporal = f * (output[4] as f64).powi(2);
+            let spatial = (output[5] as f64).powi(2) / f + radius * radius *
+                ((output[6] as f64).powi(2) + (output[2] as f64).sin().powi(2) * (output[7] as f64).powi(2));
+            let relative = ((spatial - temporal) / (spatial.abs() + temporal.abs())).abs();
+            assert!(relative.is_finite());
+            residual = residual.max(relative);
+            input[..8].copy_from_slice(&output[..8]);
+            input[8] = output[10];
+            chunks += 1;
+        }
+        eprintln!("UCF Vulkan polar chunks={chunks}, max_chunk_boundary_null_residual={residual}, r={}", input[1]);
+        assert!(input[1] >= 80.0 && chunks < 256);
+        assert!(residual < 1.0e-3);
+    }
+
+    #[test]
+    fn adaptive_ucf_cpu_polar_chunks_escape_with_bounded_null_residual() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let camera = Camera::cinematic(bh);
+        let u = ((39.5 / 128.0) * 2.0 - 1.0) * (128.0 / 72.0);
+        let v = 1.0 - (0.5 / 72.0) * 2.0;
+        let state = schwarzschild_geodesic_initial_state(1.0, camera.position, camera.ray_direction(u, v)).unwrap();
+        let program = ton_ucf_frontend::SchwarzschildAdaptiveChunkBuilder::new().build().unwrap();
+        let mut input = [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi, 0.08].map(|value| value as f32);
+        let mut residual = 0.0f64;
+        let mut chunks = 0;
+        while input[1] < 80.0 && chunks < 256 {
+            let output = adaptive_cpu_program_output(&program, &input, [1.0, 1.0e-9, 1.0e-7, 1.0e-8, 0.08]);
+            assert_eq!(output[8], 1.0, "adaptive chunk failure: {output:?}");
+            let f = 1.0 - 2.0 / output[1];
+            let temporal = f * output[4] * output[4];
+            let spatial = output[5] * output[5] / f + output[1] * output[1] *
+                (output[6] * output[6] + output[2].sin().powi(2) * output[7] * output[7]);
+            let relative = ((spatial - temporal) / (spatial.abs() + temporal.abs())).abs();
+            assert!(relative.is_finite());
+            residual = residual.max(relative);
+            for index in 0..8 { input[index] = output[index] as f32; }
+            input[8] = output[10] as f32;
+            chunks += 1;
+        }
+        eprintln!("UCF CPU polar chunks={chunks}, max_chunk_boundary_null_residual={residual}, r={}", input[1]);
+        assert!(input[1] >= 80.0 && chunks < 256);
+        assert!(residual < 1.0e-3);
     }
 
     #[test]

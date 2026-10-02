@@ -18,6 +18,36 @@ impl Default for SchwarzschildAdaptiveStepBuilder {
     fn default() -> Self { Self { maximum_retries: 16 } }
 }
 
+/// 有界多步自适应积分构造器，资源布局与单步构造器相同。
+///
+/// `status=1` 表示所有请求步均接受，拒绝次数为整个 chunk 的累计值。
+/// 该程序只推进积分，不替代捕获、逃逸、盘面事件定位或终止分类。
+#[derive(Debug, Clone, Copy)]
+pub struct SchwarzschildAdaptiveChunkBuilder {
+    maximum_steps: u32,
+    maximum_retries: u32,
+}
+
+impl Default for SchwarzschildAdaptiveChunkBuilder {
+    fn default() -> Self { Self { maximum_steps: 64, maximum_retries: 16 } }
+}
+
+impl SchwarzschildAdaptiveChunkBuilder {
+    /// 使用默认的六十四个积分步与十六次单步重试。
+    pub fn new() -> Self { Self::default() }
+
+    /// 设置 chunk 请求的接受步数。
+    pub fn maximum_steps(mut self, steps: u32) -> Self { self.maximum_steps = steps; self }
+
+    /// 设置每个接受步的重试上限。
+    pub fn maximum_retries(mut self, retries: u32) -> Self { self.maximum_retries = retries; self }
+
+    /// 构造通用程序，拒绝零预算与过大静态循环上限。
+    pub fn build(self) -> Result<Program, String> {
+        SchwarzschildAdaptiveStepBuilder::new().maximum_retries(self.maximum_retries).build_steps(self.maximum_steps)
+    }
+}
+
 fn snapshot(builder: &mut StructuredFunctionBuilder, values: [Expr; 8]) -> [Expr; 8] {
     values.map(|value| Expr::LoadLocal(builder.let_value(Ty::f32(), value)))
 }
@@ -57,7 +87,12 @@ impl SchwarzschildAdaptiveStepBuilder {
 
     /// 构造和校验程序，不注册 UCF 领域算子。
     pub fn build(self) -> Result<Program, String> {
+        self.build_steps(1)
+    }
+
+    fn build_steps(self, maximum_steps: u32) -> Result<Program, String> {
         if self.maximum_retries > 64 { return Err("adaptive RK4 retry limit exceeds 64".into()); }
+        if maximum_steps == 0 || maximum_steps > 65_536 { return Err("adaptive RK4 step count must be between 1 and 65536".into()); }
         let mut builder = StructuredFunctionBuilder::new("schwarzschild_adaptive_rk4_step");
         let gid = builder.global_id();
         let input_base = b(&builder, BinOp::Mul, gid.clone(), builder.const_u32(9));
@@ -85,7 +120,14 @@ impl SchwarzschildAdaptiveStepBuilder {
         let error = builder.let_value(Ty::f32(), builder.const_f32(0.0));
         let rejections = builder.let_value(Ty::f32(), builder.const_f32(0.0));
         let output: [u32; 8] = std::array::from_fn(|index| builder.let_value(Ty::f32(), initial[index].clone()));
-        let running = b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0));
+        let can_advance = b(&builder, BinOp::Le, Expr::LoadLocal(status), builder.const_f32(1.0));
+        builder.bounded_while(can_advance, maximum_steps, |builder| {
+        let initial = snapshot(builder, output.map(Expr::LoadLocal));
+        builder.store_local(status, builder.select(
+            b(builder, BinOp::Gt, initial[1].clone(), b(builder, BinOp::Mul, builder.const_f32(2.0), mass.clone())),
+            builder.const_f32(0.0), builder.const_f32(4.0),
+        ));
+        let running = b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0));
         builder.bounded_while(running, self.maximum_retries + 1, |builder| {
             let current_step = Expr::LoadLocal(step);
             let full = rk4(builder, &initial, &mass, current_step.clone());
@@ -117,7 +159,9 @@ impl SchwarzschildAdaptiveStepBuilder {
             let reject_factor = b(builder, BinOp::Min, builder.const_f32(0.5), b(builder, BinOp::Max, builder.const_f32(0.1), factor));
             builder.store_local(step, builder.select(accepted, current_step.clone(), b(builder, BinOp::Max, minimum.clone(), b(builder, BinOp::Mul, current_step, reject_factor))));
         });
-        builder.store_local(status, builder.select(b(&builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0)), builder.const_f32(3.0), Expr::LoadLocal(status)));
+        builder.store_local(status, builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(0.0)), builder.const_f32(3.0), Expr::LoadLocal(status)));
+        builder.store_local(step, builder.select(b(builder, BinOp::Eq, Expr::LoadLocal(status), builder.const_f32(1.0)), Expr::LoadLocal(next), Expr::LoadLocal(step)));
+        });
         let values = output.into_iter().map(Expr::LoadLocal).chain([status, used, next, error, rejections].into_iter().map(Expr::LoadLocal));
         for (index, value) in values.enumerate() {
             builder.store_buffer(2, b(&builder, BinOp::Add, output_base.clone(), builder.const_u32(index as u32)), value);
@@ -135,6 +179,8 @@ mod tests {
 
     #[test]
     fn adaptive_program_is_bounded_and_executes_a_step() {
+        assert!(SchwarzschildAdaptiveChunkBuilder::new().maximum_steps(0).build().is_err());
+        assert!(SchwarzschildAdaptiveChunkBuilder::new().maximum_steps(65_537).build().is_err());
         assert!(SchwarzschildAdaptiveStepBuilder::new().maximum_retries(65).build().is_err());
         let program = SchwarzschildAdaptiveStepBuilder::new().build().unwrap();
         let mut interpreter = CpuInterpreter::new();

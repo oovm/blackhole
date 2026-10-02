@@ -4,7 +4,7 @@
 //! 接收 `Program`、校验并执行，不依赖黑洞类型或物理名称。
 
 mod adaptive;
-pub use adaptive::SchwarzschildAdaptiveStepBuilder;
+pub use adaptive::{SchwarzschildAdaptiveChunkBuilder, SchwarzschildAdaptiveStepBuilder};
 
 pub use ucf_program::{
     program_hash, validate_program, BinOp, CpuExecResult, CpuInterpreter, Expr, Function,
