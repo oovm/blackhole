@@ -673,6 +673,112 @@ pub fn disk_radiance_ucf_vulkan_from_geodesic_state(
     Ok(output)
 }
 
+/// 执行完整的 Vulkan UCF Schwarzschild 盘面 radiance 链。
+///
+/// 相机、初态、扩展 geodesic chunk 和盘面着色均由 UCF Program 完成。该函数
+/// 只返回线性 radiance，不负责显示空间 tone map，也不在失败时切换 CPU。
+pub fn schwarzschild_disk_radiance_ucf_vulkan(
+    bh: BlackHole,
+    camera: Camera,
+    width: u32,
+    height: u32,
+    inner_radius: f64,
+    outer_radius: f64,
+    accretion_rate: f64,
+    step: f64,
+    escape_radius: f64,
+    max_steps: u32,
+) -> TonResult<Vec<f32>> {
+    let uv = (0..height)
+        .flat_map(|y| {
+            (0..width).map(move |x| {
+                let aspect = width.max(1) as f64 / height.max(1) as f64;
+                (
+                    ((x as f64 + 0.5) / width.max(1) as f64 * 2.0 - 1.0) * aspect,
+                    1.0 - (y as f64 + 0.5) / height.max(1) as f64 * 2.0,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if uv.is_empty() {
+        return Ok(Vec::new());
+    }
+    let directions = camera_ray_ucf_vulkan_batch(camera, &uv)?;
+    let rays = directions
+        .into_iter()
+        .map(|direction| (camera.position, direction))
+        .collect::<Vec<_>>();
+    let (mut states, bound_flags) = schwarzschild_initial_state_ucf_vulkan_batch_with_flags(
+        bh.mass,
+        bh.critical_impact_parameter(),
+        &rays,
+    )?;
+    let mut disk_hits = vec![false; states.len()];
+    let mut disk_radii = vec![0.0; states.len()];
+    let mut disk_dopplers = vec![1.0; states.len()];
+    let mut statuses = vec![0u32; states.len()];
+    for _ in 0..max_steps.div_ceil(16).max(1) {
+        let results = schwarzschild_geodesic_integrate_ucf_vulkan_batch_with_disk(
+            bh.mass,
+            &states,
+            &bound_flags,
+            &disk_hits,
+            &disk_radii,
+            &disk_dopplers,
+            inner_radius,
+            outer_radius,
+            step,
+            escape_radius,
+            16,
+        )?;
+        for (index, (state, status, hit, radius, doppler)) in results.into_iter().enumerate() {
+            states[index] = state;
+            statuses[index] = status;
+            disk_hits[index] = hit;
+            disk_radii[index] = radius;
+            disk_dopplers[index] = doppler;
+        }
+        if statuses.iter().all(|status| *status != 0) {
+            break;
+        }
+    }
+    for status in &mut statuses {
+        if *status == 0 {
+            *status = 3;
+        }
+    }
+    let state_buffer = states
+        .iter()
+        .enumerate()
+        .flat_map(|(index, state)| {
+            [
+                state.t as f32,
+                state.r as f32,
+                state.theta as f32,
+                state.phi as f32,
+                state.ut as f32,
+                state.ur as f32,
+                state.utheta as f32,
+                state.uphi as f32,
+                statuses[index] as f32,
+                bound_flags[index] as u8 as f32,
+                disk_hits[index] as u8 as f32,
+                disk_radii[index] as f32,
+                disk_dopplers[index] as f32,
+                0.0,
+            ]
+        })
+        .collect::<Vec<_>>();
+    disk_radiance_ucf_vulkan_from_geodesic_state(
+        &state_buffer,
+        states.len() as u32,
+        inner_radius,
+        outer_radius,
+        bh.mass,
+        accretion_rate,
+    )
+}
+
 /// 从相机射线开始，依次执行 Vulkan 初态 Program 与 Vulkan 有界测地线 chunk。
 ///
 /// 初态和终止状态都来自 UCF GPU buffer。该入口不调用 TON 原生积分器，
