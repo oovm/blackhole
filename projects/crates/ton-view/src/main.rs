@@ -12,6 +12,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let out = args
         .get(1)
+        .filter(|argument| !argument.starts_with('-'))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("blackhole.png"));
 
@@ -26,6 +27,7 @@ fn main() -> ExitCode {
     let ucf_spectral = args.iter().any(|a| a == "--ucf-spectral");
     let bloom = args.iter().any(|a| a == "--bloom");
     let strict = args.iter().any(|a| a == "--strict");
+    let report = args.iter().any(|a| a == "--report");
     let convergence = args.iter().any(|a| a == "--convergence");
     let overlay_shadow = args.iter().any(|a| a == "--overlay-shadow");
     let hdr_linear = args.iter().any(|a| a == "--hdr-linear");
@@ -111,6 +113,9 @@ fn main() -> ExitCode {
             Ok(output) => output,
             Err(error) => { eprintln!("UCF spectral Vulkan failed without fallback: {error}"); return ExitCode::from(3); }
         };
+        if report {
+            print_spectral_validation_report(&output);
+        }
         eprintln!("  actual backend=Vulkan, trace=F64, radiance=F32, disk=zero-torque opaque baseline, graybody={}, observer=CIE1931 fit", graybody);
         eprintln!("  completed trace programs={}, shading hashes={:?}, HDR pixels={}", output.trace.executed_program_hashes.len(),
             output.shading_program_hashes, output.hdr.iter().filter(|pixel| pixel.iter().any(|value| *value > 1.0)).count());
@@ -199,6 +204,22 @@ fn main() -> ExitCode {
 
     eprintln!("done.");
     ExitCode::SUCCESS
+}
+
+fn print_spectral_validation_report(output: &ton_simulation::SpectralGpuFrame) {
+    let report = output.validation_report();
+    eprintln!("UCF validation report:");
+    eprintln!("  resources: trace_record=f64x29, event_packet=f64x38, radiative=f32x4, hdr=rgb-f32");
+    eprintln!("  instances={} captured={} escaped={} budget_exhausted={} integration_failures={} event_localization_failures={} invalid_inputs={}",
+        report.instances, report.captured, report.escaped, report.budget_exhausted, report.integration_failures,
+        report.event_localization_failures, report.invalid_inputs);
+    eprintln!("  events={} overflow_instances={} radiative_instances={} radiative_failures={} non_finite_hdr={}",
+        report.event_count, report.overflow_instances, report.radiative_instances, report.radiative_failures,
+        report.non_finite_hdr);
+    eprintln!("  invariants: max_null_residual={:.6e} max_energy_drift={:.6e} max_angular_squared_drift={:.6e}",
+        report.maximum_null_residual, report.maximum_energy_drift, report.maximum_angular_squared_drift);
+    eprintln!("  trace_program_hashes={:?}", report.trace_program_hashes);
+    eprintln!("  shading_programs={:?}", report.shading_program_names.iter().zip(&report.shading_program_hashes).map(|(name, hash)| format!("{name}:{hash:016x}")).collect::<Vec<_>>());
 }
 
 fn equatorial_far_camera(bh: BlackHole) -> Camera {

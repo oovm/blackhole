@@ -1,26 +1,169 @@
 <template>
-    <main class="layout">
-        <header class="hero">
-            <div>
-                <h1>TON 黑洞模拟</h1>
-                <p class="subtitle">渐进多分辨率 · WebGPU L2 上屏 · 测地线 CPU（UCF GPU trace 待接入）</p>
+    <main class="app">
+        <div class="backdrop" aria-hidden="true"></div>
+
+        <header class="topbar">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true"></span>
+                <div>
+                    <h1>TON 黑洞模拟</h1>
+                    <p class="tagline">拖动参数即时预览 · 自动渐进细化</p>
+                </div>
             </div>
-            <span class="live-badge" :class="{ busy: refining }">{{ qualityBadge }}</span>
+            <div class="topbar-meta">
+                <span class="chip" :class="{ live: refining || booting }">{{ hudTier }}</span>
+                <span class="chip dim">{{ resolutionLabel }}</span>
+            </div>
         </header>
 
-        <div class="workspace">
-            <section class="stage">
+        <section class="viewport">
+            <div
+                class="frame"
+                :class="{
+                    'is-loading': showColdLoader,
+                    'is-refining': showRefineVeil,
+                    'is-fullscreen': isFullscreen,
+                }"
+            >
                 <canvas id="ton-view" :width="width" :height="height"></canvas>
-                <div class="stage-overlay" :class="{ active: booting, subtle: refining }">
-                    <span class="spinner" aria-hidden="true"></span>
-                    <span>{{ overlayText }}</span>
-                </div>
-                <footer class="stage-meta">{{ status }}</footer>
-            </section>
 
-            <aside class="panel">
-                <section class="panel-block">
-                    <h2>物理</h2>
+                <div class="hud">
+                    <div class="hud-top">
+                        <span class="scene-name">{{ sceneName }}</span>
+                        <div class="hud-right">
+                            <span class="hud-status">{{ hudMessage }}</span>
+                            <div class="frame-actions">
+                                <button
+                                    type="button"
+                                    class="icon-btn"
+                                    :disabled="!hasDisplayedFrame"
+                                    @click="(() => saveSnapshot())"
+                                >
+                                    保存
+                                </button>
+                                <button type="button" class="icon-btn" @click="(() => toggleFullscreen())">
+                                    {{ isFullscreen ? "退出" : "全屏" }}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="progress-dock" :class="{ active: isLoading }">
+                        <div class="progress-meta">
+                            <span class="progress-label">{{ progressLabel }}</span>
+                            <span class="progress-pct">{{ progressPct }}%</span>
+                        </div>
+                        <div class="progress-track">
+                            <div class="progress-fill" :style="progressStyle"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="frame-placeholder" :class="{ active: showColdLoader, fading: coldLoaderFading }">
+                    <div class="placeholder-sky" aria-hidden="true">
+                        <span class="accretion-ring ring-a"></span>
+                        <span class="accretion-ring ring-b"></span>
+                        <span class="accretion-ring ring-c"></span>
+                        <span class="accretion-core"></span>
+                    </div>
+                    <div class="placeholder-card">
+                        <span class="placeholder-title">{{ loadingTitle }}</span>
+                        <span class="placeholder-sub">{{ loadingSubtitle }}</span>
+                        <span class="placeholder-hint">{{ loadingHint }}</span>
+                    </div>
+                </div>
+
+                <div class="refine-veil" :class="{ active: showRefineVeil }" aria-hidden="true">
+                    <span class="refine-pulse"></span>
+                </div>
+            </div>
+        </section>
+
+        <section class="dock">
+            <div class="dock-row presets">
+                <span class="dock-label">场景</span>
+                <div class="pill-group">
+                    <button
+                        type="button"
+                        :class="{ active: activePreset === 'schwarzschild' }"
+                        @click="(() => applyPreset('schwarzschild'))"
+                    >
+                        <span class="pill-key">1</span>史瓦西薄盘
+                    </button>
+                    <button
+                        type="button"
+                        :class="{ active: activePreset === 'kerr' }"
+                        @click="(() => applyPreset('kerr'))"
+                    >
+                        <span class="pill-key">2</span>克尔黑洞
+                    </button>
+                    <button
+                        type="button"
+                        :class="{ active: activePreset === 'raymarch' }"
+                        @click="(() => applyPreset('raymarch'))"
+                    >
+                        <span class="pill-key">3</span>Ray March
+                    </button>
+                    <button
+                        type="button"
+                        :class="{ active: activePreset === 'fbm' }"
+                        @click="(() => applyPreset('fbm'))"
+                    >
+                        <span class="pill-key">4</span>程序化盘
+                    </button>
+                </div>
+            </div>
+
+            <div class="dock-row primary-controls">
+                <div class="control-block mass-block">
+                    <div class="control-head">
+                        <span>黑洞质量</span>
+                        <strong>{{ massLabel }} M☉</strong>
+                    </div>
+                    <input
+                        type="range"
+                        class="slider"
+                        min="0.5"
+                        max="3"
+                        step="0.1"
+                        :value="mass"
+                        @input="((e) => onMassInput(e))"
+                    />
+                </div>
+
+                <div class="control-block quality-block">
+                    <span class="dock-label">画质</span>
+                    <div class="segmented">
+                        <button
+                            type="button"
+                            :class="{ active: qualityTier === 'fast' }"
+                            @click="(() => setQualityTier('fast'))"
+                        >
+                            流畅
+                        </button>
+                        <button
+                            type="button"
+                            :class="{ active: qualityTier === 'standard' }"
+                            @click="(() => setQualityTier('standard'))"
+                        >
+                            标准
+                        </button>
+                        <button
+                            type="button"
+                            :class="{ active: qualityTier === 'high' }"
+                            @click="(() => setQualityTier('high'))"
+                        >
+                            高清
+                        </button>
+                    </div>
+                </div>
+
+                <button type="button" class="ghost-btn" @click="(() => toggleAdvanced())">
+                    {{ showAdvanced ? "收起高级" : "高级选项" }}
+                </button>
+            </div>
+
+            <div class="dock-advanced" :class="{ open: showAdvanced }">
+                <div class="advanced-grid">
                     <label>
                         积分器
                         <select :value="integrator" @change="((e) => onIntegratorChange(e))">
@@ -31,32 +174,19 @@
                         </select>
                     </label>
                     <label>
-                        盘模型
+                        吸积盘
                         <select :value="diskModel" @change="((e) => onDiskModelChange(e))">
                             <option :value="0">无盘</option>
                             <option :value="1">Novikov-Thorne 薄盘</option>
                             <option :value="2">程序化 FBM</option>
                         </select>
                     </label>
-                    <label>
-                        质量 M
-                        <div class="range-row">
+                    <label :class="{ disabled: integrator !== 3 }">
+                        克尔自旋 a
+                        <div class="spin-row">
                             <input
                                 type="range"
-                                min="0.5"
-                                max="3"
-                                step="0.1"
-                                :value="mass"
-                                @input="((e) => onMassInput(e))"
-                            />
-                            <span class="value">{{ massLabel }}</span>
-                        </div>
-                    </label>
-                    <label :class="{ dimmed: integrator !== 3 }">
-                        自旋 a（克尔）
-                        <div class="range-row">
-                            <input
-                                type="range"
+                                class="slider"
                                 min="0"
                                 max="0.95"
                                 step="0.05"
@@ -64,68 +194,49 @@
                                 :disabled="integrator !== 3"
                                 @input="((e) => onSpinInput(e))"
                             />
-                            <span class="value">{{ spinLabel }}</span>
+                            <span>{{ spinLabel }}</span>
                         </div>
                     </label>
-                </section>
-
-                <section class="panel-block">
-                    <h2>呈现</h2>
-                    <label class="toggle">
-                        <input
-                            type="checkbox"
-                            :checked="ucfToneMap"
-                            @change="((e) => onToneMapChange(e))"
-                        />
-                        UCF 色调映射
-                    </label>
-                    <label class="toggle" :class="{ dimmed: !ucfToneMap }">
-                        <input
-                            type="checkbox"
-                            :checked="bloom"
-                            :disabled="!ucfToneMap"
-                            @change="((e) => onBloomChange(e))"
-                        />
-                        泛光 Bloom
-                    </label>
-                </section>
-
-                <section class="panel-block">
-                    <h2>分辨率</h2>
-                    <div class="preset-row">
-                        <button
-                            type="button"
-                            :class="{ active: width === 640 && height === 360 }"
-                            @click="(() => setResolution(640, 360))"
-                        >
-                            640×360
-                        </button>
-                        <button
-                            type="button"
-                            :class="{ active: width === 800 && height === 450 }"
-                            @click="(() => setResolution(800, 450))"
-                        >
-                            800×450
-                        </button>
-                        <button
-                            type="button"
-                            :class="{ active: width === 960 && height === 540 }"
-                            @click="(() => setResolution(960, 540))"
-                        >
-                            960×540
-                        </button>
+                    <div class="toggle-group">
+                        <label class="toggle">
+                            <input
+                                type="checkbox"
+                                :checked="ucfToneMap"
+                                @change="((e) => onToneMapChange(e))"
+                            />
+                            色调映射
+                        </label>
+                        <label class="toggle" :class="{ disabled: !ucfToneMap }">
+                            <input
+                                type="checkbox"
+                                :checked="bloom"
+                                :disabled="!ucfToneMap"
+                                @change="((e) => onBloomChange(e))"
+                            />
+                            泛光
+                        </label>
                     </div>
-                </section>
-            </aside>
-        </div>
+                </div>
+            </div>
+
+            <footer class="dock-foot">{{ footnote }}</footer>
+        </section>
     </main>
 </template>
 <style>
 :root {
     color-scheme: dark;
-    font-family: "Segoe UI", system-ui, sans-serif;
-    background: radial-gradient(ellipse 120% 80% at 50% -20%, #1a1f2e 0%, #05060a 55%);
-    color: #e8ecf4;
+    --bg: #030408;
+    --bg-elevated: rgba(12, 14, 22, 0.82);
+    --line: rgba(255, 255, 255, 0.08);
+    --text: #eef1f7;
+    --muted: #8b95a8;
+    --accent: #f0b84a;
+    --accent-soft: rgba(240, 184, 74, 0.16);
+    --accent-glow: rgba(240, 184, 74, 0.35);
+    --ok: #5ddea8;
+    --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: "Cascadia Mono", "SF Mono", Consolas, monospace;
 }
 
 * {
@@ -135,264 +246,676 @@
 body {
     margin: 0;
     min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
 }
 
-.layout {
-    max-width: 1120px;
-    margin: 0 auto;
-    padding: 1.75rem 1.25rem 2.5rem;
-}
-
-.hero {
+.app {
+    position: relative;
+    min-height: 100vh;
     display: flex;
-    align-items: flex-start;
+    flex-direction: column;
+    padding: 1rem 1rem 1.25rem;
+    gap: 1rem;
+}
+
+.backdrop {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+        radial-gradient(ellipse 90% 60% at 50% -10%, rgba(88, 52, 140, 0.22), transparent 55%),
+        radial-gradient(circle at 80% 20%, rgba(240, 140, 50, 0.08), transparent 30%),
+        radial-gradient(circle at 15% 85%, rgba(40, 80, 160, 0.08), transparent 35%);
+}
+
+.topbar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    margin-bottom: 1.25rem;
+    max-width: 1180px;
+    width: 100%;
+    margin: 0 auto;
 }
 
-.hero h1 {
-    margin: 0 0 0.35rem;
-    font-size: 1.75rem;
-    letter-spacing: 0.04em;
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
 }
 
-.subtitle {
+.brand-mark {
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 35% 35%, #1a1020 0 34%, transparent 35%),
+        radial-gradient(circle at 50% 50%, #f0b84a 0 18%, #8a3d12 24%, transparent 42%),
+        radial-gradient(circle at 50% 50%, rgba(240, 184, 74, 0.25) 0 70%, transparent 72%);
+    box-shadow: 0 0 24px var(--accent-glow);
+}
+
+.brand h1 {
     margin: 0;
-    color: #9aa3b5;
-    font-size: 0.92rem;
-    line-height: 1.45;
-    max-width: 36rem;
+    font-size: 1.35rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
 }
 
-.live-badge {
-    flex-shrink: 0;
-    padding: 0.35rem 0.75rem;
+.tagline {
+    margin: 0.15rem 0 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.topbar-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    justify-content: flex-end;
+}
+
+.chip {
+    padding: 0.3rem 0.65rem;
     border-radius: 999px;
-    font-size: 0.75rem;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.03);
+    font-size: 0.72rem;
     font-weight: 600;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
-    background: #142018;
-    color: #6ee7a8;
-    border: 1px solid #1f4a35;
+    color: var(--muted);
 }
 
-.live-badge.busy {
-    color: #f0c674;
-    background: #2a2210;
-    border-color: #5a4520;
+.chip.live {
+    color: var(--accent);
+    border-color: rgba(240, 184, 74, 0.35);
+    background: var(--accent-soft);
 }
 
-.workspace {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 280px;
-    gap: 1.25rem;
-    align-items: start;
+.chip.dim {
+    font-family: var(--mono);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
 }
 
-@media (max-width: 880px) {
-    .workspace {
-        grid-template-columns: 1fr;
-    }
-
-    .hero {
-        flex-direction: column;
-    }
-}
-
-.stage {
+.viewport {
     position: relative;
-    border: 1px solid #1e2433;
-    border-radius: 14px;
+    z-index: 1;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    max-width: 1180px;
+    width: 100%;
+    margin: 0 auto;
+}
+
+.frame {
+    position: relative;
+    width: 100%;
+    border-radius: 18px;
     overflow: hidden;
+    border: 1px solid var(--line);
     background: #000;
-    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+    box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.03) inset,
+        0 28px 80px rgba(0, 0, 0, 0.55);
 }
 
 canvas {
     display: block;
     width: 100%;
     height: auto;
-    vertical-align: top;
+    aspect-ratio: 16 / 9;
+    object-fit: contain;
+    background: #000;
+    transition: filter 0.35s ease, opacity 0.35s ease;
 }
 
-.stage-overlay {
+.frame.is-loading canvas {
+    filter: brightness(0.92) saturate(0.95);
+}
+
+.frame.is-refining canvas {
+    filter: brightness(0.98);
+}
+
+.hud {
     position: absolute;
     inset: 0;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    background: rgba(5, 6, 10, 0.72);
-    color: #c8d0e0;
-    font-size: 0.9rem;
-    opacity: 0;
+    justify-content: space-between;
     pointer-events: none;
-    transition: opacity 0.2s ease;
 }
 
-.stage-overlay.active {
+.hud-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+    background: linear-gradient(rgba(0, 0, 0, 0.55), transparent);
+}
+
+.scene-name {
+    padding: 0.25rem 0.55rem;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.45);
+    border: 1px solid var(--line);
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.hud-status {
+    color: #d5dbe8;
+    font-size: 0.78rem;
+    text-align: right;
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.8);
+}
+
+.progress-dock {
+    padding: 0.65rem 1rem 0.75rem;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.25s ease, transform 0.25s ease;
+    pointer-events: none;
+}
+
+.progress-dock.active {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.progress-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.4rem;
+    font-size: 0.72rem;
+}
+
+.progress-label {
+    color: #d5dbe8;
+    font-weight: 600;
+}
+
+.progress-pct {
+    font-family: var(--mono);
+    color: var(--accent);
+}
+
+.progress-track {
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #a85c18, var(--accent), #ffe09a);
+    box-shadow: 0 0 16px var(--accent-glow);
+    transition: width 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.frame-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 1.5rem;
+    background: radial-gradient(ellipse 80% 70% at 50% 45%, #0a0814 0%, #000 70%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.45s ease;
+}
+
+.frame-placeholder.active {
     opacity: 1;
 }
 
-.stage-overlay.subtle {
-    opacity: 0.35;
-    align-items: flex-end;
-    justify-content: flex-end;
-    padding: 0.75rem;
-    background: linear-gradient(transparent 40%, rgba(5, 6, 10, 0.55));
+.frame-placeholder.fading {
+    opacity: 0;
 }
 
-.stage-overlay.subtle .spinner {
-    width: 18px;
-    height: 18px;
-    border-width: 2px;
+.placeholder-sky {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
-.spinner {
-    width: 28px;
-    height: 28px;
-    border: 3px solid #2a3144;
-    border-top-color: #e8b84a;
+.accretion-core {
+    width: 1.6rem;
+    height: 1.6rem;
     border-radius: 50%;
-    animation: spin 0.75s linear infinite;
+    background: #000;
+    box-shadow: 0 0 24px 6px rgba(0, 0, 0, 0.95);
+    z-index: 2;
 }
 
-@keyframes spin {
-    to {
-        transform: rotate(360deg);
+.accretion-ring {
+    position: absolute;
+    border-radius: 50%;
+    border: 1px solid transparent;
+    animation: ring-breathe 2.8s ease-in-out infinite;
+}
+
+.ring-a {
+    width: 28%;
+    height: 28%;
+    border-top-color: rgba(240, 184, 74, 0.55);
+    border-right-color: rgba(200, 90, 30, 0.25);
+    animation-delay: 0s;
+}
+
+.ring-b {
+    width: 42%;
+    height: 42%;
+    border-top-color: rgba(240, 160, 60, 0.35);
+    border-left-color: rgba(180, 70, 25, 0.2);
+    animation-delay: 0.35s;
+}
+
+.ring-c {
+    width: 58%;
+    height: 58%;
+    border-bottom-color: rgba(240, 184, 74, 0.2);
+    border-right-color: rgba(120, 50, 20, 0.15);
+    animation-delay: 0.7s;
+}
+
+@keyframes ring-breathe {
+    0%,
+    100% {
+        transform: rotate(0deg) scale(1);
+        opacity: 0.75;
+    }
+    50% {
+        transform: rotate(18deg) scale(1.03);
+        opacity: 1;
     }
 }
 
-.stage-meta {
-    padding: 0.65rem 0.9rem;
-    font-size: 0.78rem;
-    color: #7d8799;
-    background: #0a0c12;
-    border-top: 1px solid #1a2030;
-    font-variant-numeric: tabular-nums;
-}
-
-.panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.85rem;
-}
-
-.panel-block {
-    padding: 0.9rem 1rem;
+.placeholder-card {
+    position: relative;
+    z-index: 3;
+    width: min(100%, 22rem);
+    padding: 0.85rem 1rem;
     border-radius: 12px;
-    border: 1px solid #1e2433;
-    background: rgba(13, 16, 24, 0.85);
+    border: 1px solid var(--line);
+    background: rgba(8, 10, 16, 0.82);
+    backdrop-filter: blur(10px);
+    text-align: center;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
-.panel-block h2 {
-    margin: 0 0 0.75rem;
+.placeholder-title {
+    display: block;
+    font-size: 0.92rem;
+    font-weight: 650;
+    color: var(--text);
+    margin-bottom: 0.25rem;
+}
+
+.placeholder-sub {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 0.55rem;
+}
+
+.placeholder-hint {
+    display: block;
+    font-size: 0.72rem;
+    color: #6d778a;
+    line-height: 1.45;
+}
+
+.refine-veil {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.refine-veil.active {
+    opacity: 1;
+}
+
+.refine-pulse {
+    position: absolute;
+    right: 0.85rem;
+    bottom: 3.5rem;
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 0 var(--accent-glow);
+    animation: refine-ping 1.4s ease-out infinite;
+}
+
+@keyframes refine-ping {
+    0% {
+        box-shadow: 0 0 0 0 rgba(240, 184, 74, 0.45);
+    }
+    70% {
+        box-shadow: 0 0 0 10px rgba(240, 184, 74, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(240, 184, 74, 0);
+    }
+}
+
+.dock {
+    position: relative;
+    z-index: 2;
+    max-width: 1180px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 0.95rem 1rem 0.75rem;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--bg-elevated);
+    backdrop-filter: blur(14px);
+}
+
+.dock-row {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    flex-wrap: wrap;
+}
+
+.dock-row.presets {
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.85rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.dock-label {
+    flex-shrink: 0;
+    min-width: 2.5rem;
     font-size: 0.72rem;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #6b7588;
+    color: var(--muted);
 }
 
-.panel-block label {
+.pill-group,
+.segmented {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
+.pill-group button,
+.segmented button,
+.ghost-btn {
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.03);
+    color: #c5ccd9;
+    border-radius: 999px;
+    padding: 0.42rem 0.85rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.1s;
+}
+
+.pill-group button:hover,
+.segmented button:hover,
+.ghost-btn:hover {
+    border-color: rgba(255, 255, 255, 0.18);
+    color: var(--text);
+}
+
+.pill-group button.active,
+.segmented button.active {
+    border-color: rgba(240, 184, 74, 0.55);
+    background: var(--accent-soft);
+    color: #ffe6b0;
+}
+
+.ghost-btn {
+    margin-left: auto;
+    border-radius: 10px;
+    color: var(--muted);
+}
+
+.primary-controls {
+    gap: 1rem;
+}
+
+.control-block {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
-    margin-bottom: 0.85rem;
-    font-size: 0.84rem;
-    color: #b8c0d0;
-}
-
-.panel-block label:last-child {
-    margin-bottom: 0;
-}
-
-.panel-block label.toggle {
-    flex-direction: row;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.55rem;
-}
-
-.panel-block label.dimmed {
-    opacity: 0.55;
-}
-
-.range-row {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-}
-
-.range-row input[type="range"] {
-    flex: 1;
+    gap: 0.45rem;
     min-width: 0;
 }
 
-.range-row .value {
-    min-width: 5.5rem;
-    font-size: 0.8rem;
-    color: #e8ecf4;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
+.mass-block {
+    flex: 1 1 220px;
 }
 
-.panel-block select {
-    width: 100%;
-    padding: 0.45rem 0.55rem;
-    border-radius: 8px;
-    border: 1px solid #2a3144;
-    background: #0d1018;
-    color: inherit;
+.quality-block {
+    flex: 0 0 auto;
 }
 
-.panel-block input[type="range"] {
-    accent-color: #e8b84a;
-}
-
-.panel-block input[type="range"]:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
-.preset-row {
+.control-head {
     display: flex;
-    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+}
+
+.control-head strong {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    font-weight: 600;
+}
+
+.slider {
+    width: 100%;
+    accent-color: var(--accent);
+}
+
+.dock-advanced {
+    max-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: max-height 0.28s ease, opacity 0.2s ease, margin 0.28s ease;
+}
+
+.dock-advanced.open {
+    max-height: 240px;
+    opacity: 1;
+    margin-top: 0.85rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--line);
+}
+
+.advanced-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+}
+
+.advanced-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+}
+
+.advanced-grid label.disabled {
+    opacity: 0.45;
+}
+
+.advanced-grid select {
+    width: 100%;
+    padding: 0.42rem 0.5rem;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--text);
+}
+
+.spin-row {
+    display: flex;
+    align-items: center;
     gap: 0.5rem;
 }
 
-.preset-row button {
-    flex: 1 1 calc(33% - 0.5rem);
-    min-width: 5.5rem;
-    padding: 0.45rem 0.35rem;
-    border-radius: 8px;
-    border: 1px solid #2a3144;
-    background: #0d1018;
-    color: #b8c0d0;
-    font-size: 0.78rem;
-    cursor: pointer;
-    transition: border-color 0.15s, background 0.15s, color 0.15s;
+.spin-row span {
+    min-width: 4.5rem;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--text);
 }
 
-.preset-row button:hover {
-    border-color: #3d4a66;
-    color: #e8ecf4;
+.toggle-group {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.45rem;
 }
 
-.preset-row button.active {
-    border-color: #e8b84a;
-    background: #1f1a0d;
-    color: #f0d078;
+.toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: #c5ccd9;
+    font-size: 0.8rem;
+}
+
+.toggle.disabled {
+    opacity: 0.45;
+}
+
+.dock-foot {
+    margin-top: 0.75rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid var(--line);
+    font-size: 0.72rem;
+    color: #6d778a;
+    font-family: var(--mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+@media (max-width: 900px) {
+    .advanced-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .ghost-btn {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .primary-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+}
+
+@media (max-width: 560px) {
+    .app {
+        padding: 0.75rem 0.75rem 1rem;
+    }
+
+    .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .pill-group button {
+        flex: 1 1 calc(50% - 0.45rem);
+    }
+
+    .advanced-grid {
+        grid-template-columns: 1fr;
+    }
 }
 </style>
 <script client>
 import { renderTonFrame } from "../lib/blackhole-frame";
 
-const SLIDER_DEBOUNCE_MS = 200;
-const RESOLUTION_DEBOUNCE_MS = 80;
+const SLIDER_DEBOUNCE_MS = 180;
+const RESOLUTION_DEBOUNCE_MS = 60;
+
+const QUALITY_TIERS = {
+    fast: { label: "流畅", width: 480, height: 270 },
+    standard: { label: "标准", width: 640, height: 360 },
+    high: { label: "高清", width: 960, height: 540 },
+};
+
+const PRESETS = {
+    schwarzschild: {
+        name: "史瓦西薄盘",
+        integrator: 0,
+        diskModel: 1,
+        mass: 1.0,
+        spinRatio: 0.5,
+    },
+    kerr: {
+        name: "克尔黑洞",
+        integrator: 3,
+        diskModel: 1,
+        mass: 1.2,
+        spinRatio: 0.65,
+    },
+    raymarch: {
+        name: "Ray March",
+        integrator: 1,
+        diskModel: 0,
+        mass: 1.5,
+        spinRatio: 0.5,
+    },
+    fbm: {
+        name: "程序化盘",
+        integrator: 0,
+        diskModel: 2,
+        mass: 1.0,
+        spinRatio: 0.5,
+    },
+};
+
+const INTEGRATOR_NAMES = ["史瓦西轨道", "半经典 Ray March", "3D 零测地线", "克尔赤道"];
+const DISK_NAMES = ["无盘", "Novikov-Thorne", "程序化 FBM"];
+
+const LOADING_HINTS = [
+    "光线经过黑洞附近时会发生明显偏折",
+    "我们会先出低清草稿，再自动细化到目标画质",
+    "拖动质量滑块可随时改变时空弯曲强度",
+    "高清档位适合截图，流畅档位适合连续调参",
+];
+
+const LOADING_STEPS = [
+    { title: "正在唤醒引擎", sub: "加载 WASM 与 WebGPU 上屏通道" },
+    { title: "绘制首帧草稿", sub: "低分辨率快速预览，无需等待" },
+    { title: "追踪测地线", sub: "CPU 参考积分器正在计算光路" },
+    { title: "合成最终画面", sub: "叠加色调映射并细化到目标分辨率" },
+];
 
 export default class BlackholeView {
     mass = 1.0;
@@ -403,19 +926,26 @@ export default class BlackholeView {
     bloom = false;
     width = 640;
     height = 360;
-    status = "准备渲染…";
+    qualityTier = "standard";
+    activePreset = "schwarzschild";
+    showAdvanced = false;
+
+    hudMessage = "等待首帧";
+    hudTier = "待机";
+    footnote = "WebGPU 上屏 · CPU 测地线 · 渐进细化";
+    progressPct = 0;
+    loadingStep = 0;
+    loadingHint = LOADING_HINTS[0];
+
     booting = false;
     refining = false;
-    qualityBadge = "就绪";
+    hasDisplayedFrame = false;
+    coldLoaderFading = false;
 
     _renderTimer = null;
     _renderBusy = false;
     _pendingRender = false;
     _renderGeneration = 0;
-
-    get overlayText() {
-        return this.booting ? "首帧预览…" : "细化中…";
-    }
 
     get massLabel() {
         return this.mass.toFixed(1);
@@ -430,8 +960,114 @@ export default class BlackholeView {
         return this.mass * this.spinRatio;
     }
 
+    get sceneName() {
+        if (this.activePreset === "custom") {
+            return INTEGRATOR_NAMES[this.integrator] ?? "自定义";
+        }
+        return PRESETS[this.activePreset]?.name ?? "自定义";
+    }
+
+    get resolutionLabel() {
+        return `${this.width}×${this.height}`;
+    }
+
+    get progressStyle() {
+        return `width: ${this.progressPct}%`;
+    }
+
+    get isLoading() {
+        return this.booting || this.refining;
+    }
+
+    get showColdLoader() {
+        return this.booting && !this.hasDisplayedFrame && !this.coldLoaderFading;
+    }
+
+    get showRefineVeil() {
+        return this.refining && this.hasDisplayedFrame;
+    }
+
+    get loadingTitle() {
+        const step = LOADING_STEPS[this.loadingStep] ?? LOADING_STEPS[0];
+        return step.title;
+    }
+
+    get loadingSubtitle() {
+        const step = LOADING_STEPS[this.loadingStep] ?? LOADING_STEPS[0];
+        return step.sub;
+    }
+
+    get progressLabel() {
+        if (this.showColdLoader) {
+            return this.loadingTitle;
+        }
+        if (this.refining) {
+            return "正在细化";
+        }
+        return "准备中";
+    }
+
+    onFirstFrameReady() {
+        if (this.hasDisplayedFrame) {
+            return;
+        }
+        this.hasDisplayedFrame = true;
+        this.coldLoaderFading = true;
+        window.setTimeout(() => {
+            this.coldLoaderFading = false;
+        }, 480);
+    }
+
+    updateLoadingStep(pass, passes, final) {
+        if (pass === 0) {
+            this.loadingStep = 1;
+            this.loadingHint = LOADING_HINTS[0];
+        } else if (!final) {
+            this.loadingStep = 2;
+            this.loadingHint = LOADING_HINTS[1];
+        } else {
+            this.loadingStep = 3;
+            this.loadingHint = LOADING_HINTS[2];
+        }
+        if (final) {
+            this.loadingHint = LOADING_HINTS[3];
+        }
+    }
+
     async onMount() {
         await this.runRender();
+    }
+
+    toggleAdvanced() {
+        this.showAdvanced = !this.showAdvanced;
+    }
+
+    markCustom() {
+        this.activePreset = "custom";
+    }
+
+    applyPreset(id) {
+        const preset = PRESETS[id];
+        if (!preset) {
+            return;
+        }
+        this.activePreset = id;
+        this.integrator = preset.integrator;
+        this.diskModel = preset.diskModel;
+        this.mass = preset.mass;
+        this.spinRatio = preset.spinRatio;
+        this.scheduleRender(0);
+    }
+
+    setQualityTier(tier) {
+        const spec = QUALITY_TIERS[tier];
+        if (!spec) {
+            return;
+        }
+        this.qualityTier = tier;
+        this.width = spec.width;
+        this.height = spec.height;
+        this.scheduleRender(RESOLUTION_DEBOUNCE_MS);
     }
 
     scheduleRender(delayMs = SLIDER_DEBOUNCE_MS) {
@@ -446,21 +1082,25 @@ export default class BlackholeView {
 
     onIntegratorChange(e) {
         this.integrator = Number(e.target.value);
+        this.markCustom();
         this.scheduleRender(0);
     }
 
     onDiskModelChange(e) {
         this.diskModel = Number(e.target.value);
+        this.markCustom();
         this.scheduleRender(0);
     }
 
     onMassInput(e) {
         this.mass = Number(e.target.value);
+        this.markCustom();
         this.scheduleRender(SLIDER_DEBOUNCE_MS);
     }
 
     onSpinInput(e) {
         this.spinRatio = Number(e.target.value);
+        this.markCustom();
         this.scheduleRender(SLIDER_DEBOUNCE_MS);
     }
 
@@ -469,18 +1109,14 @@ export default class BlackholeView {
         if (!this.ucfToneMap) {
             this.bloom = false;
         }
+        this.markCustom();
         this.scheduleRender(0);
     }
 
     onBloomChange(e) {
         this.bloom = e.target.checked;
+        this.markCustom();
         this.scheduleRender(0);
-    }
-
-    setResolution(width, height) {
-        this.width = width;
-        this.height = height;
-        this.scheduleRender(RESOLUTION_DEBOUNCE_MS);
     }
 
     async runRender() {
@@ -492,7 +1128,7 @@ export default class BlackholeView {
 
         const canvas = document.getElementById("ton-view");
         if (!(canvas instanceof HTMLCanvasElement)) {
-            this.status = "失败: canvas 未找到";
+            this.hudMessage = "画布未就绪";
             return;
         }
 
@@ -502,12 +1138,16 @@ export default class BlackholeView {
         this._renderBusy = true;
         this.booting = true;
         this.refining = false;
-        this.qualityBadge = "启动";
-        this.status = `渐进渲染 · 目标 ${this.width}×${this.height}`;
+        this.coldLoaderFading = false;
+        this.progressPct = 0;
+        this.loadingStep = 0;
+        this.loadingHint = LOADING_HINTS[0];
+        this.hudTier = "准备中";
+        this.hudMessage = this.hasDisplayedFrame ? "更新画面中…" : "首次加载，马上就好";
         const t0 = performance.now();
 
         try {
-            const { statusLine } = await renderTonFrame(
+            const { statusLine, tier } = await renderTonFrame(
                 canvas,
                 {
                     mass: this.mass,
@@ -523,12 +1163,16 @@ export default class BlackholeView {
                         if (generation !== this._renderGeneration) {
                             return;
                         }
-                        const pct = Math.round(info.scale * 100);
-                        this.qualityBadge = info.final
-                            ? `${info.tier} · ${pct}%`
-                            : `预览 ${pct}%`;
-                        this.status = `${info.tier} · ${info.width}×${info.height} · pass ${info.pass + 1}/${info.passes}`;
-                        if (!info.final) {
+                        this.progressPct = Math.round(((info.pass + 1) / info.passes) * 100);
+                        this.hudTier = info.tier;
+                        this.updateLoadingStep(info.pass, info.passes, info.final);
+                        this.onFirstFrameReady();
+                        if (info.final) {
+                            this.hudMessage = "画面已就绪";
+                            this.booting = false;
+                            this.refining = false;
+                        } else {
+                            this.hudMessage = `草稿 ${Math.round(info.scale * 100)}% · 继续细化中`;
                             this.booting = false;
                             this.refining = true;
                         }
@@ -539,12 +1183,21 @@ export default class BlackholeView {
                 return;
             }
             const dt = ((performance.now() - t0) / 1000).toFixed(2);
-            this.status = `${statusLine} · ${dt}s`;
-            this.qualityBadge = "就绪";
+            const disk = DISK_NAMES[this.diskModel] ?? "盘";
+            this.hudTier = tier;
+            this.hudMessage = `完成 · 耗时 ${dt} 秒`;
+            this.footnote = `${statusLine} · ${disk}`;
+            this.progressPct = 100;
+            window.setTimeout(() => {
+                if (generation === this._renderGeneration) {
+                    this.progressPct = 0;
+                }
+            }, 1200);
         } catch (err) {
             if (generation === this._renderGeneration) {
-                this.status = `失败: ${err instanceof Error ? err.message : String(err)}`;
-                this.qualityBadge = "错误";
+                this.hudMessage = err instanceof Error ? err.message : String(err);
+                this.hudTier = "错误";
+                this.footnote = "渲染失败，请刷新页面重试";
             }
         } finally {
             this._renderBusy = false;

@@ -10,6 +10,12 @@ cargo run -p ton-view -- blackhole.png --ucf-spectral --camera level --width 640
 
 `--ucf-spectral` 使用 UCF 原生 Vulkan 程序执行 F64 轨迹、F32 盘面频移、可见光谱积分与 sRGB 显示编码。当前为无纹理不透明薄盘，温度采用无内缘力矩牛顿基线，不是 Novikov-Thorne 通量模型。观察者响应采用 CIE1931 高斯近似和 5nm 积分，不是官方标准表。
 
+追加 `--report` 会从同一条产品执行链输出结构化验收信息，包括固定资源布局、终止分类、事件数量、overflow、辐射状态、HDR 有限性、不变量残差和实际 Program 哈希。示例：
+
+```text
+cargo run -p ton-view -- blackhole.png --ucf-spectral --report --width 8 --height 4
+```
+
 - `--peak-kelvin` 设置盘面峰值温度，默认 6500K。
 - `--exposure` 设置显示曝光，默认 `1e-10`。
 - `--step-size` 设置最大仿射步长，默认 `0.02M`。
