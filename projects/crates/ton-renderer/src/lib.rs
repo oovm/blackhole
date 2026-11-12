@@ -16,7 +16,7 @@ mod sky;
 
 pub use capture_ucf::{analytic_captured_ucf, CaptureClassifyUcf};
 pub use blueprint::{build_frame_graph, build_frame_graph_for_resolution, build_frame_graph_with_post, trace_kernel_for};
-pub use kernel::{attach_binding, KernelBinding, KernelInstance};
+pub use kernel::{attach_binding, beauty_disk_shade_kernel, beauty_sky_composite_kernel, beauty_tone_map_kernel, validate_program_bindings, KernelBinding, KernelInstance};
 pub use framebuffer::{Framebuffer, FramebufferEncoding};
 pub use post::{
     aces_filmic, apply_post_process, apply_tone_map, bloom_pass, composite_bloom_from_bright,

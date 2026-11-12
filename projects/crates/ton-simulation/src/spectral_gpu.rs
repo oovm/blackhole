@@ -1,18 +1,30 @@
 //! 经验证轨迹、圆轨道频移、温度基线与谱色转换组成的原生 GPU 渲染链。
 
 use std::collections::BTreeMap;
-use ton_renderer::{sky_color, Framebuffer, FramebufferEncoding};
+use ton_renderer::{sky_color, Framebuffer, FramebufferEncoding, KernelBinding};
 use ton_types::{Camera, Rgb, TonError, TonResult};
 use ucf_backend_vulkan::VulkanBackend;
 use ucf_ir::{Graph, ResourceGraph, TaskGraph};
 use ucf_scheduler::Backend;
 use ucf_types::{Access, Domain, ParamValue, ResourceId, ResourceKind, ResourceNode};
-use crate::{F64GpuTraceBatch, SchwarzschildF64GpuTraceBuilder};
+use crate::{F64GpuTraceBatch, GpuTraceTermination, SchwarzschildF64GpuTraceBuilder};
 
 /// 光谱 Beauty 路径的默认曝光，来自 320×180 Vulkan 实图扫描基线。
 pub const DEFAULT_SPECTRAL_EXPOSURE: f64 = 5.0e-10;
 
 fn execute_stage(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Program, input: &[f32],
+    input_stride: u32, output_stride: u32, base: u64, uniforms: &[f64], table: Option<&[f32]>,
+) -> TonResult<Vec<f32>> {
+    execute_stage_inner(backend, program, None, input, input_stride, output_stride, base, uniforms, table)
+}
+
+fn execute_bound_stage(backend: &mut VulkanBackend, binding: &KernelBinding, input: &[f32],
+    input_stride: u32, output_stride: u32, base: u64, uniforms: &[f64], table: Option<&[f32]>,
+) -> TonResult<Vec<f32>> {
+    execute_stage_inner(backend, &binding.program, Some(binding), input, input_stride, output_stride, base, uniforms, table)
+}
+
+fn execute_stage_inner(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Program, binding: Option<&KernelBinding>, input: &[f32],
     input_stride: u32, output_stride: u32, base: u64, uniforms: &[f64], table: Option<&[f32]>,
 ) -> TonResult<Vec<f32>> {
     if input.is_empty() || input.len() % input_stride as usize != 0 { return Err(TonError::Domain("invalid spectral stage input layout".into())); }
@@ -28,7 +40,12 @@ fn execute_stage(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Progra
             access: Access::Read, byte_size: Some(table.len() as u64 * 4) });
     }
     let task = crate::ucf_physics::dispatch_task(base, program, count, ResourceId(base + 2), 2, 1, Some(ResourceId(base)), params)?;
-    let graph = Graph { resources: ResourceGraph { nodes: resources }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+    let mut graph = Graph { resources: ResourceGraph { nodes: resources }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+    if let Some(binding) = binding {
+        ton_renderer::attach_binding(&mut graph, base, binding);
+        ton_renderer::validate_program_bindings(&graph)
+            .map_err(|error| TonError::Domain(format!("validate spectral binding: {error}")))?;
+    }
     graph.validate().map_err(|error| TonError::Domain(format!("validate spectral stage: {error}")))?;
     backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare spectral stage: {error}")))?;
     backend.write_f32(ResourceId(base), input).map_err(|error| TonError::Domain(format!("upload spectral stage: {error}")))?;
@@ -37,7 +54,7 @@ fn execute_stage(backend: &mut VulkanBackend, program: &ton_ucf_frontend::Progra
     let output = backend.read_f32(ResourceId(base + 1)).map_err(|error| TonError::Domain(format!("read spectral output: {error}")))?;
     let status = backend.read_f32(ResourceId(base + 2)).map_err(|error| TonError::Domain(format!("read spectral status: {error}")))?;
     if output.len() != count as usize * output_stride as usize || status.len() != count as usize
-        || output.iter().any(|value| !value.is_finite()) || status.iter().any(|value| *value != 0.0 && *value != 1.0 && *value != 2.0) {
+        || output.iter().any(|value| !value.is_finite()) || status.iter().any(|value| *value != 0.0 && *value != 1.0) {
         let mut unique_status = status.iter().copied().filter(|value| value.is_finite()).collect::<Vec<_>>();
         unique_status.sort_by(f32::total_cmp); unique_status.dedup();
         let first_bad = output.iter().position(|value| !value.is_finite());
@@ -61,8 +78,113 @@ pub struct SpectralGpuFrame {
     pub event_trace: crate::F64GpuEventTraceBatch,
     /// UCF 固定包辐射传输输出 `[intensity,transmittance,count,status]`。
     pub radiative: Vec<[f32; 4]>,
-    /// 依序完成的圆轨道频移、温度、谱色、显示程序哈希。
+    /// 依序完成的光谱、辐射、后处理和显示阶段名称。
+    pub shading_program_names: Vec<String>,
+    /// 与 [`Self::shading_program_names`] 一一对应的实际 Program 哈希。
     pub shading_program_hashes: Vec<u64>,
+}
+
+/// 光谱 UCF 产品入口的结构化执行验收报告。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpectralGpuValidationReport {
+    /// 参与轨迹执行的像素数量。
+    pub instances: usize,
+    /// 捕获、逃逸和各类失败终止数量。
+    pub captured: usize,
+    /// 逃逸数量。
+    pub escaped: usize,
+    /// 步数预算耗尽数量。
+    pub budget_exhausted: usize,
+    /// 积分失败数量。
+    pub integration_failures: usize,
+    /// 事件定位失败数量。
+    pub event_localization_failures: usize,
+    /// 输入非法数量。
+    pub invalid_inputs: usize,
+    /// 事件包中出现 overflow 的实例数量。
+    pub overflow_instances: usize,
+    /// 所有实例累计的盘面事件数量。
+    pub event_count: usize,
+    /// 辐射阶段成功实例数量。
+    pub radiative_instances: usize,
+    /// 辐射阶段报告非零状态的实例数量。
+    pub radiative_failures: usize,
+    /// HDR 像素中出现非有限值的数量。
+    pub non_finite_hdr: usize,
+    /// 轨迹记录中的最大零约束残差。
+    pub maximum_null_residual: f64,
+    /// 轨迹记录中的最大能量漂移。
+    pub maximum_energy_drift: f64,
+    /// 轨迹记录中的最大角动量平方漂移。
+    pub maximum_angular_squared_drift: f64,
+    /// 轨迹阶段实际执行的 Program 哈希。
+    pub trace_program_hashes: Vec<u64>,
+    /// 频移、温度、谱色、显示和后处理阶段实际执行的名称。
+    pub shading_program_names: Vec<String>,
+    /// 与 [`Self::shading_program_names`] 一一对应的实际 Program 哈希。
+    pub shading_program_hashes: Vec<u64>,
+}
+
+impl SpectralGpuFrame {
+    /// 从完整原生链路结果生成产品入口验收报告。
+    pub fn validation_report(&self) -> SpectralGpuValidationReport {
+        let mut report = SpectralGpuValidationReport {
+            instances: self.event_trace.records.len(),
+            captured: 0,
+            escaped: 0,
+            budget_exhausted: 0,
+            integration_failures: 0,
+            event_localization_failures: 0,
+            invalid_inputs: 0,
+            overflow_instances: 0,
+            event_count: 0,
+            radiative_instances: self.radiative.len(),
+            radiative_failures: 0,
+            non_finite_hdr: self.hdr.iter().filter(|pixel| pixel.iter().any(|value| !value.is_finite())).count(),
+            maximum_null_residual: 0.0,
+            maximum_energy_drift: 0.0,
+            maximum_angular_squared_drift: 0.0,
+            trace_program_hashes: self.event_trace.executed_program_hashes.clone(),
+            shading_program_names: self.shading_program_names.clone(),
+            shading_program_hashes: self.shading_program_hashes.clone(),
+        };
+        for ((record, event), termination) in self.event_trace.records.iter().zip(&self.event_trace.events).zip(&self.event_trace.terminations) {
+            match termination {
+                GpuTraceTermination::Captured => report.captured += 1,
+                GpuTraceTermination::Escaped => report.escaped += 1,
+                GpuTraceTermination::StepBudgetExhausted => report.budget_exhausted += 1,
+                GpuTraceTermination::IntegrationFailure => report.integration_failures += 1,
+                GpuTraceTermination::EventLocalizationFailure => report.event_localization_failures += 1,
+                GpuTraceTermination::InvalidInput => report.invalid_inputs += 1,
+            }
+            if event[1] != 0.0 { report.overflow_instances += 1; }
+            if event[0].is_finite() && event[0] >= 0.0 { report.event_count += event[0] as usize; }
+            report.maximum_null_residual = report.maximum_null_residual.max(record[16]);
+            report.maximum_energy_drift = report.maximum_energy_drift.max(record[17]);
+            report.maximum_angular_squared_drift = report.maximum_angular_squared_drift.max(record[18]);
+        }
+        report.radiative_failures = self.radiative.iter().filter(|record| record[3] != 1.0).count();
+        report
+    }
+}
+
+fn event_trace_failure_diagnostic(
+    event_trace: &crate::F64GpuEventTraceBatch,
+    error: &TonError,
+) -> String {
+    let count = |termination: GpuTraceTermination|
+        event_trace.terminations.iter().filter(|value| **value == termination).count();
+    let overflow = event_trace.events.iter().filter(|event| event[1] != 0.0).count();
+    let events = event_trace.events.iter().filter_map(|event| {
+        event[0].is_finite().then_some(event[0].max(0.0) as usize)
+    }).sum::<usize>();
+    format!(
+        "spectral event trace rejected: {error}; instances={}; captured={}; escaped={}; budget_exhausted={}; integration_failures={}; event_localization_failures={}; invalid_inputs={}; events={events}; overflow_instances={overflow}; trace_program_hashes={:?}",
+        event_trace.terminations.len(), count(GpuTraceTermination::Captured), count(GpuTraceTermination::Escaped),
+        count(GpuTraceTermination::StepBudgetExhausted), count(GpuTraceTermination::IntegrationFailure),
+        count(GpuTraceTermination::EventLocalizationFailure), count(GpuTraceTermination::InvalidInput),
+        event_trace.executed_program_hashes,
+    )
 }
 
 /// 独立的可验证光谱薄盘 GPU 入口，不将温度基线称为 Novikov-Thorne。
@@ -105,14 +227,34 @@ impl SchwarzschildSpectralGpuBuilder {
         let table = spectrum.response_table().map_err(TonError::Domain)?;
         let event_trace = SchwarzschildF64GpuTraceBuilder::new(self.mass).maximum_step(self.step).maximum_steps(self.maximum_steps)
             .execute_event_camera(camera, width, height)?;
-        event_trace.require_radiative()?;
+        if let Err(error) = event_trace.require_radiative() {
+            return Err(TonError::Domain(event_trace_failure_diagnostic(&event_trace, &error)));
+        }
         let trace = event_trace.render_trace();
         trace.require_renderable()?;
         let mut backend = VulkanBackend::new().map_err(|error| TonError::Domain(format!("create spectral backend: {error}")))?;
-        let records = trace.records.iter().map(|record| record.map(|value| value as f32)).collect::<Vec<_>>();
+        let mut records = Vec::with_capacity(event_trace.events.len() * 4);
+        for packet in &event_trace.events {
+            for event_index in 0..4 {
+                let mut record = [0.0f32; 29];
+                if event_index < packet[0] as usize {
+                    let event = &packet[2 + event_index * 9..11 + event_index * 9];
+                    record[13] = 1.0;
+                    for (destination, value) in record[21..29].iter_mut().zip(&event[1..9]) {
+                        *destination = *value as f32;
+                    }
+                }
+                records.push(record);
+            }
+        }
         if records.iter().flatten().any(|value| !value.is_finite()) { return Err(TonError::Domain("F64 trajectory cannot be represented by F32 radiance inputs".into())); }
         let frequency = crate::adaptive_gpu::execute_cartesian_frequency_with_backend(&mut backend, &records, self.mass as f32, camera.position.length() as f32)?;
-        let mut hashes = vec![ton_ucf_frontend::program_hash(&ton_ucf_frontend::SchwarzschildDiskFrequencyBuilder::new().build().map_err(TonError::Domain)?)];
+        let frequency_binding = KernelBinding::from_program(
+            "schwarzschild_disk_frequency",
+            ton_ucf_frontend::SchwarzschildDiskFrequencyBuilder::new().build().map_err(TonError::Domain)?,
+        );
+        let mut hashes = vec![frequency_binding.program_hash];
+        let mut names = vec![frequency_binding.program_name.clone()];
         let mut graybody_input = Vec::with_capacity(records.len() * 7);
         for (record, frequency) in records.iter().zip(frequency.iter()) {
             graybody_input.extend_from_slice(frequency);
@@ -122,15 +264,18 @@ impl SchwarzschildSpectralGpuBuilder {
                 graybody_input.extend_from_slice(&[record[22], record[23], record[21]]);
             }
         }
-        let emission = ton_ucf_frontend::GraybodyEmissionBuilder::new().build().map_err(TonError::Domain)?;
+        let emission_binding = KernelBinding::from_program(
+            "graybody_emission",
+            ton_ucf_frontend::GraybodyEmissionBuilder::new().build().map_err(TonError::Domain)?,
+        );
         let pattern = self.pattern;
-        let emission_input = execute_stage(&mut backend, &emission, &graybody_input, 7, 3, 101,
+        let emission_input = execute_stage(&mut backend, &emission_binding.program, &graybody_input, 7, 3, 101,
             &[6.0 * self.mass, self.peak_kelvin, self.exposure, self.mass, pattern.contrast() as f64,
                 pattern.arms() as f64, pattern.pitch(), pattern.radial_frequency()], None)?;
-        hashes.push(ton_ucf_frontend::program_hash(&emission));
-        let color = spectrum.build().map_err(TonError::Domain)?;
-        let colors = execute_stage(&mut backend, &color, &emission_input, 3, 7, 111, &[], Some(&table))?;
-        hashes.push(ton_ucf_frontend::program_hash(&color));
+        hashes.push(emission_binding.program_hash); names.push(emission_binding.program_name.clone());
+        let color_binding = KernelBinding::from_program("visible_spectrum_color", spectrum.build().map_err(TonError::Domain)?);
+        let colors = execute_stage(&mut backend, &color_binding.program, &emission_input, 3, 7, 111, &[], Some(&table))?;
+        hashes.push(color_binding.program_hash); names.push(color_binding.program_name.clone());
         let radiative_model = ton_disk::DiskRadiativeModel::new(self.mass, 6.0 * self.mass, 0.8)?;
         let mut radiative_input = Vec::with_capacity(event_trace.events.len() * 10);
         for packet in &event_trace.events {
@@ -146,60 +291,70 @@ impl SchwarzschildSpectralGpuBuilder {
                 }
             }
         }
-        let transfer = ton_ucf_frontend::PackedRadiativeTransferBuilder::new().maximum_events(4).build().map_err(TonError::Domain)?;
-        let radiative_output = execute_stage(&mut backend, &transfer, &radiative_input, 10, 4, 134, &[0.0], None)?;
+        let transfer_binding = KernelBinding::from_program(
+            "packed_radiative_transfer",
+            ton_ucf_frontend::PackedRadiativeTransferBuilder::new().maximum_events(4).build().map_err(TonError::Domain)?,
+        );
+        let radiative_output = execute_stage(&mut backend, &transfer_binding.program, &radiative_input, 10, 4, 134, &[0.0], None)?;
         let radiative = radiative_output.chunks_exact(4).map(|record| record.try_into().unwrap()).collect::<Vec<[f32; 4]>>();
-        hashes.push(ton_ucf_frontend::program_hash(&transfer));
-        let composite = ton_ucf_frontend::RadianceCompositeBuilder::new().build().map_err(TonError::Domain)?;
-        let mut composite_input = Vec::with_capacity(colors.len() + radiative.len() * 8);
-        for ((color, transfer), trace_record) in colors.chunks_exact(7).zip(&radiative).zip(&trace.records) {
-            composite_input.extend_from_slice(color);
-            composite_input.extend_from_slice(transfer);
+        hashes.push(transfer_binding.program_hash); names.push(transfer_binding.program_name.clone());
+        let composite_binding = KernelBinding::from_program(
+            "packed_spectral_radiance",
+            ton_ucf_frontend::PackedSpectralRadianceBuilder::new().maximum_events(4).build().map_err(TonError::Domain)?,
+        );
+        let mut composite_input = Vec::with_capacity(trace.records.len() * 22);
+        for (pixel_index, (packet, trace_record)) in event_trace.events.iter().zip(&trace.records).enumerate() {
+            composite_input.extend([packet[0] as f32, packet[1] as f32]);
+            for event_index in 0..4 {
+                let color_offset = (pixel_index * 4 + event_index) * 7;
+                composite_input.extend_from_slice(&colors[color_offset + 3..color_offset + 6]);
+                composite_input.push(radiative_input[pixel_index * 10 + 3 + event_index * 2]);
+            }
             let direction = ton_types::Vec3::new(trace_record[1], trace_record[2], trace_record[3]).normalize();
             let sky = sky_color(direction).scale(0.35);
             composite_input.extend([sky.r as f32, sky.g as f32, sky.b as f32]);
-            composite_input.push(if trace_record[8] == 2.0 { 2.0 } else { 1.0 });
+            composite_input.push(trace_record[8] as f32);
         }
-        let composed = execute_stage(&mut backend, &composite, &composite_input, 15, 7, 137, &[1.0e-12], None)?;
-        hashes.push(ton_ucf_frontend::program_hash(&composite));
+        let composed = execute_stage(&mut backend, &composite_binding.program, &composite_input, 22, 7, 137, &[], None)?;
+        hashes.push(composite_binding.program_hash); names.push(composite_binding.program_name.clone());
         let mut display_input = composed.clone();
         if self.bloom {
-            let bright_builder = ton_ucf_frontend::HdrBrightExtractBuilder::new().build().map_err(TonError::Domain)?;
+            let bright_binding = KernelBinding::from_program("post_bloom_extract", ton_ucf_frontend::HdrBrightExtractBuilder::new().build().map_err(TonError::Domain)?);
             let bright_input = composed.chunks_exact(7).flat_map(|record| record[3..6].iter().copied()).collect::<Vec<_>>();
-            let bright_output = execute_stage(&mut backend, &bright_builder, &bright_input, 3, 3, 149, &[0.08], None)?;
-            hashes.push(ton_ucf_frontend::program_hash(&bright_builder));
-            let blur_builder = ton_ucf_frontend::UcfBoxBlur3x3Builder::new(width, height).build().map_err(TonError::Domain)?;
-            let l0 = execute_stage(&mut backend, &blur_builder, &bright_output, 3, 3, 152, &[], None)?;
-            hashes.push(ton_ucf_frontend::program_hash(&blur_builder));
+            let bright_output = execute_bound_stage(&mut backend, &bright_binding, &bright_input, 3, 3, 149, &[0.08], None)?;
+            hashes.push(bright_binding.program_hash); names.push(bright_binding.program_name.clone());
+            let blur_binding = KernelBinding::from_program("post_bloom_blur_l0", ton_ucf_frontend::UcfBoxBlur3x3Builder::new(width, height).build().map_err(TonError::Domain)?);
+            let l0 = execute_bound_stage(&mut backend, &blur_binding, &bright_output, 3, 3, 152, &[], None)?;
+            hashes.push(blur_binding.program_hash); names.push(blur_binding.program_name.clone());
 
             let (w2, h2) = (width / 2, height / 2);
             let mut l1 = vec![0.0; bright_output.len()];
             let mut l2 = vec![0.0; bright_output.len()];
             if w2 > 0 && h2 > 0 {
-                let downsample1 = ton_ucf_frontend::UcfDownsample2xRgbBuilder::new(width, height).build().map_err(TonError::Domain)?;
-                let down1 = execute_stage(&mut backend, &downsample1, &bright_output, 3, 3, 155, &[], None)?;
-                hashes.push(ton_ucf_frontend::program_hash(&downsample1));
-                let blur1_builder = ton_ucf_frontend::UcfBoxBlur3x3Builder::new(w2, h2).build().map_err(TonError::Domain)?;
-                let blur1 = execute_stage(&mut backend, &blur1_builder, &down1, 3, 3, 158, &[], None)?;
-                hashes.push(ton_ucf_frontend::program_hash(&blur1_builder));
-                let upsample1 = ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w2, h2, width, height, 0.55).build().map_err(TonError::Domain)?;
-                l1 = execute_stage(&mut backend, &upsample1, &blur1, 3, 3, 161, &[], None)?;
-                hashes.push(ton_ucf_frontend::program_hash(&upsample1));
+                let downsample1_binding = KernelBinding::from_program("post_bloom_downsample_l1", ton_ucf_frontend::UcfDownsample2xRgbBuilder::new(width, height).build().map_err(TonError::Domain)?);
+                let down1 = execute_bound_stage(&mut backend, &downsample1_binding, &bright_output, 3, 3, 155, &[], None)?;
+                hashes.push(downsample1_binding.program_hash); names.push(downsample1_binding.program_name.clone());
+                let blur1_binding = KernelBinding::from_program("post_bloom_blur_l1", ton_ucf_frontend::UcfBoxBlur3x3Builder::new(w2, h2).build().map_err(TonError::Domain)?);
+                let blur1 = execute_bound_stage(&mut backend, &blur1_binding, &down1, 3, 3, 158, &[], None)?;
+                hashes.push(blur1_binding.program_hash); names.push(blur1_binding.program_name.clone());
+                let upsample1_binding = KernelBinding::from_program("post_bloom_upsample_l1", ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w2, h2, width, height, 0.55).build().map_err(TonError::Domain)?);
+                l1 = execute_bound_stage(&mut backend, &upsample1_binding, &blur1, 3, 3, 161, &[], None)?;
+                hashes.push(upsample1_binding.program_hash); names.push(upsample1_binding.program_name.clone());
 
                 let (w4, h4) = (w2 / 2, h2 / 2);
                 if w4 > 0 && h4 > 0 {
-                    let downsample2 = ton_ucf_frontend::UcfDownsample2xRgbBuilder::new(w2, h2).build().map_err(TonError::Domain)?;
-                    let down2 = execute_stage(&mut backend, &downsample2, &down1, 3, 3, 164, &[], None)?;
-                    hashes.push(ton_ucf_frontend::program_hash(&downsample2));
-                    let blur2_builder = ton_ucf_frontend::UcfBoxBlur3x3Builder::new(w4, h4).build().map_err(TonError::Domain)?;
-                    let blur2 = execute_stage(&mut backend, &blur2_builder, &down2, 3, 3, 167, &[], None)?;
-                    hashes.push(ton_ucf_frontend::program_hash(&blur2_builder));
-                    let upsample2_mid = ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w4, h4, w2, h2, 1.0).build().map_err(TonError::Domain)?;
-                    let up2_mid = execute_stage(&mut backend, &upsample2_mid, &blur2, 3, 3, 170, &[], None)?;
-                    hashes.push(ton_ucf_frontend::program_hash(&upsample2_mid));
-                    let upsample2 = ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w2, h2, width, height, 0.35).build().map_err(TonError::Domain)?;
-                    l2 = execute_stage(&mut backend, &upsample2, &up2_mid, 3, 3, 173, &[], None)?;
-                    hashes.push(ton_ucf_frontend::program_hash(&upsample2));
+                    let downsample2_binding = KernelBinding::from_program("post_bloom_downsample_l2", ton_ucf_frontend::UcfDownsample2xRgbBuilder::new(w2, h2).build().map_err(TonError::Domain)?);
+                    let down2 = execute_bound_stage(&mut backend, &downsample2_binding, &down1, 3, 3, 164, &[], None)?;
+                    hashes.push(downsample2_binding.program_hash); names.push(downsample2_binding.program_name.clone());
+                    let blur2_binding = KernelBinding::from_program("post_bloom_blur_l2", ton_ucf_frontend::UcfBoxBlur3x3Builder::new(w4, h4).build().map_err(TonError::Domain)?);
+                    let blur2 = execute_bound_stage(&mut backend, &blur2_binding, &down2, 3, 3, 167, &[], None)?;
+                    hashes.push(blur2_binding.program_hash); names.push(blur2_binding.program_name.clone());
+                    let upsample2_mid_binding = KernelBinding::from_program("post_bloom_upsample_mid_l2", ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w4, h4, w2, h2, 1.0).build().map_err(TonError::Domain)?);
+                    let up2_mid = execute_bound_stage(&mut backend, &upsample2_mid_binding, &blur2, 3, 3, 170, &[], None)?;
+                    hashes.push(upsample2_mid_binding.program_hash); names.push(upsample2_mid_binding.program_name.clone());
+                    let upsample2_binding = KernelBinding::from_program("post_bloom_upsample_l2", ton_ucf_frontend::UcfUpsampleRgbBuilder::new(w2, h2, width, height, 0.35).build().map_err(TonError::Domain)?);
+                    l2 = execute_bound_stage(&mut backend, &upsample2_binding, &up2_mid, 3, 3, 173, &[], None)?;
+                    hashes.push(upsample2_binding.program_hash); names.push(upsample2_binding.program_name.clone());
                 }
             }
             let mut linear = Framebuffer { width, height,
@@ -221,13 +376,16 @@ impl SchwarzschildSpectralGpuBuilder {
             }
         }
         let hdr = display_input.chunks_exact(7).map(|record| record[3..6].try_into().unwrap()).collect::<Vec<_>>();
-        let display = ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?;
-        let pixels = execute_stage(&mut backend, &display, &display_input, 7, 3, 121, &[], None)?;
+        let display_binding = KernelBinding::from_program(
+            "spectral_display",
+            ton_ucf_frontend::SpectralDisplayBuilder::new().build().map_err(TonError::Domain)?,
+        );
+        let pixels = execute_stage(&mut backend, &display_binding.program, &display_input, 7, 3, 121, &[], None)?;
         if pixels.iter().any(|value| *value < 0.0 || *value > 1.0) { return Err(TonError::Domain("spectral display exceeds encoded sRGB range".into())); }
-        hashes.push(ton_ucf_frontend::program_hash(&display));
+        hashes.push(display_binding.program_hash); names.push(display_binding.program_name.clone());
         let framebuffer = Framebuffer { width, height, encoding: FramebufferEncoding::Display,
             pixels: pixels.chunks_exact(3).map(|pixel| Rgb::new(pixel[0] as f64, pixel[1] as f64, pixel[2] as f64)).collect() };
-        Ok(SpectralGpuFrame { framebuffer, hdr, trace, event_trace, radiative, shading_program_hashes: hashes })
+        Ok(SpectralGpuFrame { framebuffer, hdr, trace, event_trace, radiative, shading_program_names: names, shading_program_hashes: hashes })
     }
 }
 
@@ -337,6 +495,39 @@ mod tests {
     }
 
     #[test]
+    fn packed_spectral_radiance_matches_reference_on_cpu_and_vulkan() {
+        let program = ton_ucf_frontend::PackedSpectralRadianceBuilder::new().maximum_events(4).build().unwrap();
+        let input = [
+            2.0, 0.0,
+            4.0, 1.0, 0.0, 0.25,
+            0.0, 2.0, 3.0, 0.5,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            1.0, 2.0, 4.0, 2.0,
+        ];
+        let expected = [1.375f32, 1.75, 2.625];
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        cpu.with_buffer(1, input.into_iter().map(ton_ucf_frontend::Value::F32).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F32(0.0); 7]);
+        cpu.run_parallel(&program, 1).unwrap();
+        let cpu_output = cpu.buffer(2).unwrap();
+        for (actual, expected) in cpu_output[3..6].iter().zip(expected) {
+            assert!((actual.as_f64().unwrap() as f32 - expected).abs() < 1.0e-6);
+        }
+        assert_eq!(cpu_output[6], ton_ucf_frontend::Value::F32(1.0));
+
+        let mut backend = VulkanBackend::new().unwrap();
+        let output = execute_stage(&mut backend, &program, &input, 22, 7, 187, &[], None).unwrap();
+        for (actual, expected) in output[3..6].iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-5, "Vulkan mismatch: {actual} vs {expected}");
+        }
+        assert_eq!(output[6], 1.0);
+        for (actual, expected) in output.iter().zip(cpu_output.iter().skip(0).map(|value| value.as_f64().unwrap() as f32)) {
+            assert!((actual - expected).abs() < 1.0e-5, "CPU/Vulkan mismatch: {actual} vs {expected}");
+        }
+    }
+
+    #[test]
     fn radiative_transfer_uses_real_reference_disk_events_on_cpu_and_vulkan() {
         let initial = ton_geodesic::SchwarzschildCartesianNullState::from_ray(
             1.0, ton_types::Vec3::new(10.0, 0.0, 0.01), ton_types::Vec3::new(0.0, 0.0, -1.0),
@@ -411,6 +602,10 @@ mod tests {
         let output = SchwarzschildSpectralGpuBuilder::new(1.0).exposure(3.0e-9).execute(camera, 16, 9).unwrap();
         assert_eq!(output.framebuffer.encoding, FramebufferEncoding::Display);
         assert_eq!(output.shading_program_hashes.len(), 6);
+        let expected_spectral_radiance_hash = ton_ucf_frontend::program_hash(
+            &ton_ucf_frontend::PackedSpectralRadianceBuilder::new().maximum_events(4).build().unwrap(),
+        );
+        assert_eq!(output.shading_program_hashes[4], expected_spectral_radiance_hash);
         assert_eq!(output.hdr.len(), 144);
         let mut luminous = 0;
         for ((hdr, pixel), trace) in output.hdr.iter().zip(&output.framebuffer.pixels).zip(&output.trace.records) {
@@ -434,6 +629,16 @@ mod tests {
             assert!((actual[1] as f64 - expected.transmittance).abs() < 2.0e-5);
             assert_eq!(actual[2], expected.event_count as f32);
         }
+    }
+
+    #[test]
+    fn spectral_binding_hash_mismatch_is_rejected_before_dispatch() {
+        let mut backend = VulkanBackend::new().unwrap();
+        let mut binding = KernelBinding::from_program("post_bloom_extract",
+            ton_ucf_frontend::HdrBrightExtractBuilder::new().build().unwrap());
+        binding.program_hash ^= 1;
+        let error = execute_bound_stage(&mut backend, &binding, &[1.0, 2.0, 3.0], 3, 3, 149, &[0.08], None).unwrap_err();
+        assert!(error.to_string().contains("validate spectral binding"));
     }
 
     #[test]
@@ -507,5 +712,44 @@ mod tests {
             assert!((*actual as f64 - expected.as_f64().unwrap()).abs() < 1.0e-5 * expected.as_f64().unwrap().abs().max(1.0));
         }
         eprintln!("native visible spectrum maximum relative error to independent 1nm SI integral={maximum_relative}");
+    }
+
+    #[test]
+    fn spectral_gpu_validation_report_covers_complete_product_chain() {
+        let camera = Camera::cinematic(ton_types::BlackHole::schwarzschild(1.0));
+        let output = SchwarzschildSpectralGpuBuilder::new(1.0)
+            .exposure(3.0e-9).maximum_steps(32768).execute(camera, 8, 4).unwrap();
+        let report = output.validation_report();
+        assert_eq!(report.instances, 32);
+        assert_eq!(report.captured + report.escaped, report.instances);
+        assert_eq!(report.budget_exhausted, 0);
+        assert_eq!(report.integration_failures, 0);
+        assert_eq!(report.event_localization_failures, 0);
+        assert_eq!(report.invalid_inputs, 0);
+        assert_eq!(report.overflow_instances, 0);
+        assert!(report.event_count > 0);
+        assert_eq!(report.radiative_instances, report.instances);
+        assert_eq!(report.radiative_failures, 0);
+        assert_eq!(report.non_finite_hdr, 0);
+        assert!(report.maximum_null_residual.is_finite());
+        assert!(report.maximum_energy_drift.is_finite());
+        assert!(report.maximum_angular_squared_drift.is_finite());
+        assert!(!report.trace_program_hashes.is_empty());
+        assert!(!report.shading_program_hashes.is_empty());
+    }
+
+    #[test]
+    fn spectral_failure_diagnostic_exposes_integration_and_event_localization_categories() {
+        let event_trace = crate::F64GpuEventTraceBatch {
+            records: vec![[0.0; 29]; 2],
+            events: vec![[0.0; 38]; 2],
+            terminations: vec![GpuTraceTermination::IntegrationFailure, GpuTraceTermination::EventLocalizationFailure],
+            executed_program_hashes: vec![11, 13],
+        };
+        let error = TonError::Domain("packet cannot enter radiative stage".into());
+        let diagnostic = event_trace_failure_diagnostic(&event_trace, &error);
+        assert!(diagnostic.contains("integration_failures=1"));
+        assert!(diagnostic.contains("event_localization_failures=1"));
+        assert!(diagnostic.contains("trace_program_hashes=[11, 13]"));
     }
 }

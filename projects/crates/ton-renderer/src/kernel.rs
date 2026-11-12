@@ -2,13 +2,13 @@
 
 use ton_types::{DiskModelKind, IntegratorKind};
 use ton_ucf_frontend::{
-    Program, camera_ray_batch, disk_shade_novikov, disk_shade_novikov_batch, disk_shade_novikov_from_geodesic_batch, equatorial_orbit_rk4_step, geodesic_capture_classify,
-    geodesic_radial_infall_steps, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk, schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_initial_state_batch,
-    tone_map_aces, vector_math_normalize,
+    Program, camera_ray_batch, compose_sky_batch, disk_shade_novikov, disk_shade_novikov_batch, disk_shade_novikov_from_geodesic_batch, equatorial_orbit_rk4_step,
+    geodesic_capture_classify, geodesic_radial_infall_steps, post_bloom_extract, program_hash, schwarzschild_geodesic_rk4_chunk,
+    schwarzschild_geodesic_rk4_chunk_with_disk, schwarzschild_initial_state_batch, tone_map_aces, tone_map_aces_batch, vector_math_normalize,
 };
 use ucf_types::ParamValue;
 
-use ucf_ir::Graph;
+use ucf_ir::{Graph, TaskKind};
 
 /// 单个 UCF Program 绑定摘要（可序列化进任务 `params`）。
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +132,21 @@ pub fn tone_map_kernel() -> KernelBinding {
     KernelBinding::from_program("tone_map_aces", p)
 }
 
+/// Beauty 后处理的测地线盘面着色绑定。
+pub fn beauty_disk_shade_kernel() -> KernelBinding {
+    KernelBinding::from_program("disk_shade_novikov_from_geodesic_batch", disk_shade_novikov_from_geodesic_batch())
+}
+
+/// Beauty 后处理的天空合成绑定。
+pub fn beauty_sky_composite_kernel() -> KernelBinding {
+    KernelBinding::from_program("compose_sky_batch", compose_sky_batch())
+}
+
+/// Beauty 后处理的色调映射绑定。
+pub fn beauty_tone_map_kernel() -> KernelBinding {
+    KernelBinding::from_program("tone_map_aces_batch", tone_map_aces_batch())
+}
+
 /// 泛光亮部提取任务程序绑定（多尺度模糊仍由宿主完成）。
 pub fn bloom_kernel() -> KernelBinding {
     let p = post_bloom_extract();
@@ -142,9 +157,57 @@ pub fn bloom_kernel() -> KernelBinding {
 pub fn attach_binding(graph: &mut Graph, task_id: u64, binding: &KernelBinding) {
     if let Some(node) = graph.tasks.nodes.iter_mut().find(|n| n.id.0 == task_id) {
         node.params.insert("program_hash".into(), ParamValue::I64(binding.program_hash as i64));
+        node.params.insert("program_hash_hex".into(), ParamValue::Str(format!("{:016x}", binding.program_hash)));
         let body = serde_json::to_string(&binding.program).expect("UCF program serializes");
         node.params.insert("program".into(), ParamValue::Program { version: binding.program.version, hash: binding.program_hash, body });
         node.params.insert("program_name".into(), ParamValue::Str(binding.program_name.clone()));
+    }
+}
+
+/// 校验图中已声明 UCF 程序的结构化绑定和程序指纹。
+pub fn validate_program_bindings(graph: &Graph) -> Result<(), String> {
+    for node in &graph.tasks.nodes {
+        let Some(ParamValue::Program { hash, body, .. }) = node.params.get("program") else {
+            continue;
+        };
+        let program: Program = serde_json::from_str(body)
+            .map_err(|error| format!("task {} contains invalid UCF program: {error}", node.id.0))?;
+        let computed = program_hash(&program);
+        if *hash != computed {
+            return Err(format!("task {} program hash does not match serialized program", node.id.0));
+        }
+        let Some(ParamValue::Str(hash_hex)) = node.params.get("program_hash_hex") else {
+            return Err(format!("task {} is missing program_hash_hex", node.id.0));
+        };
+        if hash_hex != &format!("{computed:016x}") {
+            return Err(format!("task {} program_hash_hex does not match serialized program", node.id.0));
+        }
+        if let Some(ParamValue::I64(hash_value)) = node.params.get("program_hash") {
+            if *hash_value != computed as i64 {
+                return Err(format!("task {} program_hash does not match serialized program", node.id.0));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use crate::build_frame_graph;
+
+    #[test]
+    fn frame_graph_program_bindings_have_matching_hashes() {
+        let graph = build_frame_graph(IntegratorKind::Geodesic3d, DiskModelKind::NovikovThorneThin);
+        validate_program_bindings(&graph).expect("frame graph bindings must validate");
+    }
+
+    #[test]
+    fn frame_graph_rejects_tampered_program_hash() {
+        let mut graph = build_frame_graph(IntegratorKind::Geodesic3d, DiskModelKind::NovikovThorneThin);
+        let node = graph.tasks.nodes.iter_mut().find(|node| node.id.0 == 13).expect("trace task");
+        node.params.insert("program_hash_hex".into(), ParamValue::Str("0000000000000000".into()));
+        assert!(validate_program_bindings(&graph).is_err());
     }
 }
 

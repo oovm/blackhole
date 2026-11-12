@@ -6,7 +6,7 @@ mod adaptive_gpu;
 mod f64_gpu;
 pub use f64_gpu::{F64GpuEventTraceBatch, F64GpuTraceBatch, F64TraceTiming, SchwarzschildF64GpuTraceBuilder};
 mod spectral_gpu;
-pub use spectral_gpu::{SchwarzschildSpectralGpuBuilder, SpectralGpuFrame, DEFAULT_SPECTRAL_EXPOSURE};
+pub use spectral_gpu::{SchwarzschildSpectralGpuBuilder, SpectralGpuFrame, SpectralGpuValidationReport, DEFAULT_SPECTRAL_EXPOSURE};
 mod params;
 mod scene;
 mod ucf_cpu;

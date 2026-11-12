@@ -42,7 +42,8 @@ impl Camera {
         inclination_rad: f64,
         azimuth_rad: f64,
     ) -> Self {
-        let dist = 10.0 * bh.mass;
+        // 观察者必须位于盘外，否则薄盘会从镜头近场横穿画面而不是形成环状结构。
+        let dist = 24.0 * bh.mass;
         let (t1, t2, n) = disk.tangent_basis();
         let sin_i = inclination_rad.sin();
         let cos_i = inclination_rad.cos();
@@ -50,12 +51,12 @@ impl Camera {
             .scale(dist * cos_i)
             .add(t1.scale(dist * sin_i * azimuth_rad.cos()))
             .add(t2.scale(dist * sin_i * azimuth_rad.sin()));
-        Self::look_at(position, Vec3::ZERO, t1, 0.85)
+        Self::look_at(position, Vec3::ZERO, t1, 0.58)
     }
 
-    /// 电影构图预设：赤道 XY 盘面、相对法线倾角约 70°（近边视，可看到透镜抬升）。
+    /// 电影构图预设：赤道 XY 盘面、相对法线倾角约 58°。
     pub fn cinematic(bh: BlackHole) -> Self {
-        let inclination = 70.0 * std::f64::consts::PI / 180.0;
+        let inclination = 58.0 * std::f64::consts::PI / 180.0;
         Self::cinematic_over_disk(bh, DiskFrame::equatorial_xy(), inclination, 0.35)
     }
 }
@@ -81,7 +82,7 @@ mod tests {
         let cam = Camera::cinematic(bh);
         let pos = cam.position.normalize();
         let angle_from_normal = n.dot(pos).acos();
-        let expected = 70.0 * std::f64::consts::PI / 180.0;
+        let expected = 58.0 * std::f64::consts::PI / 180.0;
         assert!((angle_from_normal - expected).abs() < 0.02);
     }
 }

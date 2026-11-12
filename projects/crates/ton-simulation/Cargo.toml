@@ -9,8 +9,16 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde_json = "1"
 ton-renderer = { workspace = true }
 ton-types = { workspace = true }
 ton-disk = { workspace = true }
 ton-geodesic = { workspace = true }
+ton-metric = { workspace = true }
+ton-ucf-frontend = { workspace = true }
+ucf-backend-cpu = { path = "../../../../ucf.rs/projects/crates/ucf-backends/ucf-backend-cpu" }
+ucf-program = { path = "../../../../ucf.rs/projects/crates/ucf-program" }
+ucf-backend-vulkan = { path = "../../../../ucf.rs/projects/crates/ucf-backends/ucf-backend-vulkan" }
+ucf-ir = { path = "../../../../ucf.rs/projects/crates/ucf-ir" }
+ucf-scheduler = { path = "../../../../ucf.rs/projects/crates/ucf-scheduler" }
 ucf-types = { path = "../../../../ucf.rs/projects/crates/ucf-types" }

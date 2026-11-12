@@ -304,6 +304,10 @@ mod tests {
             node.params.get("program_hash"),
             Some(ParamValue::I64(h)) if *h == expected.program_hash as i64
         ));
+        assert_eq!(
+            node.params.get("program_hash_hex"),
+            Some(&ParamValue::Str(format!("{:016x}", expected.program_hash)))
+        );
     }
 
     #[test]

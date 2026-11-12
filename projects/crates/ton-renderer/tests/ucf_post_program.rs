@@ -2,7 +2,7 @@
 
 use ton_renderer::{aces_filmic, tone_map_rgb};
 use ton_types::Rgb;
-use ucf_program::{post_bloom_extract, tone_map_aces, CpuInterpreter, Value};
+use ton_ucf_frontend::{post_bloom_extract, tone_map_aces, CpuInterpreter, Value};
 
 fn run_tone_map(cpu: &mut CpuInterpreter, color: Rgb) -> [f64; 3] {
     cpu.with_uniform(0, Value::Vec3([color.r, color.g, color.b]));

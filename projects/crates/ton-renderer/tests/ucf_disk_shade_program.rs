@@ -2,7 +2,7 @@
 
 use ton_disk::{sample_disk_radiance, AccretionDisk, DiskConfig};
 use ton_types::BlackHole;
-use ucf_program::{disk_shade_novikov, CpuInterpreter, Value};
+use ton_ucf_frontend::{disk_shade_novikov, CpuInterpreter, Value};
 
 fn run_disk_shade(
     cpu: &mut CpuInterpreter,

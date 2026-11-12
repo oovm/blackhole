@@ -90,6 +90,7 @@ impl SceneBuilder {
 
     pub fn with_disk_model(mut self, disk_model: DiskModelKind) -> Self {
         self.disk_model = disk_model;
+        self.disk = None;
         self
     }
 
@@ -347,5 +348,17 @@ mod tests {
         assert_eq!(frame.encoding, ton_renderer::FramebufferEncoding::Display);
         assert_eq!(frame.pixels.len(), 32);
         assert!(frame.pixels.iter().all(|pixel| pixel.r.is_finite() && pixel.g.is_finite() && pixel.b.is_finite()));
+    }
+
+    #[test]
+    fn switching_disk_model_rebuilds_the_model_default() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_default_disk()
+            .with_disk_model(DiskModelKind::SolidUniform)
+            .build();
+        let disk = scene.disk.expect("model switch keeps a disk");
+        assert_eq!(scene.disk_model, DiskModelKind::SolidUniform);
+        assert_eq!(disk.config.inner_radius, 3.0);
+        assert_eq!(disk.config.outer_radius, 40.0);
     }
 }

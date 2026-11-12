@@ -55,9 +55,10 @@ fn ucf_cpu_path_runs_full_chain() {
         .with_post_bloom(true)
         .with_resolution(32, 24)
         .build();
-    let (frame, report) = scene.render_frame_ucf_cpu().expect("ucf cpu");
-    assert_eq!(report.executed_ops.len(), 7);
-    assert!(frame.to_rgba8().iter().any(|&b| b > 0));
+    let error = scene
+        .render_frame_ucf_cpu()
+        .expect_err("label-only graph must not claim UCF execution");
+    assert!(error.to_string().contains("real UCF programs"));
 }
 
 #[test]
@@ -73,7 +74,7 @@ fn solid_uniform_disk_renders_opaque_band() {
         .framebuffer
         .pixels
         .iter()
-        .filter(|p| p.r > 1.5 && p.g > 0.8 && p.b < 1.2)
+        .filter(|p| p.r > 0.8 && p.g > 0.5 && p.b < 0.5)
         .count();
     let rgba = output.framebuffer.to_rgba8();
     let warm = count_pixels(&rgba, |r, g, b| r > g && g > b && r > 80);

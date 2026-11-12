@@ -11,11 +11,12 @@ keywords = ["blackhole", "ucf", "ton", "renderer"]
 categories = ["science", "simulation"]
 
 [dependencies]
+serde_json = "1"
 ton-types = { workspace = true }
 ton-geodesic = { workspace = true }
 ton-disk = { workspace = true }
 ucf-ir = { path = "../../../../ucf.rs/projects/crates/ucf-ir" }
-ucf-program = { path = "../../../../ucf.rs/projects/crates/ucf-program" }
+ton-ucf-frontend = { workspace = true }
 ucf-types = { path = "../../../../ucf.rs/projects/crates/ucf-types" }
 
 [dev-dependencies]

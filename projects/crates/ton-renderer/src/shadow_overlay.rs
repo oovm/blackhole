@@ -13,8 +13,8 @@ pub fn on_axis_shadow_radius_ndc(bh: BlackHole, observer_distance: f64, fov_y: f
 
 /// 与 `Camera::ray_direction` 一致的像素射线方向。
 pub fn pixel_ray_dir(x: u32, y: u32, w: u32, h: u32, cam: Camera) -> Vec3 {
-    let u = (x as f64 / w as f64) * 2.0 - 1.0;
-    let v = 1.0 - (y as f64 / h as f64) * 2.0;
+    let u = ((x as f64 + 0.5) / w as f64) * 2.0 - 1.0;
+    let v = 1.0 - ((y as f64 + 0.5) / h as f64) * 2.0;
     let aspect = w as f64 / h as f64;
     cam.ray_direction(u * aspect, v)
 }
@@ -52,8 +52,8 @@ pub fn schwarzschild_boundary_radius_ndc(
                 captured[idx + w],
             ];
             if neighbors.iter().any(|c| !*c) {
-                let u = (x as f64 / width as f64 * 2.0 - 1.0) * aspect;
-                let v = 1.0 - y as f64 / height as f64 * 2.0;
+                let u = ((x as f64 + 0.5) / width as f64 * 2.0 - 1.0) * aspect;
+                let v = 1.0 - (y as f64 + 0.5) / height as f64 * 2.0;
                 boundary_r_sum += (u * u + v * v).sqrt();
                 boundary_n += 1;
             }
@@ -151,12 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn cinematic_boundary_radius_differs_from_on_axis_disk() {
+    fn cinematic_boundary_radius_matches_on_axis_schwarzschild() {
         let bh = BlackHole::schwarzschild(1.0);
         let cam = Camera::cinematic(bh);
         let schwarzschild = schwarzschild_boundary_radius_ndc(bh, cam, 128, 72);
         let on_axis = on_axis_shadow_radius_ndc(bh, cam.position.length(), cam.fov_y);
         assert!(schwarzschild > 0.4 && schwarzschild < 1.6);
-        assert!((schwarzschild - on_axis).abs() > 0.05);
+        assert!((schwarzschild - on_axis).abs() < 0.05);
     }
 }

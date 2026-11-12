@@ -1,19 +1,16 @@
 //! UCF Program IR 驱动的相机射线生成：`generate_camera_ray`。
 
 use ton_types::{Camera, Vec3};
-use ucf_program::{generate_camera_ray, CpuInterpreter, Value};
+use ton_ucf_frontend::{generate_camera_ray, CpuInterpreter, Value};
 
 fn run_camera_ray(cpu: &mut CpuInterpreter, cam: Camera, u: f64, v: f64) -> Vec3 {
     let scale = (cam.fov_y * 0.5).tan();
     cpu.with_uniform(0, Value::F64(u));
     cpu.with_uniform(1, Value::F64(v));
-    cpu.with_uniform(2, Value::F64(scale));
-    cpu.with_uniform(
-        3,
-        Value::Vec3([cam.forward.x, cam.forward.y, cam.forward.z]),
-    );
-    cpu.with_uniform(4, Value::Vec3([cam.right.x, cam.right.y, cam.right.z]));
-    cpu.with_uniform(5, Value::Vec3([cam.up.x, cam.up.y, cam.up.z]));
+    cpu.with_uniform(2, Value::Vec3([cam.forward.x, cam.forward.y, cam.forward.z]));
+    cpu.with_uniform(3, Value::Vec3([cam.right.x, cam.right.y, cam.right.z]));
+    cpu.with_uniform(4, Value::Vec3([cam.up.x, cam.up.y, cam.up.z]));
+    cpu.with_uniform(5, Value::F64(scale));
     let d = cpu
         .run(&generate_camera_ray())
         .expect("generate_camera_ray")

@@ -12,7 +12,7 @@ impl DiskConfig {
         let m = bh.mass;
         Self {
             inner_radius: 6.0 * m,
-            outer_radius: 30.0 * m,
+            outer_radius: 12.0 * m,
             accretion_rate: 1.0,
         }
     }
@@ -46,6 +46,6 @@ impl AccretionDisk {
         }
         let m = self.bh.mass;
         let norm = cfg.accretion_rate / (m * m);
-        norm * (cfg.inner_radius / r).powf(0.75) * 5000.0
+        norm * (cfg.inner_radius / r).powf(0.75) * 2800.0
     }
 }

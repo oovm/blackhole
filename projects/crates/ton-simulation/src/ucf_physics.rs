@@ -32,7 +32,9 @@ pub(crate) fn dispatch_task(
     uniforms: BTreeMap<String, ParamValue>,
 ) -> TonResult<TaskNode> {
     let mut params = uniforms;
+    let hash = ton_ucf_frontend::program_hash(program);
     params.insert("program".into(), program_param(program)?);
+    params.insert("program_hash_hex".into(), ParamValue::Str(format!("{hash:016x}")));
     params.insert("output".into(), ParamValue::I64(output.0 as i64));
     params
         .entry(format!("buffer_{output_slot}"))
@@ -1096,8 +1098,9 @@ pub fn schwarzschild_beauty_ucf_vulkan(
 }
 
 fn beauty_post_graph(count: u32, inner_radius: f64, outer_radius: f64, mass: f64, accretion_rate: f64) -> TonResult<Graph> {
+    let emission_binding = ton_renderer::beauty_disk_shade_kernel();
     let emission = dispatch_task(
-        35, &disk_shade_novikov_from_geodesic_batch(), count, ResourceId(19), 2, 1, Some(ResourceId(18)),
+        35, &emission_binding.program, count, ResourceId(19), 2, 1, Some(ResourceId(18)),
         BTreeMap::from([
             ("uniform_0".into(), ParamValue::F64(inner_radius)),
             ("uniform_1".into(), ParamValue::F64(outer_radius)),
@@ -1105,15 +1108,17 @@ fn beauty_post_graph(count: u32, inner_radius: f64, outer_radius: f64, mass: f64
             ("uniform_3".into(), ParamValue::F64(accretion_rate)),
         ]),
     )?;
+    let composite_binding = ton_renderer::beauty_sky_composite_kernel();
     let composite = dispatch_task(
-        37, &compose_sky_batch(), count, ResourceId(25), 4, 1, Some(ResourceId(22)),
+        37, &composite_binding.program, count, ResourceId(25), 4, 1, Some(ResourceId(22)),
         BTreeMap::from([
             ("buffer_2".into(), ParamValue::I64(18)),
             ("buffer_3".into(), ParamValue::I64(19)),
         ]),
     )?;
-    let tone_map = dispatch_task(36, &tone_map_aces_batch(), count, ResourceId(20), 2, 1, Some(ResourceId(25)), BTreeMap::new())?;
-    let graph = Graph {
+    let tone_map_binding = ton_renderer::beauty_tone_map_kernel();
+    let tone_map = dispatch_task(36, &tone_map_binding.program, count, ResourceId(20), 2, 1, Some(ResourceId(25)), BTreeMap::new())?;
+    let mut graph = Graph {
         resources: ResourceGraph {
             nodes: [(18, 14, Access::Read), (22, 3, Access::Read), (19, 3, Access::ReadWrite), (25, 3, Access::ReadWrite), (20, 3, Access::Write)]
                 .into_iter()
@@ -1125,7 +1130,12 @@ fn beauty_post_graph(count: u32, inner_radius: f64, outer_radius: f64, mass: f64
         },
         tasks: TaskGraph { nodes: vec![emission, composite, tone_map], edges: ucf_ir::chain_edges(&[35, 37, 36]) },
     };
+    ton_renderer::attach_binding(&mut graph, 35, &emission_binding);
+    ton_renderer::attach_binding(&mut graph, 37, &composite_binding);
+    ton_renderer::attach_binding(&mut graph, 36, &tone_map_binding);
     graph.validate().map_err(|e| TonError::Domain(format!("Vulkan Beauty post graph: {e}")))?;
+    ton_renderer::validate_program_bindings(&graph)
+        .map_err(|error| TonError::Domain(format!("Vulkan Beauty program binding contract: {error}")))?;
     Ok(graph)
 }
 
@@ -2041,7 +2051,11 @@ mod tests {
         assert_eq!(gpu.len(), states.len());
         for (state, (actual, status)) in states.iter().zip(gpu) {
             let (expected, expected_status) = schwarzschild_geodesic_integrate_ucf_cpu(1.0, *state, 0.01, 100.0, 4).unwrap();
-            assert!((actual.r - expected.r).abs() < 2.0e-3);
+            let actual_values = [actual.t, actual.r, actual.theta, actual.phi, actual.ut, actual.ur, actual.utheta, actual.uphi];
+            let expected_values = [expected.t, expected.r, expected.theta, expected.phi, expected.ut, expected.ur, expected.utheta, expected.uphi];
+            for (actual, expected) in actual_values.into_iter().zip(expected_values) {
+                assert!((actual - expected).abs() < 2.0e-3, "actual={actual}, expected={expected}");
+            }
             assert_eq!(status, expected_status);
         }
     }
@@ -2055,6 +2069,54 @@ mod tests {
         let output = schwarzschild_geodesic_integrate_ucf_cpu_rays(1.0, &rays, 0.01, 100.0, 4).unwrap();
         assert_eq!(output.len(), rays.len());
         assert!(output.iter().all(|(state, status)| state.r.is_finite() && *status == 3));
+    }
+
+    #[test]
+    fn orbit_loop_and_ray_batch_programs_match_cpu_and_vulkan() {
+        fn vulkan_values(
+            backend: &mut VulkanBackend,
+            program: &ucf_program::Program,
+            count: u32,
+            task_id: u64,
+            resource_id: u64,
+            uniforms: BTreeMap<String, ParamValue>,
+        ) -> TonResult<Vec<f64>> {
+            let task = dispatch_task(task_id, program, count, ResourceId(resource_id), 0, 0, None, uniforms)?;
+            let graph = Graph {
+                resources: ResourceGraph {
+                    nodes: vec![ResourceNode {
+                        id: ResourceId(resource_id),
+                        kind: ResourceKind::Buffer,
+                        domain: Domain::Vram,
+                        access: Access::Write,
+                        byte_size: Some(u64::from(count) * 8),
+                    }],
+                },
+                tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+            };
+            graph.validate().map_err(|error| TonError::Domain(format!("validate loop parity graph: {error}")))?;
+            backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare loop parity graph: {error}")))?;
+            backend.run_prepared(&graph).map_err(|error| TonError::Domain(format!("execute loop parity graph: {error}")))?;
+            backend.read_f64(ResourceId(resource_id)).map_err(|error| TonError::Domain(format!("read loop parity output: {error}")))
+        }
+
+        let orbit_program = ton_ucf_frontend::orbit_loop_accumulate();
+        let orbit_cpu = CpuBackend::new().execute_program(&orbit_program, 1, [(0, Value::F64(0.25))]).unwrap();
+        let ray_program = ton_ucf_frontend::ray_batch_steps();
+        let ray_cpu = CpuBackend::new().execute_program(&ray_program, 32, []).unwrap();
+        let mut backend = match VulkanBackend::new() {
+            Ok(backend) => backend,
+            Err(error) if error.to_string().contains("create Vulkan backend") => return,
+            Err(error) => panic!("create Vulkan loop parity backend: {error}"),
+        };
+        let orbit_gpu = vulkan_values(&mut backend, &orbit_program, 1, 190, 30, BTreeMap::from([("uniform_0".into(), ParamValue::F64(0.25))])).unwrap();
+        let ray_gpu = vulkan_values(&mut backend, &ray_program, 32, 191, 31, BTreeMap::new()).unwrap();
+        assert_eq!(orbit_gpu.len(), 1);
+        assert!((orbit_gpu[0] - orbit_cpu.instances[0].value.as_f64().unwrap()).abs() < 1.0e-12);
+        assert_eq!(ray_gpu.len(), 32);
+        for (actual, expected) in ray_gpu.into_iter().zip(ray_cpu.instances) {
+            assert!((actual - expected.value.as_f64().unwrap()).abs() < 1.0e-12, "actual={actual}, expected={expected:?}");
+        }
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub struct DiskSample {
 pub fn sample_disk_radiance(disk: AccretionDisk, radius: f64, doppler: f64) -> DiskSample {
     let temperature = disk.effective_temperature(radius);
     let base = temperature_to_rgb(temperature);
-    let brightness = doppler.clamp(0.0, 8.0).powi(3);
+    let brightness = doppler.clamp(0.0, 3.0).powi(3) * 0.5;
     let peak = base.r.max(base.g).max(base.b) * brightness;
     DiskSample {
         emissive_radiance: base.scale(brightness),

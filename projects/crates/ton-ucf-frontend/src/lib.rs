@@ -35,6 +35,8 @@ mod radiative_transfer;
 pub use radiative_transfer::{PackedRadiativeTransferBuilder, RadiativeTransferBuilder};
 mod radiance_composite;
 pub use radiance_composite::RadianceCompositeBuilder;
+mod packed_spectral_radiance;
+pub use packed_spectral_radiance::PackedSpectralRadianceBuilder;
 mod bloom_extract;
 pub use bloom_extract::HdrBrightExtractBuilder;
 mod box_blur;
@@ -364,16 +366,10 @@ pub fn schwarzschild_initial_state_batch() -> Program {
     body.push(Stmt::Let { id: 7, ty: Ty::f32(), init: unary(UnOp::Sqrt, local(6)) });
     body.push(Stmt::Let { id: 8, ty: Ty::f32(), init: bin(BinOp::Add, square(x.clone()), square(y.clone())) });
     body.push(Stmt::Let { id: 9, ty: Ty::f32(), init: unary(UnOp::Sqrt, local(8)) });
-    let eps = f32(1.0e-6); let neg_eps = unary(UnOp::Neg, eps.clone());
-    let theta_pos = unary(UnOp::Atan, bin(BinOp::Div, local(9), bin(BinOp::Max, z.clone(), eps.clone())));
-    let theta_neg = bin(BinOp::Add, unary(UnOp::Atan, bin(BinOp::Div, local(9), bin(BinOp::Min, z.clone(), neg_eps.clone()))), f32(std::f32::consts::PI));
-    let theta = select(bin(BinOp::Gt, z.clone(), eps.clone()), theta_pos, select(bin(BinOp::Lt, z.clone(), neg_eps.clone()), theta_neg, f32(std::f32::consts::FRAC_PI_2)));
+    let eps = f32(1.0e-6);
+    let theta = bin(BinOp::Atan2, local(9), z.clone());
     body.push(Stmt::Let { id: 10, ty: Ty::f32(), init: theta });
-    let phi_pos = unary(UnOp::Atan, bin(BinOp::Div, y.clone(), bin(BinOp::Max, x.clone(), eps.clone())));
-    let phi_neg_base = unary(UnOp::Atan, bin(BinOp::Div, y.clone(), bin(BinOp::Min, x.clone(), neg_eps.clone())));
-    let phi_neg = select(bin(BinOp::Ge, y.clone(), f32(0.0)), bin(BinOp::Add, phi_neg_base.clone(), f32(std::f32::consts::PI)), bin(BinOp::Sub, phi_neg_base, f32(std::f32::consts::PI)));
-    let phi_axis = f32(0.0);
-    body.push(Stmt::Let { id: 11, ty: Ty::f32(), init: select(bin(BinOp::Gt, x.clone(), eps.clone()), phi_pos, select(bin(BinOp::Lt, x.clone(), neg_eps), phi_neg, phi_axis)) });
+    body.push(Stmt::Let { id: 11, ty: Ty::f32(), init: bin(BinOp::Atan2, y.clone(), x.clone()) });
     let direction_length = unary(UnOp::Sqrt, bin(BinOp::Add, bin(BinOp::Add, square(local(3)), square(local(4))), square(local(5))));
     body.push(Stmt::Let { id: 12, ty: Ty::f32(), init: bin(BinOp::Div, local(3), direction_length.clone()) });
     body.push(Stmt::Let { id: 13, ty: Ty::f32(), init: bin(BinOp::Div, local(4), direction_length.clone()) });
@@ -1220,12 +1216,53 @@ fn disk_shade_novikov_from_state_batch_with_name(
 
 /// 构建并行步数验证程序。
 pub fn ray_batch_steps() -> Program {
-    f("ray_batch_steps", vec![Stmt::Let { id: 0, ty: Ty::f64(), init: c(0.0) }, Stmt::Let { id: 1, ty: Ty::f64(), init: bin(BinOp::Add, bin(BinOp::Mod, Expr::GlobalId, c(16.0)), c(1.0)) }, Stmt::For { iter: 2, limit: 32, body: vec![Stmt::If { cond: bin(BinOp::Lt, Expr::LoadLocal(2), Expr::LoadLocal(1)), then_body: vec![Stmt::StoreLocal { id: 0, value: bin(BinOp::Add, Expr::LoadLocal(0), c(1.0)) }], else_body: Vec::new() }] }, Stmt::Return(Expr::LoadLocal(0))], vec![(0, Ty::f64()), (1, Ty::f64())], Ty::f64())
+    f(
+        "ray_batch_steps",
+        vec![
+            Stmt::Let { id: 0, ty: Ty::f64(), init: c(0.0) },
+            Stmt::Let {
+                id: 1,
+                ty: Ty::Scalar(ScalarTy::U32),
+                init: bin(BinOp::Add, bin(BinOp::Mod, Expr::GlobalId, Expr::ConstU32(16)), Expr::ConstU32(1)),
+            },
+            Stmt::For {
+                iter: 2,
+                limit: 32,
+                body: vec![Stmt::StoreLocal {
+                    id: 0,
+                    value: select(
+                        bin(BinOp::Lt, Expr::LoadLocal(2), Expr::LoadLocal(1)),
+                        bin(BinOp::Add, Expr::LoadLocal(0), c(1.0)),
+                        Expr::LoadLocal(0),
+                    ),
+                }],
+            },
+            Stmt::Return(Expr::LoadLocal(0)),
+        ],
+        vec![(0, Ty::f64()), (1, Ty::Scalar(ScalarTy::U32))],
+        Ty::f64(),
+    )
 }
 
 /// 构建通用有界累加程序。
 pub fn orbit_loop_accumulate() -> Program {
-    f("orbit_loop_accumulate", vec![Stmt::Let { id: 0, ty: Ty::f64(), init: c(0.0) }, Stmt::For { iter: 1, limit: 64, body: vec![Stmt::StoreLocal { id: 0, value: bin(BinOp::Add, Expr::LoadLocal(0), Expr::LoadLocal(1)) }] }, Stmt::Return(Expr::LoadLocal(0))], vec![(0, Ty::f64())], Ty::f64())
+    f(
+        "orbit_loop_accumulate",
+        vec![
+            Stmt::Let { id: 0, ty: Ty::f64(), init: c(0.0) },
+            Stmt::For {
+                iter: 1,
+                limit: 64,
+                body: vec![Stmt::StoreLocal {
+                    id: 0,
+                    value: bin(BinOp::Add, Expr::LoadLocal(0), Expr::LoadUniform(0)),
+                }],
+            },
+            Stmt::Return(Expr::LoadLocal(0)),
+        ],
+        vec![(0, Ty::f64())],
+        Ty::f64(),
+    )
 }
 
 #[cfg(test)]
@@ -1233,11 +1270,44 @@ mod integration_tests {
     use super::*;
 
     #[test]
+    fn orbit_loop_and_ray_batch_have_independent_cpu_goldens() {
+        let mut orbit = CpuInterpreter::new();
+        orbit.with_uniform(0, Value::F64(0.25));
+        let orbit_result = orbit.run_parallel(&orbit_loop_accumulate(), 1).unwrap();
+        assert_eq!(orbit_result[0].value, Value::F64(16.0));
+
+        let ray_result = CpuInterpreter::new().run_parallel(&ray_batch_steps(), 32).unwrap();
+        assert_eq!(ray_result.len(), 32);
+        for (instance, result) in ray_result.into_iter().enumerate() {
+            assert_eq!(result.value, Value::F64((instance % 16 + 1) as f64));
+        }
+    }
+
+    #[test]
     fn schwarzschild_initial_state_program_is_valid_and_stable() {
         let program = schwarzschild_initial_state_batch();
         validate_program(&program).expect("initial state program must satisfy UCF validation");
         assert_eq!(program.functions[0].name, "schwarzschild_initial_state_batch");
         assert_ne!(program_hash(&program), 0);
+    }
+
+    #[test]
+    fn initial_state_uses_continuous_atan2_on_coordinate_axes() {
+        let input = [0.0, 20.0, 0.0, 0.0, 0.0, -1.0, 0.0, -20.0, 0.0, 0.0, 0.0, -1.0, -20.0, 0.0, 0.0, 0.0, 0.0, -1.0]
+            .into_iter()
+            .map(Value::F32)
+            .collect::<Vec<_>>();
+        let mut interpreter = CpuInterpreter::new();
+        interpreter.with_uniform(0, Value::F32(1.0));
+        interpreter.with_uniform(1, Value::F32(10.0));
+        interpreter.with_buffer(1, input);
+        interpreter.with_buffer(2, vec![Value::F32(0.0); 30]);
+        interpreter.run_parallel(&schwarzschild_initial_state_batch(), 3).unwrap();
+        let output = interpreter.buffer(2).unwrap();
+        let phi = [output[3].clone(), output[13].clone(), output[23].clone()];
+        assert!((phi[0].as_f64().unwrap() - std::f32::consts::FRAC_PI_2 as f64).abs() < 1.0e-5);
+        assert!((phi[1].as_f64().unwrap() + std::f32::consts::FRAC_PI_2 as f64).abs() < 1.0e-5);
+        assert!((phi[2].as_f64().unwrap() - std::f32::consts::PI as f64).abs() < 1.0e-5);
     }
 
     #[test]

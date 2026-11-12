@@ -82,6 +82,7 @@ impl GraybodyEmissionBuilder {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,4 +139,3 @@ mod tests {
         assert_eq!(output, &[Value::F32(0.0), Value::F32(1.0), Value::F32(1.0e-2)]);
     }
 }
-

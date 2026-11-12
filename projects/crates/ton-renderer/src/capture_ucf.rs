@@ -2,7 +2,7 @@
 
 use ton_geodesic::schwarzschild_geodesic_impact_parameter;
 use ton_types::{BlackHole, Vec3};
-use ucf_program::{geodesic_capture_classify, CpuInterpreter, Value};
+use ton_ucf_frontend::{geodesic_capture_classify, CpuInterpreter, Value};
 
 /// 用 UCF 程序按冲击参数判定是否捕获（与解析 `b < b_c` 一致）。
 pub fn analytic_captured_ucf(bh: BlackHole, origin: Vec3, direction: Vec3) -> bool {
@@ -25,7 +25,7 @@ pub fn analytic_captured_ucf(bh: BlackHole, origin: Vec3, direction: Vec3) -> bo
 /// 复用解释器的捕获分类器（帧级网格扫描）。
 pub struct CaptureClassifyUcf {
     cpu: CpuInterpreter,
-    program: ucf_program::Program,
+    program: ton_ucf_frontend::Program,
     bc: f64,
 }
 

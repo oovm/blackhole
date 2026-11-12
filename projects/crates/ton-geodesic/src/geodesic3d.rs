@@ -383,9 +383,10 @@ where
     let mut residual = null_residual(mass, &state);
     let bc = bh.critical_impact_parameter();
     // `b < b_c` 的束缚零测地线可能先向外到达 `escape_radius` 再折返落入视界，不得仅凭半径判逃逸。
-    let bound_infall = schwarzschild_geodesic_impact_parameter(mass, origin, direction)
-        .map(|b| b < bc)
-        .unwrap_or(false);
+    let bound_infall = state.u[1] < 0.0
+        && schwarzschild_geodesic_impact_parameter(mass, origin, direction)
+            .map(|b| b < bc)
+            .unwrap_or(false);
 
     for step in 0..config.max_steps {
         steps = step + 1;
@@ -664,6 +665,18 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(hit, RayHit::Captured { .. }));
+    }
+
+    #[test]
+    fn radial_outward_is_escaped() {
+        let bh = BlackHole::schwarzschild(1.0);
+        let diag = trace_geodesic_3d_diagnostic(
+            bh,
+            Vec3::new(0.0, 0.0, 20.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            TraceConfig::default(),
+        );
+        assert_eq!(diag.termination, RayTermination::Escaped);
     }
 
     #[test]

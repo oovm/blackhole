@@ -1,6 +1,7 @@
 //! 纯色盘透镜结构冒烟：上下半屏均应有盘像（前景 + 透镜抬升）。
 
 use ton_simulation::Scene;
+use ton_renderer::{FramebufferEncoding, RenderConfig, Renderer};
 use ton_types::{BlackHole, DiskModelKind, IntegratorKind};
 
 fn count_warm_in_band(rgba: &[u8], width: u32, y0: u32, y1: u32) -> usize {
@@ -77,7 +78,26 @@ fn solid_disk_linear_hdr_has_high_energy_pixels() {
         .with_disk_model(DiskModelKind::SolidUniform)
         .with_resolution(96, 54)
         .build();
-    let fb = scene.render_frame();
+    let config = RenderConfig {
+        width: scene.width,
+        height: scene.height,
+        black_hole: scene.black_hole,
+        camera: scene.camera,
+        disk: scene.disk,
+        trace: scene.trace,
+        integrator: scene.integrator,
+        disk_model: scene.disk_model,
+        ..RenderConfig::default()
+    };
+    let linear = Renderer::new(config.clone().exposure(1.0)).render();
+    let fb = Renderer::new(config.exposure(3.0)).render();
+    assert_eq!(linear.encoding, FramebufferEncoding::LinearHdr);
+    assert_eq!(fb.encoding, FramebufferEncoding::LinearHdr);
+    for (base, exposed) in linear.pixels.iter().zip(&fb.pixels) {
+        assert!((exposed.r - base.r * 3.0).abs() < 1e-10);
+        assert!((exposed.g - base.g * 3.0).abs() < 1e-10);
+        assert!((exposed.b - base.b * 3.0).abs() < 1e-10);
+    }
     let hot = fb
         .pixels
         .iter()

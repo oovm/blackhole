@@ -5,7 +5,7 @@ use ton_metric::{
     schwarzschild_geodesic_analytic_captured, schwarzschild_geodesic_impact_parameter,
 };
 use ton_types::{BlackHole, Vec3};
-use ucf_program::{geodesic_capture_classify, geodesic_radial_infall_steps, CpuInterpreter, Value};
+use ton_ucf_frontend::{geodesic_capture_classify, geodesic_radial_infall_steps, CpuInterpreter, Value};
 
 #[test]
 fn ucf_capture_classify_matches_schwarzschild_analytic() {

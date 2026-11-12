@@ -19,11 +19,36 @@ pub fn schwarzschild_geodesic_impact_parameter(
     }
     let sin_t = sph.theta.sin();
     let energy = f * u[0];
-    let angular = r * r * sin_t * sin_t * u[3];
+    let angular = r * r * (u[2] * u[2] + sin_t * sin_t * u[3] * u[3]).sqrt();
     if energy <= 0.0 || !energy.is_finite() {
         return None;
     }
     Some(angular.abs() / energy)
+}
+
+/// 以笛卡尔位置和单位方向直接计算同一个守恒冲击参数。
+///
+/// 该表达式只用于 TON 前端的数值对照，不能替代四速度参考实现。
+pub fn schwarzschild_cartesian_impact_parameter(
+    mass: f64,
+    position: Vec3,
+    direction: Vec3,
+) -> Option<f64> {
+    let r2 = position.dot(position);
+    let r = r2.sqrt();
+    if !r.is_finite() || r <= 2.0 * mass || mass <= 0.0 {
+        return None;
+    }
+    let dir = direction.normalize();
+    let f = 1.0 - 2.0 * mass / r;
+    let radial = position.dot(dir) / r;
+    let angular_vector = position.cross(dir);
+    let angular2 = angular_vector.dot(angular_vector);
+    let energy2 = radial * radial + f * angular2 / r2;
+    if !energy2.is_finite() || energy2 <= 0.0 {
+        return None;
+    }
+    Some(angular2.sqrt() / energy2.sqrt())
 }
 
 /// 史瓦西解析捕获：`b < b_c` 或起点在视界内。
@@ -169,5 +194,22 @@ mod tests {
             + r * r * u[2] * u[2]
             + r * r * u[3] * u[3];
         assert!(quad.abs() < 1.0e-9, "null constraint violated: {quad}");
+    }
+
+    #[test]
+    fn cartesian_impact_matches_four_velocity_reference() {
+        let samples = [
+            (Vec3::new(10.0, 0.0, 0.0), Vec3::new(-1.0, 0.15, 0.05)),
+            (Vec3::new(24.0, -3.0, 5.0), Vec3::new(-0.7, 0.4, -0.2)),
+            (Vec3::new(80.0, 12.0, -9.0), Vec3::new(-0.2, -0.8, 0.35)),
+        ];
+        for (position, direction) in samples {
+            let reference = schwarzschild_geodesic_impact_parameter(1.0, position, direction)
+                .expect("reference impact parameter");
+            let cartesian = schwarzschild_cartesian_impact_parameter(1.0, position, direction)
+                .expect("Cartesian impact parameter");
+            let error = (cartesian - reference).abs();
+            assert!(error < 1.0e-12, "reference={reference}, cartesian={cartesian}, error={error}");
+        }
     }
 }

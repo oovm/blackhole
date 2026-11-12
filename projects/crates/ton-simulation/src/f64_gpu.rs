@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+use ton_renderer::KernelBinding;
 use ton_types::{Camera, TonError, TonResult};
 use ucf_backend_vulkan::{ProgramCacheStats, VulkanBackend};
 use ucf_ir::{Graph, ResourceGraph, TaskGraph};
@@ -79,10 +80,17 @@ impl F64GpuEventTraceBatch {
             return Err(TonError::Domain("F64 event record and packet count mismatch".into()));
         }
         for (index, ((record, event), termination)) in self.records.iter().zip(&self.events).zip(&self.terminations).enumerate() {
+            let count = event[0];
+            let record_count = record[13];
+            let valid_count = count.is_finite() && count >= 0.0 && count <= 4.0 && count.fract() == 0.0;
+            let valid_record_count = record_count.is_finite() && record_count >= 0.0 && record_count <= 4.0 && record_count.fract() == 0.0;
+            let count_matches_record = valid_count && valid_record_count && count == record_count.min(4.0);
+            let tail_start = 2 + count as usize * 9;
+            let tail_is_zero = valid_count && event[tail_start..].iter().all(|value| *value == 0.0);
             if !matches!(termination, GpuTraceTermination::Captured | GpuTraceTermination::Escaped)
                 || record.iter().any(|value| !value.is_finite()) || event.iter().any(|value| !value.is_finite())
-                || event[0] < 0.0 || event[0] > 4.0 || event[0].fract() != 0.0 || event[1] != 0.0 {
-                return Err(TonError::Domain(format!("F64 event instance {index} cannot enter radiative stage: termination={termination:?}, count={}, overflow={}", event[0], event[1])));
+                || !valid_count || event[1] != 0.0 || !valid_record_count || !count_matches_record || !tail_is_zero {
+                return Err(TonError::Domain(format!("F64 event instance {index} cannot enter radiative stage: termination={termination:?}, count={count}, record_count={record_count}, overflow={}, tail_zero={tail_is_zero}", event[1])));
             }
         }
         Ok(())
@@ -321,21 +329,25 @@ impl SchwarzschildF64GpuTraceBuilder {
         while scheduled < self.maximum_steps && statuses.iter().any(|status| *status == 0.0) {
             let steps = self.chunk_steps.min(self.maximum_steps - scheduled);
             if steps != prepared_steps {
-                let program = ton_ucf_frontend::SchwarzschildCartesianF64EventTraceBuilder::<4>::new()
-                    .maximum_steps(steps).surface_tolerance(1.0e-11 * self.mass).build().map_err(TonError::Domain)?;
+                let binding = KernelBinding::from_program(
+                    "schwarzschild_cartesian_f64_event_trace",
+                    ton_ucf_frontend::SchwarzschildCartesianF64EventTraceBuilder::<4>::new()
+                        .maximum_steps(steps).surface_tolerance(1.0e-11 * self.mass).build().map_err(TonError::Domain)?,
+                );
                 let mut params = [self.mass, self.step, self.capture, self.escape, self.inner, self.outer]
                     .into_iter().enumerate().map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value))).collect::<BTreeMap<_, _>>();
                 params.insert("buffer_2".into(), ParamValue::I64(output_id.0 as i64));
                 params.insert("buffer_3".into(), ParamValue::I64(194));
-                let task = crate::ucf_physics::dispatch_task(178, &program, count, ResourceId(193), 2, 1, Some(input_id), params)?;
-                let graph = Graph { resources: ResourceGraph { nodes: [(191u64, 29u64, Access::ReadWrite), (192, 29, Access::ReadWrite),
+                let task = crate::ucf_physics::dispatch_task(178, &binding.program, count, ResourceId(193), 2, 1, Some(input_id), params)?;
+                let mut graph = Graph { resources: ResourceGraph { nodes: [(191u64, 29u64, Access::ReadWrite), (192, 29, Access::ReadWrite),
                     (193, 1, Access::Write), (194, 38, Access::ReadWrite)].into_iter().map(|(id, stride, access)| ResourceNode {
                         id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access,
                         byte_size: Some(u64::from(count) * u64::from(stride) * 8),
                     }).collect() }, tasks: TaskGraph { nodes: vec![task], edges: Vec::new() } };
+                ton_renderer::attach_binding(&mut graph, 178, &binding);
                 graph.validate().map_err(|error| TonError::Domain(format!("validate F64 event graph: {error}")))?;
                 backend.prepare(&graph).map_err(|error| TonError::Domain(format!("prepare F64 event graph: {error}")))?;
-                prepared = Some((graph, ton_ucf_frontend::program_hash(&program)));
+                prepared = Some((graph, binding.program_hash));
                 prepared_steps = steps;
             }
             let (graph, hash) = prepared.as_mut().unwrap();
@@ -489,6 +501,45 @@ mod tests {
         result.require_radiative().unwrap();
     }
 
+    fn valid_radiative_batch() -> F64GpuEventTraceBatch {
+        F64GpuEventTraceBatch {
+            records: vec![[0.0; 29]],
+            events: vec![[0.0; 38]],
+            terminations: vec![GpuTraceTermination::Escaped],
+            executed_program_hashes: vec![1],
+        }
+    }
+
+    #[test]
+    fn f64_event_radiative_gate_rejects_malformed_packet_layout() {
+        assert!(valid_radiative_batch().require_radiative().is_ok());
+
+        let mut fractional_count = valid_radiative_batch();
+        fractional_count.events[0][0] = 0.5;
+        assert!(fractional_count.require_radiative().is_err());
+
+        let mut nonzero_tail = valid_radiative_batch();
+        nonzero_tail.events[0][2] = 1.0;
+        nonzero_tail.events[0][11] = 3.0;
+        assert!(nonzero_tail.require_radiative().is_err());
+
+        let mut record_count_mismatch = valid_radiative_batch();
+        record_count_mismatch.records[0][13] = 1.0;
+        assert!(record_count_mismatch.require_radiative().is_err());
+
+        let mut overflow = valid_radiative_batch();
+        overflow.events[0][1] = 1.0;
+        assert!(overflow.require_radiative().is_err());
+    }
+
+    #[test]
+    fn f64_event_radiative_gate_matches_record_event_count() {
+        let mut batch = valid_radiative_batch();
+        batch.records[0][13] = 1.0;
+        batch.events[0][0] = 1.0;
+        batch.events[0][2] = 4.0;
+        assert!(batch.require_radiative().is_ok());
+    }
     #[test]
     fn f64_event_trace_vulkan_matches_reference_packet() {
         let initial = SchwarzschildCartesianNullState::from_ray(1.0, Vec3::new(10.0, 0.0, 0.01), Vec3::new(0.0, 0.0, -1.0)).unwrap();
@@ -530,11 +581,27 @@ mod tests {
         record[9] = 0.04;
         record[19] = initial.energy;
         record[20] = initial.angular_momentum().dot(initial.angular_momentum());
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        for (slot, value) in [1.0, 0.04, 2.0002, 80.0, 6.0, 20.0].into_iter().enumerate() {
+            cpu.with_uniform(slot as u32, ton_ucf_frontend::Value::F64(value));
+        }
+        cpu.with_buffer(1, record.iter().copied().map(ton_ucf_frontend::Value::F64).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F64(0.0); 29]);
+        cpu.with_buffer(3, vec![ton_ucf_frontend::Value::F64(0.0); 38]);
+        cpu.run_parallel(&program, 1).unwrap();
+        let cpu_record = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+        let cpu_events = cpu.buffer(3).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
         backend.write_f64(ResourceId(91), &record).unwrap();
         backend.write_f64(ResourceId(94), &[0.0; 38]).unwrap();
         backend.run_prepared(&graph).unwrap();
         let actual_record = backend.read_f64(ResourceId(92)).unwrap();
         let actual_events = backend.read_f64(ResourceId(94)).unwrap();
+        for (actual, expected) in actual_record.iter().zip(&cpu_record) {
+            assert!((actual - expected).abs() < 1.0e-8, "record CPU/Vulkan mismatch: actual={actual}, expected={expected}");
+        }
+        for (actual, expected) in actual_events.iter().zip(&cpu_events) {
+            assert!((actual - expected).abs() < 1.0e-8, "event CPU/Vulkan mismatch: actual={actual}, expected={expected}");
+        }
         assert_eq!(actual_events[0], expected.count as f64);
         assert_eq!(actual_events[1], 0.0);
         for (actual, expected) in actual_events[2..].iter().zip(expected.flatten()) {
@@ -542,6 +609,194 @@ mod tests {
         }
         assert_eq!(actual_record[13], 1.0);
         assert!((actual_record[14] - reference.disk_events[0].event.state.position.length()).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn f64_event_trace_multi_crossing_packet_matches_reference_cpu_and_vulkan() {
+        let camera = Camera::cinematic(BlackHole::schwarzschild(1.0));
+        let reference_events = ton_geodesic::SchwarzschildEventConfig::builder(1.0)
+            .radial_boundaries(2.0002, 80.0).equatorial_disk(6.0, 20.0)
+            .localization(1.0e-11, 64).build().unwrap();
+        let integration = ton_geodesic::AdaptiveRk4Config::builder()
+            .tolerances(1.0e-12, 1.0e-12).step_range(1.0e-8, 0.04).build().unwrap();
+        let reference_config = ton_geodesic::SchwarzschildAdaptiveTraceConfig::builder(1.0)
+            .events(reference_events).integration(integration).initial_step(0.04)
+            .maximum_steps(32768).build().unwrap();
+        let mut selected = None;
+        'search: for pixel_y in 0..5 {
+            for pixel_x in 0..7 {
+                let horizontal = ((pixel_x as f64 + 0.5) / 7.0 * 2.0 - 1.0) * 7.0 / 5.0;
+                let vertical = 1.0 - (pixel_y as f64 + 0.5) / 5.0 * 2.0;
+                let direction = camera.ray_direction(horizontal, vertical);
+                let initial = SchwarzschildCartesianNullState::from_ray(1.0, camera.position, direction).unwrap();
+                let reference = ton_geodesic::schwarzschild_cartesian_adaptive_trace(initial, reference_config).unwrap();
+                if reference.disk_events.len() > 1 {
+                    selected = Some((pixel_x, pixel_y, initial, reference));
+                    break 'search;
+                }
+            }
+        }
+        let (pixel_x, pixel_y, initial, reference) = selected.expect("the reference camera sample must contain a multi-crossing ray");
+        assert!(matches!(reference.termination, ton_geodesic::AdaptiveTraceTermination::Captured | ton_geodesic::AdaptiveTraceTermination::Escaped));
+        let expected = ton_geodesic::DiskEventBuffer::<4>::from_events(&reference.disk_events).unwrap();
+        assert_eq!(expected.count, reference.disk_events.len());
+        assert!(expected.count > 1);
+
+        let builder = SchwarzschildF64GpuTraceBuilder::new(1.0)
+            .maximum_steps(32768).maximum_step(0.04).chunk_steps(256);
+        let packed = pack(initial);
+        let mut backend = VulkanBackend::new().unwrap();
+        let actual = builder.execute_initial_events_with_backend(&mut backend, &[packed]).unwrap();
+        actual.require_radiative().unwrap();
+        assert_eq!(actual.terminations[0], match reference.termination {
+            ton_geodesic::AdaptiveTraceTermination::Captured => GpuTraceTermination::Captured,
+            ton_geodesic::AdaptiveTraceTermination::Escaped => GpuTraceTermination::Escaped,
+            termination => panic!("unexpected reference termination: {termination:?}"),
+        });
+        assert_eq!(actual.records[0][13], expected.count as f64, "pixel={pixel_x},{pixel_y}");
+        assert_eq!(actual.events[0][0], expected.count as f64, "pixel={pixel_x},{pixel_y}");
+        assert_eq!(actual.events[0][1], 0.0, "pixel={pixel_x},{pixel_y}");
+        for (actual, expected) in actual.events[0][2..2 + expected.count * 9].iter().zip(expected.flatten()) {
+            assert!((actual - expected).abs() < 1.0e-7, "pixel={pixel_x},{pixel_y}, event actual={actual}, expected={expected}");
+        }
+        assert!(actual.events[0][2 + expected.count * 9..].iter().all(|value| *value == 0.0));
+
+        let program = ton_ucf_frontend::SchwarzschildCartesianF64EventTraceBuilder::<4>::new()
+            .maximum_steps(256).surface_tolerance(1.0e-11).build().unwrap();
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        for (slot, value) in [1.0, 0.04, 2.0002, 80.0, 6.0, 20.0].into_iter().enumerate() {
+            cpu.with_uniform(slot as u32, ton_ucf_frontend::Value::F64(value));
+        }
+        let mut record = [0.0; 29];
+        record[..8].copy_from_slice(&packed[..8]);
+        record[9] = 0.04;
+        record[19] = packed[4];
+        record[20] = packed[8];
+        cpu.with_buffer(1, record.iter().copied().map(ton_ucf_frontend::Value::F64).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F64(0.0); 29]);
+        cpu.with_buffer(3, vec![ton_ucf_frontend::Value::F64(0.0); 38]);
+        for _ in 0..128 {
+            cpu.run_parallel(&program, 1).unwrap();
+            let output = cpu.buffer(2).unwrap().to_vec();
+            let terminated = output[8].as_f64().unwrap() != 0.0;
+            cpu.with_buffer(1, output);
+            if terminated { break; }
+        }
+        let cpu_record = cpu.buffer(2).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+        let cpu_events = cpu.buffer(3).unwrap().iter().map(|value| value.as_f64().unwrap()).collect::<Vec<_>>();
+        for (actual, expected) in actual.records[0].iter().zip(cpu_record) {
+            assert!((actual - expected).abs() < 1.0e-7, "pixel={pixel_x},{pixel_y}, record CPU/Vulkan mismatch: actual={actual}, expected={expected}");
+        }
+        for (actual, expected) in actual.events[0].iter().zip(cpu_events) {
+            assert!((actual - expected).abs() < 1.0e-7, "pixel={pixel_x},{pixel_y}, event CPU/Vulkan mismatch: actual={actual}, expected={expected}");
+        }
+        let overflow_program = ton_ucf_frontend::SchwarzschildCartesianF64EventTraceBuilder::<1>::new()
+            .maximum_steps(256).surface_tolerance(1.0e-11).build().unwrap();
+        let mut params = [1.0, 0.04, 2.0002, 80.0, 6.0, 20.0].into_iter().enumerate()
+            .map(|(slot, value)| (format!("uniform_{slot}"), ParamValue::F64(value))).collect::<BTreeMap<_, _>>();
+        params.insert("buffer_2".into(), ParamValue::I64(292));
+        params.insert("buffer_3".into(), ParamValue::I64(294));
+        let task = crate::ucf_physics::dispatch_task(781, &overflow_program, 1, ResourceId(293), 2, 1, Some(ResourceId(291)), params).unwrap();
+        let graph = Graph {
+            resources: ResourceGraph { nodes: [(291u64, 29u64, Access::Read), (292, 29, Access::Write),
+                (293, 1, Access::Write), (294, 11, Access::ReadWrite)].into_iter().map(|(id, elements, access)| ResourceNode {
+                    id: ResourceId(id), kind: ResourceKind::Buffer, domain: Domain::Vram, access,
+                    byte_size: Some(elements * 8),
+                }).collect() },
+            tasks: TaskGraph { nodes: vec![task], edges: Vec::new() },
+        };
+        graph.validate().unwrap();
+        backend.prepare(&graph).unwrap();
+        backend.write_f64(ResourceId(294), &[0.0; 11]).unwrap();
+        cpu.with_buffer(1, record.iter().copied().map(ton_ucf_frontend::Value::F64).collect());
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F64(0.0); 29]);
+        cpu.with_buffer(3, vec![ton_ucf_frontend::Value::F64(0.0); 11]);
+        let mut overflow_record = record.to_vec();
+        for _ in 0..128 {
+            backend.write_f64(ResourceId(291), &overflow_record).unwrap();
+            backend.run_prepared(&graph).unwrap();
+            overflow_record = backend.read_f64(ResourceId(292)).unwrap();
+            cpu.run_parallel(&overflow_program, 1).unwrap();
+            let output = cpu.buffer(2).unwrap().to_vec();
+            for (actual, expected) in overflow_record.iter().zip(&output) {
+                assert!((actual - expected.as_f64().unwrap()).abs() < 1.0e-7);
+            }
+            cpu.with_buffer(1, output);
+            if overflow_record[8] != 0.0 { break; }
+        }
+        let overflow_packet = backend.read_f64(ResourceId(294)).unwrap();
+        assert_eq!(overflow_record[8], actual.records[0][8]);
+        assert_eq!(overflow_record[13], expected.count as f64);
+        assert_eq!(overflow_packet[0], 1.0);
+        assert_eq!(overflow_packet[1], 1.0);
+        for (actual, expected) in overflow_packet.iter().zip(cpu.buffer(3).unwrap()) {
+            assert!((actual - expected.as_f64().unwrap()).abs() < 1.0e-7);
+        }
+        for (actual, expected) in overflow_packet[2..].iter().zip(expected.flatten()) {
+            assert!((actual - expected).abs() < 1.0e-7);
+        }
+        eprintln!("multi-crossing event packet pixel={pixel_x},{pixel_y}, count={}, termination={:?}, capacity-one overflow={}", expected.count, actual.terminations[0], overflow_packet[1]);
+    }
+
+    #[test]
+    fn f64_event_trace_reports_all_terminal_categories_from_one_native_entry() {
+        let captured = pack(SchwarzschildCartesianNullState::from_ray(
+            1.0, Vec3::new(0.0, 0.0, 2.0001), Vec3::new(0.0, 0.0, -1.0)).unwrap());
+        let escaped = pack(SchwarzschildCartesianNullState::from_ray(
+            1.0, Vec3::new(0.0, 0.0, 80.0), Vec3::new(0.0, 0.0, 1.0)).unwrap());
+        let budget = pack(SchwarzschildCartesianNullState::from_ray(
+            1.0, Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0)).unwrap());
+        let mut invalid = escaped;
+        invalid[4] = 2.0;
+        let inputs = [captured, escaped, budget, invalid];
+        let mut backend = VulkanBackend::new().unwrap();
+        let result = SchwarzschildF64GpuTraceBuilder::new(1.0)
+            .maximum_steps(1).chunk_steps(1)
+            .execute_initial_events_with_backend(&mut backend, &inputs).unwrap();
+        assert_eq!(result.terminations, [
+            GpuTraceTermination::Captured,
+            GpuTraceTermination::Escaped,
+            GpuTraceTermination::StepBudgetExhausted,
+            GpuTraceTermination::InvalidInput,
+        ]);
+        assert_eq!(result.records[0][8], 1.0);
+        assert_eq!(result.records[1][8], 2.0);
+        assert_eq!(result.records[2][8], 0.0);
+        assert_eq!(result.records[3][8], 5.0);
+        assert!(result.require_radiative().is_err());
+        for event in &result.events {
+            assert_eq!(event[1], 0.0);
+            assert!(event.iter().all(|value| value.is_finite()));
+        }
+        assert!(result.events[0][0] <= 4.0);
+        assert!(result.events[1][0] <= 4.0);
+        assert_eq!(result.events[2][0], 0.0);
+        assert_eq!(result.events[3][0], 0.0);
+        let program = ton_ucf_frontend::SchwarzschildCartesianF64EventTraceBuilder::<4>::new()
+            .maximum_steps(1).surface_tolerance(1.0e-11).build().unwrap();
+        let mut cpu = ton_ucf_frontend::CpuInterpreter::new();
+        for (slot, value) in [1.0, 0.02, 2.0002, 80.0, 6.0, 20.0].into_iter().enumerate() {
+            cpu.with_uniform(slot as u32, ton_ucf_frontend::Value::F64(value));
+        }
+        let records = inputs.iter().flat_map(|input| {
+            let mut record = [0.0; 29];
+            record[..8].copy_from_slice(&input[..8]);
+            record[9] = 0.02;
+            record[19] = input[4];
+            record[20] = input[8];
+            record.map(ton_ucf_frontend::Value::F64)
+        }).collect();
+        cpu.with_buffer(1, records);
+        cpu.with_buffer(2, vec![ton_ucf_frontend::Value::F64(0.0); 4 * 29]);
+        cpu.with_buffer(3, vec![ton_ucf_frontend::Value::F64(0.0); 4 * 38]);
+        cpu.run_parallel(&program, 4).unwrap();
+        for (actual, expected) in result.records.iter().flatten().zip(cpu.buffer(2).unwrap()) {
+            assert!((actual - expected.as_f64().unwrap()).abs() < 1.0e-8);
+        }
+        for (actual, expected) in result.events.iter().flatten().zip(cpu.buffer(3).unwrap()) {
+            assert!((actual - expected.as_f64().unwrap()).abs() < 1.0e-8);
+        }
+        eprintln!("event trace native/CPU terminal categories={:?}", result.terminations);
     }
 
     #[test]

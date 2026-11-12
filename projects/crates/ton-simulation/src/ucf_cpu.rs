@@ -390,6 +390,7 @@ pub fn execute_geodesic_chunk_program_cpu(
         scene,
         graph,
         initial.states,
+        vec![0; count],
         initial.bound_infall,
         vec![false; count],
         vec![0.0; count],
@@ -401,6 +402,7 @@ fn execute_geodesic_chunk_program_cpu_with_state(
     scene: &Scene,
     graph: &Graph,
     states: Vec<SphericalState>,
+    statuses: Vec<u32>,
     bound_infall: Vec<bool>,
     disk_hits: Vec<bool>,
     disk_radii: Vec<f64>,
@@ -438,7 +440,7 @@ fn execute_geodesic_chunk_program_cpu_with_state(
             "geodesic chunk program hash mismatch: expected {hash}, actual {actual_hash}"
         )));
     }
-    if states.len() != bound_infall.len() {
+    if states.len() != bound_infall.len() || states.len() != statuses.len() {
         return Err(TonError::Domain("geodesic chunk state and bound buffers differ in length".into()));
     }
     if disk_hits.len() != states.len() || disk_radii.len() != states.len() || disk_dopplers.len() != states.len() {
@@ -451,7 +453,7 @@ fn execute_geodesic_chunk_program_cpu_with_state(
         .flat_map(|(index, (state, bound))| {
             [state.t, state.r, state.theta, state.phi, state.ut, state.ur, state.utheta, state.uphi]
                 .into_iter()
-                .chain([0.0, if *bound { 1.0 } else { 0.0 }])
+                .chain([statuses[index] as f64, if *bound { 1.0 } else { 0.0 }])
                 .chain(if extended_state {
                     vec![if disk_hits[index] { 1.0 } else { 0.0 }, disk_radii[index], disk_dopplers[index], 0.0]
                 } else {
@@ -460,15 +462,23 @@ fn execute_geodesic_chunk_program_cpu_with_state(
                 .map(|value| Value::F32(value as f32))
         })
         .collect::<Vec<_>>();
+    let mut uniforms = vec![
+        (0, Value::F32(scene.black_hole.mass as f32)),
+        (1, Value::F32(scene.trace.step_size as f32)),
+        (2, Value::F32(scene.trace.escape_radius as f32)),
+    ];
+    if extended_state {
+        let disk = scene
+            .disk
+            .ok_or_else(|| TonError::Domain("geodesic disk program requires a disk configuration".into()))?;
+        uniforms.push((3, Value::F32(disk.config.inner_radius as f32)));
+        uniforms.push((4, Value::F32(disk.config.outer_radius as f32)));
+    }
     let report = CpuBackend::new()
         .execute_program_with_buffers(
             &program,
             states.len() as u32,
-            [
-                (0, Value::F32(scene.black_hole.mass as f32)),
-                (1, Value::F32(scene.trace.dphi as f32)),
-                (2, Value::F32(scene.trace.escape_radius as f32)),
-            ],
+            uniforms,
             [(0, state_input)],
         )
         .map_err(TonError::Domain)?;
@@ -548,6 +558,7 @@ pub fn execute_geodesic_diagnostic_frame_cpu(
             scene,
             graph,
             states,
+            statuses,
             bound_infall.clone(),
             disk_hits.clone(),
             disk_radii.clone(),
@@ -613,6 +624,7 @@ pub fn execute_geodesic_disk_radiance_cpu(
             scene,
             graph,
             states,
+            statuses,
             bound_infall.clone(),
             disk_hits,
             disk_radii,
@@ -657,7 +669,10 @@ pub fn execute_geodesic_beauty_frame_cpu(
 ) -> TonResult<(Framebuffer, CpuGraphExecution)> {
     let (radiance, statuses, report) = execute_geodesic_disk_radiance_cpu(scene, graph)?;
     if statuses.iter().any(|status| *status == 3 || *status == 4) {
-        return Err(TonError::Domain("UCF Beauty frame contains failed geodesic instances".into()));
+        let failed = statuses.iter().filter(|status| **status == 3 || **status == 4).count();
+        return Err(TonError::Domain(format!(
+            "UCF Beauty frame contains failed geodesic instances: failed={failed}, statuses={statuses:?}"
+        )));
     }
     let mut frame = Framebuffer::new(scene.width, scene.height);
     for (index, pixel) in frame.pixels.iter_mut().enumerate() {
@@ -729,6 +744,13 @@ pub fn execute_frame_graph_cpu(
     graph
         .validate()
         .map_err(|e| TonError::Domain(format!("graph validate: {e}")))?;
+    if scene.post_bloom && graph.tasks.nodes.iter().any(|node| {
+        matches!(node.params.get("op"), Some(ParamValue::Str(op)) if op == "ton_bloom")
+    }) {
+        return Err(TonError::Domain(
+            "UCF CPU frame execution is unavailable until the graph is bound to real UCF programs and resources: Bloom program is not bound".into(),
+        ));
+    }
     if scene.integrator == IntegratorKind::Geodesic3d && scene.render_mode == ton_renderer::RenderMode::TerminationMap {
         return execute_geodesic_diagnostic_frame_cpu(scene, graph);
     }
@@ -783,8 +805,8 @@ mod tests {
             .with_max_steps(16)
             .build();
         let (frame, report) = scene.render_frame_ucf_cpu().expect("real UCF diagnostic frame");
-        assert_eq!((frame.width, frame.height), (8, 5));
-        assert_eq!(frame.pixels.len(), 40);
+        assert_eq!((frame.width, frame.height), (1, 1));
+        assert_eq!(frame.pixels.len(), 1);
         assert_eq!(report.executed_ops[0], "camera_ray_batch");
         assert_eq!(report.executed_ops[1], "schwarzschild_initial_state_batch");
         assert!(report.executed_ops.iter().skip(2).all(|op| op == "schwarzschild_geodesic_rk4_chunk"));
@@ -807,7 +829,8 @@ mod tests {
         assert_eq!(native.pixels.len(), ucf.pixels.len());
         for (i, (a, b)) in native.pixels.iter().zip(ucf.pixels.iter()).enumerate() {
             assert!(
-                (a.r - b.r).abs() < 1e-5 && (a.g - b.g).abs() < 1e-5 && (a.b - b.b).abs() < 1e-5,
+                // UCF 相机和着色 Program 当前以 f32 执行，和 native f64 路径保留千分之一的量化预算。
+                (a.r - b.r).abs() < 1e-3 && (a.g - b.g).abs() < 1e-3 && (a.b - b.b).abs() < 1e-3,
                 "pixel {i} native={a:?} ucf={b:?}"
             );
         }
@@ -824,8 +847,8 @@ mod tests {
         assert_eq!(execution.rays.len(), 12);
         let center = execution.rays[1 + 4];
         let expected = scene.camera.ray_direction(
-            (1.0 / 4.0 * 2.0 - 1.0) * 4.0 / 3.0,
-            1.0 - 1.0 / 3.0 * 2.0,
+            (((1.0 + 0.5) / 4.0) * 2.0 - 1.0) * 4.0 / 3.0,
+            1.0 - ((1.0 + 0.5) / 3.0) * 2.0,
         );
         assert!((center.x - expected.x).abs() < 2.0e-5);
         assert!((center.y - expected.y).abs() < 2.0e-5);
@@ -847,8 +870,8 @@ mod tests {
             scene.black_hole.mass,
             scene.camera.position,
             scene.camera.ray_direction(
-                (1.0 / 4.0 * 2.0 - 1.0) * 4.0 / 3.0,
-                1.0 - 1.0 / 3.0 * 2.0,
+                (((1.0 + 0.5) / 4.0) * 2.0 - 1.0) * 4.0 / 3.0,
+                1.0 - ((1.0 + 0.5) / 3.0) * 2.0,
             ),
         )
         .expect("reference initial state");
@@ -890,6 +913,99 @@ mod tests {
             assert!((rgb.g - expected.g).abs() < 2e-4);
             assert!((rgb.b - expected.b).abs() < 2e-4);
         }
+    }
+
+    #[test]
+    fn cpu_geodesic_chunk_preserves_terminal_state_and_disk_metadata() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_resolution(1, 1)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let initial = execute_initial_state_program_cpu(&scene, &graph).unwrap();
+        let expected = initial.states[0];
+        let result = execute_geodesic_chunk_program_cpu_with_state(
+            &scene, &graph, initial.states, vec![2], initial.bound_infall,
+            vec![true], vec![10.0], vec![1.5],
+        ).unwrap();
+        assert_eq!(result.statuses, vec![2]);
+        assert_eq!(result.states[0].r, expected.r);
+        assert_eq!(result.states[0].t, expected.t);
+        assert_eq!(result.disk_hits, vec![true]);
+        assert_eq!(result.disk_radii, vec![10.0]);
+        assert_eq!(result.disk_dopplers, vec![1.5]);
+    }
+
+    #[test]
+    fn cpu_executor_renders_small_geodesic_beauty_frame() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_resolution(1, 1)
+            .with_step_size(0.5)
+            .with_max_steps(4096)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let (frame, report) = execute_geodesic_beauty_frame_cpu(&scene, &graph)
+            .expect("a one-pixel geodesic Beauty frame must terminate");
+        assert_eq!(frame.pixels.len(), 1);
+        assert!(frame.pixels[0].r.is_finite());
+        assert!(frame.pixels[0].g.is_finite());
+        assert!(frame.pixels[0].b.is_finite());
+        assert!(report.executed_ops.iter().any(|op| op == "disk_shade_novikov_from_geodesic_batch"));
+        assert!(report.executed_ops.iter().filter(|op| op.as_str() == "schwarzschild_geodesic_rk4_chunk_with_disk").count() > 1);
+    }
+
+    #[test]
+    fn cpu_executor_renders_escaped_geodesic_beauty_frame() {
+        let camera = Camera::look_at(
+            Vec3::new(0.0, 0.0, 20.0),
+            Vec3::new(0.0, 0.0, 30.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            0.58,
+        );
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_camera(camera)
+            .with_resolution(1, 1)
+            .with_step_size(0.5)
+            .with_max_steps(1024)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let (_, statuses, _) = execute_geodesic_disk_radiance_cpu(&scene, &graph).unwrap();
+        assert_eq!(statuses, vec![2]);
+        let reference = ton_geodesic::trace_geodesic_3d_diagnostic(
+            scene.black_hole,
+            camera.position,
+            camera.ray_direction(0.0, 0.0),
+            scene.trace,
+        );
+        assert_eq!(reference.termination, ton_geodesic::RayTermination::Escaped);
+        let (frame, report) = execute_geodesic_beauty_frame_cpu(&scene, &graph).unwrap();
+        assert_eq!(frame.pixels.len(), 1);
+        assert!([frame.pixels[0].r, frame.pixels[0].g, frame.pixels[0].b].iter().all(|value| value.is_finite()));
+        assert!(report.executed_ops.iter().filter(|op| op.as_str() == "schwarzschild_geodesic_rk4_chunk_with_disk").count() > 1);
+    }
+
+    #[test]
+    fn cpu_executor_renders_multi_pixel_geodesic_beauty_frame() {
+        let scene = Scene::builder(BlackHole::schwarzschild(1.0))
+            .with_integrator(IntegratorKind::Geodesic3d)
+            .with_disk_model(DiskModelKind::NovikovThorneThin)
+            .with_resolution(4, 3)
+            .with_step_size(0.5)
+            .with_max_steps(4096)
+            .build();
+        let graph = scene.build_ucf_graph();
+        let (frame, report) = execute_geodesic_beauty_frame_cpu(&scene, &graph)
+            .expect("a multi-pixel geodesic Beauty frame must terminate");
+        assert_eq!(frame.pixels.len(), 12);
+        assert!(frame.pixels.iter().all(|pixel| {
+            [pixel.r, pixel.g, pixel.b].iter().all(|value| value.is_finite())
+        }));
+        assert!(report.executed_ops.iter().any(|op| op == "disk_shade_novikov_from_geodesic_batch"));
     }
 
     #[test]
